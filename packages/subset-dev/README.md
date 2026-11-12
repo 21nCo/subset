@@ -51,7 +51,7 @@ Because the tool runs in the launcher's own process, there is no second process 
 
 The version is a dist-tag the release workflow publishes (`latest`, `beta`, `next`) or an exact version (`0.2.0`, `0.2.0-beta.3`). The launcher refuses ranges (including tag-like ones such as `x` or `v1`) and other npm specs, so an argument cannot turn into an npm option or a file, URL or git dependency. Unknown tools and commands exit with code 2 without starting npm.
 
-When npm cannot fetch the tool, the launcher asks the registry once (`npm view <package> dist-tags --json`, for at most 30 seconds) and exits with code 1 and one of these messages:
+When npm cannot fetch the tool, the launcher asks the registry once (`npm dist-tag ls <package> --json`, for at most 30 seconds; unlike `npm view`, it lists the dist-tags of a package that has no `latest`) and exits with code 1 and one of these messages:
 
 - `<tool> is not on npm yet.` when the registry has no such package;
 - `<tool> has no live release yet; try subset <tool>@beta` when the default version was asked for and the package has a `beta` dist-tag but no `latest`;

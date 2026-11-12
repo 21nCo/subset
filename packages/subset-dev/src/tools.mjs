@@ -40,27 +40,36 @@ export function npmLocateArgs({ spec }) {
 
 /**
  * The npm arguments that ask the registry for a tool's dist-tags. The launcher runs them only after npm could not
- * fetch the tool, to say why.
+ * fetch the tool, to say why. `npm dist-tag ls` reads the registry's dist-tags of the package directly; `npm view
+ * <package> dist-tags` would first pick the `latest` version, and so prints nothing for a package with only a beta.
+ * With --json, npm prints an error (E404 for no such package) as JSON on stdout; the tags it prints as `tag: version`
+ * lines.
  */
 export function npmDistTagsArgs({ package: name }) {
-  return ['view', name, 'dist-tags', '--json'];
+  return ['dist-tag', 'ls', name, '--json'];
+}
+
+// The dist-tags in the answer of `npm dist-tag ls --json`: `tag: version` lines, or a JSON object of them.
+function distTags(stdout) {
+  try {
+    const answer = JSON.parse(stdout);
+    return typeof answer === 'object' && answer !== null && !Array.isArray(answer) ? answer : undefined;
+  } catch {
+    const lines = stdout.split(/\r?\n/).filter((line) => line.trim() !== '');
+    const entries = lines.map((line) => /^([^\s:]+): (\S+)$/.exec(line.trim()));
+    return lines.length > 0 && entries.every(Boolean) ? Object.fromEntries(entries.map(([, tag, version]) => [tag, version])) : undefined;
+  }
 }
 
 /**
- * Why npm could not fetch a resolved tool, from the result ({ status, stdout }) of `npm view <package> dist-tags
- * --json`: the registry has no such package, the tool has no live release but a beta (when the default `latest` was
- * asked for), or, for anything else (a network failure, an unreadable answer, a missing version), the fetch failure.
+ * Why npm could not fetch a resolved tool, from the result ({ status, stdout }) of npmDistTagsArgs: the registry has
+ * no such package, the tool has no live release but a beta (when the default `latest` was asked for), or, for
+ * anything else (a network failure, an unreadable answer, a missing version), the fetch failure.
  */
 export function fetchFailureMessage(tool, probe) {
-  let answer;
-  try {
-    answer = JSON.parse(probe?.stdout ?? '');
-  } catch {
-    answer = undefined;
-  }
-  const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
-  if (probe?.status !== 0 && isObject(answer) && answer.error?.code === 'E404') return `${tool.name} is not on npm yet.`;
-  if (probe?.status === 0 && isObject(answer) && tool.version === 'latest' && !Object.hasOwn(answer, 'latest') && typeof answer.beta === 'string') {
+  const tags = typeof probe?.stdout === 'string' ? distTags(probe.stdout) : undefined;
+  if (probe?.status !== 0 && tags?.error?.code === 'E404') return `${tool.name} is not on npm yet.`;
+  if (probe?.status === 0 && tags && tool.version === 'latest' && !Object.hasOwn(tags, 'latest') && typeof tags.beta === 'string') {
     return `${tool.name} has no live release yet; try subset ${tool.name}@beta`;
   }
   return `npm could not fetch ${tool.spec}.`;

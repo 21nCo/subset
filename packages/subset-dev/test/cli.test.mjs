@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,7 +16,7 @@ const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 // A stand-in npm and an installed @subset.dev/usage. The npm appends its arguments to the npm log, one JSON line per
-// run. `npm view` prints FAKE_VIEW_OUT and exits with FAKE_VIEW_EXIT; anything else prints a PATH whose
+// run. `npm dist-tag` prints FAKE_TAGS_OUT and exits with FAKE_TAGS_EXIT; anything else prints a PATH whose
 // node_modules/.bin folder holds the tool, and exits with FAKE_NPM_EXIT. The tool prints its arguments as JSON and
 // exits with TOOL_EXIT; with TOOL_PRINT_ENV it prints that environment variable instead; with TOOL_WAIT it prints
 // `ready <pid>`, then reports each signal it gets.
@@ -48,9 +49,9 @@ mkdirSync(path.join(root, 'npm'));
 writeFileSync(
   path.join(root, 'npm', 'npm-cli.js'),
   `require('node:fs').appendFileSync(${JSON.stringify(npmLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');
-   if (process.argv[2] === 'view') {
-     process.stdout.write(process.env.FAKE_VIEW_OUT ?? '');
-     process.exit(Number(process.env.FAKE_VIEW_EXIT ?? 0));
+   if (process.argv[2] === 'dist-tag') {
+     process.stdout.write(process.env.FAKE_TAGS_OUT ?? '');
+     process.exit(Number(process.env.FAKE_TAGS_EXIT ?? 0));
    }
    process.stdout.write('some npm output\\n' + ${JSON.stringify(`/elsewhere/node_modules/.bin${path.delimiter}${path.join(modules, '.bin')}${path.delimiter}/usr/bin`)} + '\\n');
    process.exit(Number(process.env.FAKE_NPM_EXIT ?? 0));`
@@ -102,7 +103,7 @@ test('runs the tool with the PATH npm reported', () => {
 
 test("exits with the tool's exit code, and fails when npm or the tool's bin does", () => {
   assert.equal(subset(['usage'], { TOOL_EXIT: '3' }).status, 3);
-  const npmFailed = subset(['usage'], { FAKE_NPM_EXIT: '7', FAKE_VIEW_OUT: '{"latest":"0.2.0"}' });
+  const npmFailed = subset(['usage'], { FAKE_NPM_EXIT: '7', FAKE_TAGS_OUT: 'latest: 0.2.0\n' });
   assert.equal(npmFailed.status, 1);
   assert.match(npmFailed.stderr, /npm could not fetch @subset\.dev\/usage@latest/);
   // The fake prefix holds usage 0.2.0 only.
@@ -196,12 +197,12 @@ test('routes arguments to help, version, a command or a tool', () => {
 
 test('says why npm could not fetch a tool, asking the registry once', () => {
   const cases = [
-    // No such package on npm: npm view --json prints the E404 error on stdout.
-    [{ FAKE_VIEW_EXIT: '1', FAKE_VIEW_OUT: JSON.stringify({ error: { code: 'E404', summary: 'Not Found' } }) }, 'subset: usage is not on npm yet.\n'],
+    // No such package on npm: with --json, npm prints the E404 error on stdout.
+    [{ FAKE_TAGS_EXIT: '1', FAKE_TAGS_OUT: JSON.stringify({ error: { code: 'E404', summary: 'Not Found' } }) }, 'subset: usage is not on npm yet.\n'],
     // Only a beta.
-    [{ FAKE_VIEW_OUT: JSON.stringify({ beta: '0.2.0-beta.1' }) }, 'subset: usage has no live release yet; try subset usage@beta\n'],
+    [{ FAKE_TAGS_OUT: 'beta: 0.2.0-beta.1\n' }, 'subset: usage has no live release yet; try subset usage@beta\n'],
     // The registry cannot be reached.
-    [{ FAKE_VIEW_EXIT: '1', FAKE_VIEW_OUT: JSON.stringify({ error: { code: 'ENOTFOUND', summary: 'request failed' } }) }, 'subset: npm could not fetch @subset.dev/usage@latest.\n']
+    [{ FAKE_TAGS_EXIT: '1', FAKE_TAGS_OUT: JSON.stringify({ error: { code: 'ENOTFOUND', summary: 'request failed' } }) }, 'subset: npm could not fetch @subset.dev/usage@latest.\n']
   ];
   for (const [extra, stderr] of cases) {
     npmCalls();
@@ -211,19 +212,116 @@ test('says why npm could not fetch a tool, asking the registry once', () => {
     assert.equal(result.stderr, stderr);
     assert.deepEqual(npmCalls(), [npmLocateArgs(resolveTool('usage')), npmDistTagsArgs(resolveTool('usage'))], stderr);
   }
-  assert.deepEqual(npmDistTagsArgs(resolveTool('timer@beta')), ['view', '@subset.dev/timer', 'dist-tags', '--json']);
+  assert.deepEqual(npmDistTagsArgs(resolveTool('timer@beta')), ['dist-tag', 'ls', '@subset.dev/timer', '--json']);
 });
 
 test('reports the fetch failure when the registry answer does not explain it', () => {
   const usage = resolveTool('usage');
   const failure = 'npm could not fetch @subset.dev/usage@latest.';
-  // A live release exists, the answer is unreadable or not an object, or the probe did not run or timed out.
-  for (const probe of [{ status: 0, stdout: '{"latest":"0.2.0","beta":"0.3.0-beta.1"}' }, { status: 0, stdout: 'oops' }, { status: 0, stdout: '["beta"]' }, { status: 0, stdout: 'null' }, { status: 1, stdout: '' }, { status: null, stdout: '' }, undefined]) {
+  // A live release exists, the answer is empty (what `npm view <package> dist-tags` prints for a package with only a
+  // beta), unreadable or not an object, or the probe did not run or timed out.
+  for (const probe of [
+    { status: 0, stdout: 'beta: 0.3.0-beta.1\nlatest: 0.2.0\n' },
+    { status: 0, stdout: '{"latest":"0.2.0","beta":"0.3.0-beta.1"}' },
+    { status: 0, stdout: '' },
+    { status: 0, stdout: 'oops' },
+    { status: 0, stdout: 'beta: 0.2.0-beta.1\noops\n' },
+    { status: 0, stdout: '["beta"]' },
+    { status: 0, stdout: 'null' },
+    { status: 1, stdout: '' },
+    { status: null, stdout: '' },
+    undefined
+  ]) {
     assert.equal(fetchFailureMessage(usage, probe), failure, JSON.stringify(probe));
   }
+  // The tags as `tag: version` lines (what npm prints) or as a JSON object.
+  const hint = 'usage has no live release yet; try subset usage@beta';
+  assert.equal(fetchFailureMessage(usage, { status: 0, stdout: 'beta: 0.2.0-beta.1\r\nnext: 0.3.0-alpha.1\r\n' }), hint);
+  assert.equal(fetchFailureMessage(usage, { status: 0, stdout: '{"beta":"0.2.0-beta.1"}' }), hint);
   // Only the default version is told to try the beta; a missing exact version or tag is the fetch failure.
-  assert.equal(fetchFailureMessage(resolveTool('usage@0.9.0'), { status: 0, stdout: '{"beta":"0.2.0-beta.1"}' }), 'npm could not fetch @subset.dev/usage@0.9.0.');
+  assert.equal(fetchFailureMessage(resolveTool('usage@0.9.0'), { status: 0, stdout: 'beta: 0.2.0-beta.1\n' }), 'npm could not fetch @subset.dev/usage@0.9.0.');
   assert.equal(fetchFailureMessage(resolveTool('usage@next'), { status: 1, stdout: '{"error":{"code":"E404"}}' }), 'usage is not on npm yet.');
+});
+
+// A registry on 127.0.0.1 that serves @subset.dev/usage with the given dist-tags (no package at all for null), and
+// whose tarballs are missing, so npm can never fetch the tool. Counts the dist-tags requests.
+async function startRegistry(tags) {
+  const name = '@subset.dev/usage';
+  const requests = { distTags: 0 };
+  const server = createServer((request, response) => {
+    const url = decodeURIComponent(request.url ?? '');
+    const json = (status, body) => {
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(body));
+    };
+    if (url === `/-/package/${name}/dist-tags`) {
+      requests.distTags += 1;
+      return tags ? json(200, tags) : json(404, { error: 'Not found' });
+    }
+    if (url === `/${name}` && tags) {
+      const { port } = server.address();
+      const versions = Object.fromEntries(
+        Object.values(tags).map((version) => [version, { name, version, bin: { 'subset-usage': 'cli.mjs' }, dist: { tarball: `http://127.0.0.1:${port}/${name}/-/usage-${version}.tgz` } }])
+      );
+      return json(200, { name, 'dist-tags': tags, versions });
+    }
+    return json(404, { error: 'Not found' });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return { url: `http://127.0.0.1:${server.address().port}/`, requests, close: () => server.close() };
+}
+
+// Runs the launcher with the real npm (the one running the tests, or npm from PATH) against a registry, from a folder
+// outside the repository, with no user or global npm configuration.
+async function subsetWithRealNpm(args, registry) {
+  const folder = mkdtempSync(path.join(root, 'real-npm-'));
+  for (const file of ['user.npmrc', 'global.npmrc']) writeFileSync(path.join(folder, file), '');
+  const realEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^npm_config_/i.test(key)));
+  const child = spawn(process.execPath, [cli, ...args], {
+    cwd: folder,
+    env: {
+      ...realEnv,
+      npm_config_registry: registry.url,
+      npm_config_cache: path.join(folder, 'cache'),
+      npm_config_userconfig: path.join(folder, 'user.npmrc'),
+      npm_config_globalconfig: path.join(folder, 'global.npmrc'),
+      npm_config_fetch_retries: '0',
+      npm_config_update_notifier: 'false',
+      npm_config_audit: 'false',
+      npm_config_fund: 'false'
+    }
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  const [status] = await once(child, 'close');
+  return { status, stdout, stderr };
+}
+
+test('says why the real npm could not fetch a tool, from a local registry', { timeout: 120_000 }, async () => {
+  const cases = [
+    // Only a beta: npm finds no `latest` to fetch, and `npm view <package> dist-tags` would print nothing.
+    [{ beta: '0.2.0-beta.1' }, 'subset: usage has no live release yet; try subset usage@beta\n'],
+    // No such package.
+    [null, 'subset: usage is not on npm yet.\n'],
+    // A live release whose tarball cannot be fetched, with or without a beta.
+    [{ latest: '0.1.0' }, 'subset: npm could not fetch @subset.dev/usage@latest.\n'],
+    [{ latest: '0.1.0', beta: '0.2.0-beta.1' }, 'subset: npm could not fetch @subset.dev/usage@latest.\n']
+  ];
+  for (const [tags, message] of cases) {
+    const registry = await startRegistry(tags);
+    try {
+      const result = await subsetWithRealNpm(['usage', 'status'], registry);
+      assert.equal(result.status, 1, `${message}${result.stderr}`);
+      assert.equal(result.stdout, '', message);
+      assert.ok(result.stderr.endsWith(message), `${message}${result.stderr}`);
+      assert.equal(registry.requests.distTags, 1, message);
+    } finally {
+      registry.close();
+    }
+  }
 });
 
 test('tells the tool it was started as subset <tool>', () => {
