@@ -12,7 +12,9 @@
 //          app's DMG and a SHA256SUMS line for it, from the GitHub REST releases list (with GITHUB_TOKEN when set).
 //          -dev.<n> builds are never listed.
 //   tools  release-packages.json entries whose package has a bin (other than the subset launcher), with the
-//          latest and beta dist-tags from `npm view <package> dist-tags --json`; a package npm has never seen is left out.
+//          latest and beta dist-tags from `npm view <package> dist-tags --json` (and `npm view <package>@beta ...` when
+//          npm prints nothing because the package has no latest). A package npm has never seen, or with neither tag,
+//          is left out, and so is a tag whose version the schema does not allow (a latest that is a pre-release).
 //
 // The document is checked against the schema, the 256 KiB limit and the uniqueness rules before it is written, and
 // written to --out (atomically) or stdout. --recorded <file> answers every GitHub and npm request from a file of
@@ -46,8 +48,9 @@ const LAUNCHER_PACKAGE = 'subset.dev';
 // --- Validation -----------------------------------------------------------------------------------------------------
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
+const catalogSchema = JSON.parse(readFileSync(path.join(feedDirectory, 'catalog.schema.json'), 'utf8'));
 const schemas = {
-  catalog: ajv.compile(JSON.parse(readFileSync(path.join(feedDirectory, 'catalog.schema.json'), 'utf8'))),
+  catalog: ajv.compile(catalogSchema),
   receipt: ajv.compile(JSON.parse(readFileSync(path.join(feedDirectory, 'receipt.schema.json'), 'utf8')))
 };
 
@@ -168,6 +171,11 @@ function liveChannel(listing) {
   return { version: surface.version, url: surface.url, sha256: surface.sha256, releaseUrl: surface.releaseUrl };
 }
 
+// The dist-tags a feed lists, with the versions the schema allows each: latest is x.y.z, beta is x.y.z-beta.<n>.
+const DIST_TAG_PATTERNS = Object.fromEntries(
+  Object.entries(catalogSchema.$defs.tool.properties.distTags.properties).map(([name, { pattern }]) => [name, new RegExp(pattern)])
+);
+
 // The tool a release-packages.json entry names: its one `subset-<slug>` bin, or undefined when it has no bin.
 export function toolFor(target, packageManifest) {
   const { bin } = packageManifest;
@@ -218,7 +226,11 @@ export async function buildCatalogFeed({ capabilities, manifests, releaseTargets
     if (tool === undefined) continue;
     const published = await npm.distTags(tool.package);
     if (published === null) continue;
-    const distTags = Object.fromEntries(['latest', 'beta'].filter((name) => typeof published[name] === 'string').map((name) => [name, published[name]]));
+    const distTags = Object.fromEntries(
+      Object.entries(DIST_TAG_PATTERNS)
+        .filter(([name, pattern]) => typeof published[name] === 'string' && pattern.test(published[name]))
+        .map(([name]) => [name, published[name]])
+    );
     if (Object.keys(distTags).length === 0) continue;
     tools.push({ ...tool, distTags });
   }
@@ -262,22 +274,50 @@ export function liveGitHub(token = process.env.GITHUB_TOKEN) {
   };
 }
 
-export function liveNpm() {
+// Runs npm and settles with its exit status and stdout; npm that cannot start, times out or prints too much rejects.
+function runNpm(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: REQUEST_TIMEOUT_MS * 2, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      if (error && typeof error.code !== 'number') reject(new Error(`npm ${args.join(' ')} did not finish: ${error.message}`));
+      else resolve({ status: error ? error.code : 0, stdout });
+    });
+  });
+}
+
+const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+// One `npm view <spec> dist-tags --json`: { tags } when npm answers, { missing: true } for E404 (no such package or
+// tag), {} when npm prints nothing. Anything else (another error, an answer that is not a JSON object) rejects.
+async function viewDistTags(command, spec) {
+  const args = ['view', spec, 'dist-tags', '--json'];
+  const { status, stdout } = await runNpm(command, args);
+  let answer;
+  try {
+    answer = stdout.trim() === '' ? undefined : JSON.parse(stdout);
+  } catch {
+    answer = undefined;
+  }
+  if (status === 0 && stdout.trim() === '') return {};
+  if (status === 0 && isObject(answer) && answer.error === undefined) return { tags: answer };
+  if (status !== 0 && answer?.error?.code === 'E404') return { missing: true };
+  throw new Error(`npm ${args.join(' ')} failed (exit ${status}): ${answer?.error?.summary ?? 'no JSON answer'}`);
+}
+
+/**
+ * The npm registry's dist-tags, through the npm command (`command`, npm by default): the package's dist-tags, null
+ * when npm has no such package, or {} when it has neither a latest nor a beta. `npm view <package>` resolves the
+ * latest version first and prints nothing for a package that has none, so then the beta is asked for; its answer
+ * holds the package's dist-tags too. (`npm dist-tag ls` is not used: the registry answers 401, not 404, for a scoped
+ * package it does not have.)
+ */
+export function liveNpm({ command = 'npm' } = {}) {
   return {
-    distTags: (name) =>
-      new Promise((resolve, reject) => {
-        execFile('npm', ['view', name, 'dist-tags', '--json'], { timeout: REQUEST_TIMEOUT_MS * 2, maxBuffer: 1024 * 1024 }, (error, stdout) => {
-          let answer;
-          try {
-            answer = JSON.parse(stdout);
-          } catch {
-            answer = undefined;
-          }
-          if (!error && answer && typeof answer === 'object' && !Array.isArray(answer)) return resolve(answer);
-          if (answer?.error?.code === 'E404') return resolve(null);
-          reject(new Error(`npm view ${name} dist-tags failed: ${answer?.error?.summary ?? error?.message ?? 'no JSON answer'}`));
-        });
-      })
+    async distTags(name) {
+      const latest = await viewDistTags(command, name);
+      if (latest.missing) return null;
+      if (latest.tags) return latest.tags;
+      return (await viewDistTags(command, `${name}@beta`)).tags ?? {};
+    }
   };
 }
 

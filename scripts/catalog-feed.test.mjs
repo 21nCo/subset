@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { MAX_FEED_BYTES, buildCatalogFeed, catalogFeedProblems, receiptProblems, recordedSources } from './catalog-feed.mjs';
+import { MAX_FEED_BYTES, buildCatalogFeed, catalogFeedProblems, liveNpm, receiptProblems, recordedSources } from './catalog-feed.mjs';
 import { readMacosReleaseManifests } from './release-macos.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -64,7 +64,9 @@ test('every valid fixture is accepted and every invalid one is refused for its o
     'receipt-invalid-live-with-build': /\/build boolean schema is false/,
     'receipt-invalid-beta-without-build': /must have required property 'build'/,
     'receipt-invalid-unknown-field': /must NOT have additional properties \(bundleId\)/,
-    'receipt-invalid-relative-path': /\/path must match pattern/
+    'receipt-invalid-relative-path': /\/path must match pattern/,
+    'receipt-invalid-other-applications-folder': /\/path must match pattern/,
+    'receipt-invalid-parent-segment': /\/path must match pattern/
   };
   const names = readdirSync(fixtures).filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -'.json'.length));
   // The contract both readers test against: these cases must stay.
@@ -78,6 +80,26 @@ test('every valid fixture is accepted and every invalid one is refused for its o
     if (verdict === 'valid') assert.deepEqual(problems, [], `${name} should be valid`);
     else assert.match(problems.join('\n'), reasons[name] ?? /(?!)/, `${name} is refused for another reason: ${problems.join('; ')}`);
   }
+});
+
+test('a receipt path is an app directly in /Applications or a user\'s ~/Applications', () => {
+  const live = readJson(path.join(fixtures, 'receipt-valid-live.json'));
+  const problems = (appPath) => receiptProblems(JSON.stringify({ ...live, path: appPath }));
+  for (const accepted of ['/Applications/Breaks.app', '/Users/alex/Applications/Breaks.app', '/Applications/Screen Shot.app']) assert.deepEqual(problems(accepted), [], accepted);
+  const refused = [
+    '/tmp/x/Applications/Breaks.app',
+    '/Volumes/USB/Applications/Breaks.app',
+    '/Users/alex/Desktop/Applications/Breaks.app',
+    '/Users/./Applications/Breaks.app',
+    '/Applications/./Breaks.app',
+    '/Applications/.Breaks.app',
+    '/Applications/Utilities/Breaks.app',
+    'Applications/Breaks.app',
+    '/Applications/Bre\naks.app',
+    '/Applications/Bre\u0000aks.app',
+    '/Users/al\u007fex/Applications/Breaks.app'
+  ];
+  for (const appPath of refused) assert.match(problems(appPath).join(), /\/path must match pattern/, JSON.stringify(appPath));
 });
 
 test('the size limit is 256 KiB of the document as read, whatever it holds', () => {
@@ -223,6 +245,86 @@ test('npm tools carry their latest and beta dist-tags; unpublished packages and 
   // A bin that is not subset-<slug> is a mistake in release-packages.json, not a tool to guess at.
   const odd = [{ slug: 'odd', path: 'packages/odd', name: '@subset.dev/odd', manifest: { name: '@subset.dev/odd', bin: { odd: 'cli.mjs' } } }];
   await assert.rejects(build({ targets: odd, npm: {} }), /exactly one bin, subset-odd/);
+});
+
+test('a dist-tag whose version the schema does not allow is left out, and a tool with none left is not listed', async () => {
+  const feed = await build({
+    npm: { ...npmNone, '@subset.dev/usage': { latest: '0.3.0-beta.1', beta: '0.3.0-beta.1' }, '@subset.dev/timer': { latest: '1.0', beta: '0.1.0-rc.1', next: '0.2.0' } }
+  });
+  assert.deepEqual(feed.tools, [{ id: 'usage', package: '@subset.dev/usage', bin: 'subset-usage', distTags: { beta: '0.3.0-beta.1' } }]);
+  assert.deepEqual(catalogFeedProblems(JSON.stringify(feed)), []);
+});
+
+// An npm executable that answers each `npm <args>` from NPM_STUB ({ "<args>": { status, stdout } }) and logs its calls.
+function stubNpm(t, answers) {
+  const directory = mkdtempSync(path.join(tmpdir(), 'catalog-feed-npm-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const command = path.join(directory, 'npm');
+  const log = path.join(directory, 'calls.log');
+  writeFileSync(
+    command,
+    `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2).join(' ');
+fs.appendFileSync(${JSON.stringify(log)}, args + '\\n');
+const answer = ${JSON.stringify(answers)}[args] ?? { status: 99, stdout: '' };
+process.stdout.write(answer.stdout);
+process.exitCode = answer.status;
+`
+  );
+  chmodSync(command, 0o755);
+  const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []);
+  return { npm: liveNpm({ command }), calls };
+}
+
+test('the live npm source runs npm view, asks for the beta when a package has no latest, and fails on anything unreadable', async (t) => {
+  const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
+  const view = (spec) => `view ${spec} dist-tags --json`;
+  const { npm, calls } = stubNpm(t, {
+    [view('@subset.dev/usage')]: { status: 0, stdout: json({ latest: '0.2.0', beta: '0.2.1-beta.1' }) },
+    [view('@subset.dev/timer')]: { status: 0, stdout: '' },
+    [view('@subset.dev/timer@beta')]: { status: 0, stdout: json({ beta: '0.1.0-beta.3' }) },
+    [view('@subset.dev/minutes')]: { status: 1, stdout: json({ error: { code: 'E404', summary: 'Not Found - GET https://registry.npmjs.org/@subset.dev%2fminutes - Not found' } }) },
+    [view('@subset.dev/next-only')]: { status: 0, stdout: '' },
+    [view('@subset.dev/next-only@beta')]: { status: 1, stdout: json({ error: { code: 'E404', summary: 'No match found for version beta' } }) },
+    [view('@subset.dev/offline')]: { status: 1, stdout: '' },
+    [view('@subset.dev/forbidden')]: { status: 1, stdout: json({ error: { code: 'E403', summary: '403 Forbidden' } }) },
+    [view('@subset.dev/garbled')]: { status: 0, stdout: 'latest: 0.2.0\n' }
+  });
+  assert.deepEqual(await npm.distTags('@subset.dev/usage'), { latest: '0.2.0', beta: '0.2.1-beta.1' });
+  // npm view prints nothing for a package with only a beta; its @beta answer carries the package's dist-tags.
+  assert.deepEqual(await npm.distTags('@subset.dev/timer'), { beta: '0.1.0-beta.3' });
+  assert.equal(await npm.distTags('@subset.dev/minutes'), null);
+  assert.deepEqual(await npm.distTags('@subset.dev/next-only'), {});
+  await assert.rejects(npm.distTags('@subset.dev/offline'), /npm view @subset\.dev\/offline dist-tags --json failed \(exit 1\): no JSON answer/);
+  await assert.rejects(npm.distTags('@subset.dev/forbidden'), /failed \(exit 1\): 403 Forbidden/);
+  await assert.rejects(npm.distTags('@subset.dev/garbled'), /failed \(exit 0\): no JSON answer/);
+  assert.deepEqual(calls(), [
+    view('@subset.dev/usage'),
+    view('@subset.dev/timer'),
+    view('@subset.dev/timer@beta'),
+    view('@subset.dev/minutes'),
+    view('@subset.dev/next-only'),
+    view('@subset.dev/next-only@beta'),
+    view('@subset.dev/offline'),
+    view('@subset.dev/forbidden'),
+    view('@subset.dev/garbled')
+  ]);
+  await assert.rejects(liveNpm({ command: path.join(tmpdir(), 'catalog-feed-no-such-npm') }).distTags('@subset.dev/usage'), /did not finish/);
+
+  // Through the generator: the beta-only tool is listed, the unpublished one left out, and an npm failure stops the build.
+  const targets = releaseTargets.filter((target) => ['usage', 'timer', 'minutes'].includes(target.slug));
+  assert.equal(targets.length, 3);
+  const feed = await buildCatalogFeed({ capabilities: [], manifests, releaseTargets: targets, generatedAt, github: recordedSources({ github: { [RELEASES_URL]: [] } }).github, npm });
+  assert.deepEqual(
+    feed.tools.map(({ id, distTags }) => ({ id, distTags })),
+    [
+      { id: 'usage', distTags: { latest: '0.2.0', beta: '0.2.1-beta.1' } },
+      { id: 'timer', distTags: { beta: '0.1.0-beta.3' } }
+    ]
+  );
+  const offline = [{ ...targets[0], name: '@subset.dev/offline', manifest: { ...targets[0].manifest, name: '@subset.dev/offline' } }];
+  await assert.rejects(buildCatalogFeed({ capabilities: [], manifests, releaseTargets: offline, generatedAt, github: recordedSources({ github: { [RELEASES_URL]: [] } }).github, npm }), /no JSON answer/);
 });
 
 test('node scripts/catalog-feed.mjs --out writes a valid feed from recorded responses offline', () => {

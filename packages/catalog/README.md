@@ -34,7 +34,7 @@ Where each part comes from:
 | `appName`, `bundleId`, `helpers` | `native/<id>/macos-release.json` (`app`, `bundleId`, `helpers`; `helpers` is `[]` when the app bundles no command). |
 | `channels.live` | The listing's available `macos` surface. |
 | `channels.beta` | The newest (by version, then build) published GitHub pre-release tagged `macos/<id>/v<x.y.z>-beta.<n>` that has the uploaded DMG `<appName>-<x.y.z>-beta.<n>.dmg` and a `SHA256SUMS` line for it. `build` is `n`, the app's `CFBundleVersion`. Drafts, `-dev.<n>` builds, and releases missing the DMG, `SHA256SUMS` or its line are skipped. |
-| `tools[]` | `release-packages.json` entries whose package has a bin, which must be the one bin `subset-<slug>` (the `subset.dev` launcher itself is not a tool), with the `latest` and `beta` dist-tags from `npm view <package> dist-tags --json`. A package npm has never published is left out. |
+| `tools[]` | `release-packages.json` entries whose package has a bin, which must be the one bin `subset-<slug>` (the `subset.dev` launcher itself is not a tool), with the `latest` and `beta` dist-tags from `npm view <package> dist-tags --json`. That prints nothing for a package with no `latest`, so the generator then asks `npm view <package>@beta dist-tags --json`, whose answer carries the same dist-tags. A tag whose version the schema does not allow (a `latest` that is a pre-release, a `beta` not named `x.y.z-beta.<n>`) is left out, and so is a package npm has never published or that has neither tag left. Any other npm failure stops the build. |
 
 The generator asks GitHub (the REST releases list, with `GITHUB_TOKEN` when set; the token goes only to `api.github.com`) and npm rather than predicting them. It stops, writing nothing, if a catalog download is not a checksummed `21nCo/subset` release download, if GitHub links a release's files or page anywhere else, if a `SHA256SUMS` lists one DMG twice with different checksums, or if GitHub's own `digest` of the DMG disagrees with `SHA256SUMS`. It validates the document by the reader rules below before writing it. `--recorded <file>` answers every request from a file of recorded responses (`{ "github": { "<url>": <body> }, "npm": { "<package>": <dist-tags> | null } }`) and fails on any other request, so the feed can be built offline; `scripts/fixtures/catalog-feed/recorded.json` holds the answers recorded on 2026-11-12.
 
@@ -57,7 +57,7 @@ When `subset` or the manager app installs an app from the feed, it writes `~/Lib
 { "schema": "subset.receipt@1", "channel": "beta", "version": "0.1.0", "build": 2, "sha256": "…", "installedAt": "2026-11-12T09:30:00Z", "path": "/Applications/Timer.app" }
 ```
 
-`build` is present exactly when `channel` is `beta`. `sha256` is the installed DMG's, as listed in the feed. `path` is the installed `.app` directly inside an `Applications` folder. A receipt is advisory: what is installed is what the app's own `Info.plist` says, and a missing or invalid receipt never blocks an update.
+`build` is present exactly when `channel` is `beta`. `sha256` is the installed DMG's, as listed in the feed. `path` is the installed `.app` directly inside `/Applications` or a user's `~/Applications` (`/Users/<user>/Applications`), with no `.` or `..` segment, hidden app name or control character; any other folder is refused. A receipt is advisory: what is installed is what the app's own `Info.plist` says, and a missing or invalid receipt never blocks an update.
 
 ## Fixtures
 
@@ -80,6 +80,8 @@ When `subset` or the manager app installs an app from the feed, it writes `~/Lib
 | `receipt-invalid-beta-without-build` | A beta receipt without one. |
 | `receipt-invalid-unknown-field` | A field the schema does not define. |
 | `receipt-invalid-relative-path` | A `path` with a `..` segment. |
+| `receipt-invalid-other-applications-folder` | An app in an `Applications` folder on another volume. |
+| `receipt-invalid-parent-segment` | `/Users/../Applications/<app>.app`. |
 
 ## Superfunctions
 

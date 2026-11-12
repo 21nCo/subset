@@ -26,10 +26,10 @@
       "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\dZ$"
     },
     "path": {
-      "description": "The installed app: an absolute path to a .app directly inside an Applications folder (/Applications or ~/Applications), with no . or .. segments.",
+      "description": "The installed app: a .app directly inside /Applications or a user's ~/Applications (/Users/<user>/Applications), with no . or .. segment, no hidden app name and no control characters.",
       "type": "string",
       "maxLength": 1024,
-      "pattern": "^(?:/(?!\\.\\.?/)[^/]+)*/Applications/(?!\\.)[^/]+\\.app$"
+      "pattern": "^(?:/Users/(?!\\.)[^/\\u0000-\\u001f\\u007f]+)?/Applications/(?!\\.)[^/\\u0000-\\u001f\\u007f]+\\.app$"
     }
   },
   "if": { "properties": { "channel": { "const": "beta" } } },
