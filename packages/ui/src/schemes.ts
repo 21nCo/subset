@@ -19,11 +19,6 @@ export type ColorToken = (typeof COLOR_TOKENS)[number];
 type NucleumScheme = { label: string; isDark: boolean; hasFramePalette: boolean; colors: Record<string, string> };
 const SOURCE = nucleum.schemes as Record<string, NucleumScheme>;
 
-/**
- * Which Nucleum palette slot each token takes, in order of preference. Frame tokens use Nucleum's frame palette
- * (TIDY-511) when the scheme has one, else the content colours. `accent-contrast` falls back to whichever of the
- * scheme's lightest and darkest text reads best on `accent-solid`.
- */
 /** Text colours computed for readability on a tinted background, rather than taken from a Nucleum slot. */
 export const COMPUTED_TOKENS = [
   'accent-contrast', 'accent-on-soft', 'accent-text',
@@ -33,6 +28,10 @@ export const COMPUTED_TOKENS = [
 ] as const;
 type ComputedToken = (typeof COMPUTED_TOKENS)[number];
 
+/**
+ * Which Nucleum palette slot each token takes, in order of preference. Frame tokens use Nucleum's frame palette
+ * (TIDY-511) when the scheme has one, else the content colours. The `COMPUTED_TOKENS` have no slot.
+ */
 export const NUCLEUM_MAPPING: Record<Exclude<ColorToken, ComputedToken>, string[]> = {
   // Nucleum's bgs1 is a scheme's base background and each higher slot is one level of nesting deeper
   // (`bg(parentBgIndex)` in @21n/ui), so cards on the page take bgs2.

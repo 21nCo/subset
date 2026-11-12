@@ -15,8 +15,19 @@ test('every family has a light and a dark scheme that define every token', () =>
   }
 });
 
-test('the mapping covers every token except the computed accent contrast, and every ported scheme has its slots', () => {
+test('the mapping covers every token except the computed text colours, and every ported scheme has its slots', () => {
   assert.deepEqual(Object.keys(NUCLEUM_MAPPING).sort(), COLOR_TOKENS.filter((token) => !COMPUTED_TOKENS.includes(token)).sort());
+  // The documented mapping (README): a slot typo that still names a real slot would otherwise pass unnoticed.
+  assert.deepEqual(NUCLEUM_MAPPING, {
+    'surface-canvas': ['bgs1'], 'surface-raised': ['bgs2'], 'surface-sunken': ['bgs3'], 'surface-overlay': ['bgs1'], 'surface-hover': ['bgs4'],
+    'text-primary': ['fgs1'], 'text-secondary': ['fgs2'], 'text-muted': ['fgs3'], 'text-disabled': ['fgs4'],
+    'border-subtle': ['brs2'], 'border-default': ['brs3'], 'border-strong': ['brs4'],
+    'accent-solid': ['aps1'], 'accent-subtle': ['aps2'], 'accent-soft': ['aps3'],
+    'secondary-solid': ['ass1'], 'secondary-subtle': ['ass2'],
+    'success-solid': ['ags1'], 'success-subtle': ['ags2'],
+    'danger-solid': ['ars1'], 'danger-subtle': ['ars2'],
+    'frame-surface': ['fbgs1', 'bgs1'], 'frame-text': ['ffgs1', 'fgs1'], 'frame-border': ['fbrs3', 'brs3'], 'frame-accent': ['faps1', 'aps1']
+  });
   for (const source of Object.keys(nucleum.schemes)) assert.doesNotThrow(() => schemeFrom(source), source);
   // Graphite has Nucleum's frame palette (TIDY-511); the others fall back to their content colours.
   const graphite = schemeFrom('clean_graphite_light');

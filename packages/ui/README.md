@@ -37,8 +37,8 @@ Components: `import Button from '@subset.dev/ui/components/Button.svelte'` (also
 | Accent | `--ui-color-accent-solid`, `-subtle`, `-soft`, `-contrast` (text on solid), `-on-soft` (text on soft), `-text` (accent-coloured text) |
 | Tones | `--ui-color-secondary-*`, `--ui-color-success-*`, `--ui-color-danger-*`: `solid` and `subtle` fills, `contrast` (text on solid), `text` (tone-coloured text); success and danger also `on-subtle` |
 | App chrome | `--ui-color-frame-surface`, `-text`, `-border`, `-accent` |
-| Type | `--ui-font-family`, `--ui-font-size-xs…xl`, `--ui-font-weight-light|regular|medium|bold` |
-| Space and shape | `--ui-space-1…8`, `--ui-radius-control` (0.375rem), `--ui-radius-panel` (0.75rem), `--ui-radius-tab`, `--ui-radius-pill`, `--ui-shell-gap`, `--ui-control-height` |
+| Type | `--ui-font-family`, `--ui-font-size-xs…xl`, `--ui-font-weight-light\|regular\|medium\|bold` |
+| Space and shape | `--ui-space-1…6`, `--ui-space-8`, `--ui-radius-control` (0.375rem), `--ui-radius-panel` (0.75rem), `--ui-radius-tab`, `--ui-radius-pill`, `--ui-shell-gap`, `--ui-control-height` |
 | Effects | `--ui-focus-ring`, `--ui-shadow-raised`, `--ui-shadow-overlay` |
 
 Names follow uifn's semantic vocabulary (`color.surface.*`, `color.text.*`, `color.border.*`, `color.accent.*`, `radius.*`) with a `--ui-` prefix, so a later move onto uifn's tokens is a prefix change rather than a redesign.
@@ -49,7 +49,7 @@ Names follow uifn's semantic vocabulary (`color.surface.*`, `color.text.*`, `col
 
 | Token | Nucleum slot |
 | --- | --- |
-| `surface-canvas` / `-raised` / `-sunken` / `-hover` | `bgs1` / `bgs2` / `bgs3` / `bgs4` (bgs1 is the base; each higher slot is one level of nesting, as Nucleum's `bg(parentBgIndex)`) |
+| `surface-canvas` / `-raised` / `-sunken` / `-hover`, and `-overlay` | `bgs1` / `bgs2` / `bgs3` / `bgs4`, and `bgs1` (bgs1 is the base; each higher slot is one level of nesting, as Nucleum's `bg(parentBgIndex)`) |
 | `text-primary` / `-secondary` / `-muted` / `-disabled` | `fgs1` / `fgs2` / `fgs3` / `fgs4` |
 | `border-subtle` / `-default` / `-strong` | `brs2` / `brs3` / `brs4` |
 | `accent-solid` / `-subtle` / `-soft` | `aps1` / `aps2` / `aps3`; `accent-contrast` is the first of white, near-black and black that reaches 4.5:1 on `aps1` (Nucleum has no content on-accent slot; `fonaps3` belongs to the frame palette); the `on-*` text tokens are the first of the scheme's primary text, white, near-black and black that reaches 4.5:1 on their tone (in Oxide and Solarized dark the subtle tones are light) |

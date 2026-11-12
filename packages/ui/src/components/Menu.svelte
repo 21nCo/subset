@@ -1,6 +1,7 @@
 <!--
-  A disclosure menu: an icon button that opens a small panel of actions. Escape closes it and returns focus to
-  the button; moving focus to another element, or pressing anywhere outside it, closes it. Put MenuItem buttons in `children`.
+  A disclosure menu: an icon button that opens a small panel of actions. Choosing an enabled item (pointer, Enter
+  or Space) or pressing Escape closes it and returns focus to the button, unless the action moved focus elsewhere;
+  moving focus to another element, or pressing anywhere outside it, closes it. Put MenuItem buttons in `children`.
 -->
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
@@ -62,7 +63,22 @@
 >
   <IconButton {icon} {label} {size} variant="ghost" aria-expanded={open} aria-controls={id} onclick={() => (open = !open)} />
   {#if open}
-    <div class="panel {placement} {align}" {id} role="group" aria-label={label}>
+    <!-- Enter and Space on an item fire click, so this handler covers keyboard activation too. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="panel {placement} {align}"
+      {id}
+      role="group"
+      aria-label={label}
+      onclick={(event) => {
+        // Choosing an item closes the menu after the item's own handler has run. A disabled item does nothing.
+        const item = (event.target as Element).closest('button');
+        if (!item || item.disabled || item.getAttribute('aria-disabled') === 'true' || !event.currentTarget.contains(item)) return;
+        // Focus returns to the toggle only if the action left it in the menu, or nowhere (Safari does not focus a
+        // clicked button), never when the action moved it elsewhere on purpose.
+        close(root?.contains(document.activeElement) || document.activeElement === document.body);
+      }}
+    >
       {@render children()}
     </div>
   {/if}
