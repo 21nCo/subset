@@ -52,7 +52,7 @@ Names follow uifn's semantic vocabulary (`color.surface.*`, `color.text.*`, `col
 | `surface-canvas` / `-raised` / `-sunken` / `-hover` | `bgs1` / `bgs2` / `bgs3` / `bgs4` (bgs1 is the base; each higher slot is one level of nesting, as Nucleum's `bg(parentBgIndex)`) |
 | `text-primary` / `-secondary` / `-muted` / `-disabled` | `fgs1` / `fgs2` / `fgs3` / `fgs4` |
 | `border-subtle` / `-default` / `-strong` | `brs2` / `brs3` / `brs4` |
-| `accent-solid` / `-subtle` / `-soft` | `aps1` / `aps2` / `aps3`; `accent-contrast` is `onaps3` or whichever of white and near-black reads best on `aps1`; the `on-*` text tokens are the scheme's primary text, white or near-black, whichever reads best on their tone (in Oxide and Solarized dark the subtle tones are light) |
+| `accent-solid` / `-subtle` / `-soft` | `aps1` / `aps2` / `aps3`; `accent-contrast` is the first of white, near-black and black that reaches 4.5:1 on `aps1` (Nucleum has no content on-accent slot; `fonaps3` belongs to the frame palette); the `on-*` text tokens are the first of the scheme's primary text, white, near-black and black that reaches 4.5:1 on their tone (in Oxide and Solarized dark the subtle tones are light) |
 | `secondary-*`, `success-*`, `danger-*` | `ass1–2`, `ags1–2`, `ars1–2` |
 | `frame-*` | Nucleum's frame palette (`fbgs1`, `ffgs1`, `fbrs3`, `faps1`) when the scheme has one (Graphite), else the content slots |
 
@@ -61,7 +61,7 @@ Families pair a light and a dark scheme, as Nucleum's scheme families do (PR #63
 **Contrast.** Nucleum's slots are kept as they are, except where text would be hard to read:
 
 * `text-primary` must reach 4.5:1 on every surface (canvas, raised, sunken, hover, overlay); `text-secondary` 4.5:1 and `text-muted` 3:1 on every resting surface (hovered controls switch to primary text). A slot that falls short keeps its hue and saturation and moves in lightness, away from the surfaces, until it passes (`ensureContrast`). `schemeAdjustments()` lists every such change, and the tests pin the list. Today only Solarized dark changes (its three text slots), which should be raised upstream.
-* Tone fills (`-solid`) are never used as text. `-text` tokens are the tone moved until it reaches 4.5:1 on every surface; `-contrast`, `-on-soft` and `-on-subtle` are the first of the scheme's own choice (`onaps3`), white, near-black and black that reaches 4.5:1 on that fill.
+* Tone fills (`-solid`) are never used as text. `-text` tokens are the tone moved until it reaches 4.5:1 on every surface; `-contrast`, `-on-soft` and `-on-subtle` are the first candidate that reaches 4.5:1 on that fill: for `-on-soft` and `-on-subtle` the scheme's primary text, then white, near-black and black; for `-contrast` white, near-black and black.
 
 `npm run schemes --workspace=@subset.dev/ui` regenerates `src/styles/schemes.css`; the tests fail when the checked-in file is stale. `data-ui-mode="system"` follows `prefers-color-scheme` in CSS, with no script.
 

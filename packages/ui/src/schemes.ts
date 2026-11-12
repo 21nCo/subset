@@ -186,16 +186,16 @@ export function schemeFrom(source: string): Scheme {
   for (const tone of ['accent', 'secondary', 'success', 'danger'] as const) {
     colors[`${tone}-text`] = ensureContrast(colors[`${tone}-solid`], surfaces, TEXT_CONTRAST);
   }
-  // Text on a tinted background: the scheme's own choice where it has one (onaps3) or its primary text. In some
-  // dark schemes the "subtle" tones are light, so primary text fails there.
-  // The first candidate that reaches 4.5:1 (the scheme's own colour first, then white, near-black and black),
-  // else the best of them.
+  // Text on a filled or tinted background: the first candidate that reaches 4.5:1 (for the soft and subtle tones
+  // the scheme's primary text first, then white, near-black and black), else the best of them. In some dark
+  // schemes the "subtle" tones are light, so primary text fails there. Solid fills have no scheme candidate:
+  // Nucleum's data has no on-accent slot for content (only the frame palette's fonaps3).
   const readableOn = (background: string, preferred: (string | undefined)[]) => {
     const candidates = [...preferred, 'hsl(0 0% 100%)', 'hsl(0 0% 7%)', 'hsl(0 0% 0%)'].filter(Boolean) as string[];
     return candidates.find((candidate) => contrast(candidate, background) >= TEXT_CONTRAST)
       ?? candidates.reduce((best, next) => (contrast(next, background) > contrast(best, background) ? next : best));
   };
-  colors['accent-contrast'] = readableOn(colors['accent-solid'], [entry.colors.onaps3]);
+  colors['accent-contrast'] = readableOn(colors['accent-solid'], []);
   colors['secondary-contrast'] = readableOn(colors['secondary-solid'], []);
   colors['success-contrast'] = readableOn(colors['success-solid'], []);
   colors['danger-contrast'] = readableOn(colors['danger-solid'], []);

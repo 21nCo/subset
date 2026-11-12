@@ -35,7 +35,11 @@
   class="ui-dialog"
   style:--ui-dialog-width={width}
   aria-labelledby={titleId}
-  onclose={() => (open = false)}
+  onclose={() => {
+    // The close event is queued as a task, so it can arrive after the dialog was closed and reopened in the
+    // same turn; only a dialog that is still closed should clear `open`.
+    if (!dialog?.open) open = false;
+  }}
   onpointerdown={(event) => (pressedBackdrop = event.target === dialog)}
   onclick={(event) => {
     if (pressedBackdrop && event.target === dialog) open = false;

@@ -62,7 +62,7 @@
 <div class="ui-root page" {...appearanceAttributes(appearance)}>
   <header class="bar">
     <strong>Subset UI</strong>
-    <span class="muted">Twenty One Native · semi-rounded · Phosphor</span>
+    <span>Twenty One Native · semi-rounded · Phosphor</span>
   </header>
 
   <main>
@@ -109,14 +109,14 @@
 
 <style>
   .page { min-height: 100dvh; }
-  .bar { display: flex; align-items: baseline; gap: var(--ui-space-3); padding: var(--ui-space-4) var(--ui-space-6); background: var(--ui-color-frame-surface); color: var(--ui-color-frame-text); }
+  .bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--ui-space-3); padding: var(--ui-space-4) var(--ui-space-6); background: var(--ui-color-frame-surface); color: var(--ui-color-frame-text); }
   main { display: grid; gap: var(--ui-space-4); padding: var(--ui-space-6); max-width: 75rem; margin: 0 auto; }
   h2 { margin: 0 0 var(--ui-space-4); font-size: var(--ui-font-size-lg); }
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ui-space-2); margin-bottom: var(--ui-space-3); }
   .muted { color: var(--ui-color-text-muted); }
   .secondary { color: var(--ui-color-text-secondary); }
   .tabular { font-variant-numeric: tabular-nums; font-weight: var(--ui-font-weight-light); font-size: 1.5rem; color: var(--ui-color-text-primary); }
-  .families { display: grid; grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr)); gap: var(--ui-space-4); }
+  .families { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(26rem, 100%), 1fr)); gap: var(--ui-space-4); }
   .swatch-card { padding: var(--ui-space-4); border-radius: var(--ui-radius-panel); border: 1px solid var(--ui-color-border-subtle); }
   .swatch-head { display: flex; justify-content: space-between; margin-bottom: var(--ui-space-3); }
   .frame { margin-top: var(--ui-space-2); padding: var(--ui-space-2) var(--ui-space-3); border-radius: var(--ui-radius-control); background: var(--ui-color-frame-surface); color: var(--ui-color-frame-text); font-size: var(--ui-font-size-sm); }
