@@ -1,1 +1,7 @@
-{ "project": "Screenshot.xcodeproj", "scheme": "Screenshot", "app": "Screenshot", "team": "SAZVPX4CAA" }
+{
+  "project": "Screenshot.xcodeproj",
+  "scheme": "Screenshot",
+  "app": "Screenshot",
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.screenshot"
+}

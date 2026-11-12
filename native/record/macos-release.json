@@ -2,5 +2,6 @@
   "project": "Record.xcodeproj",
   "scheme": "Record-macOS",
   "app": "Record",
-  "team": "SAZVPX4CAA"
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.record"
 }

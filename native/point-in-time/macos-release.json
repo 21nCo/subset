@@ -2,5 +2,9 @@
   "project": "PointInTime.xcodeproj",
   "scheme": "PointInTime",
   "app": "pointInTime",
-  "team": "SAZVPX4CAA"
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.point-in-time",
+  "helpers": [
+    { "command": "point-in-time", "path": "Contents/Helpers/point-in-time", "kind": "native" }
+  ]
 }
