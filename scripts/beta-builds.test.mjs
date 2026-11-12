@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { currentBeta, marketingVersion, nextBuildNumber, optedOut, planTarget } from './beta-builds.mjs';
-import { betaVerdict, isNewerBeta } from './npm-beta-guard.mjs';
+import { betaVerdict, isNewerBeta, packageNamePattern } from './npm-beta-guard.mjs';
 
 test('reads the one MARKETING_VERSION of a project', () => {
   assert.equal(marketingVersion('MARKETING_VERSION = 0.1.1;\n\t\tMARKETING_VERSION = 0.1.1;'), '0.1.1');
@@ -51,6 +51,7 @@ test('publishes a beta only before its release and never behind a newer beta', (
   assert.deepEqual(betaVerdict(packument, '0.2.0', '0.2.0-beta.1'), { publish: true });
   assert.match(betaVerdict(null, '0.2.0', '0.2.0-beta.1').error, /no live release/);
   assert.match(betaVerdict({ 'dist-tags': {}, versions: {} }, '0.2.0', '0.2.0-beta.1').error, /no live release/);
+  assert.match(betaVerdict({ 'dist-tags': { latest: '0.0.0' }, versions: { '0.0.0': {} } }, '0.2.0', '0.2.0-beta.1').error, /no live release/);
   assert.match(betaVerdict(packument, '0.1.0', '0.1.0-beta.1').error, /already released/);
   const ahead = { ...packument, 'dist-tags': { latest: '0.1.0', beta: '0.2.0-beta.2' } };
   assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.1').publish, false);
@@ -95,4 +96,11 @@ test('keeps System out of beta builds until SET-59, and only System', () => {
   const breaks = plan('--only', 'macos/breaks');
   assert.equal(breaks.builds.length + breaks.skipped.length, 1);
   assert.equal(breaks.skipped.some((entry) => entry.reason === optOut.reason), false);
+});
+
+test('the beta guard accepts the scoped and unscoped names it publishes, and nothing that could leave the registry path', () => {
+  for (const name of ['@subset.dev/usage', '@subset.dev/link-capture', 'subset.dev']) assert.ok(packageNamePattern.test(name), name);
+  for (const name of ['', '@subset.dev', '@subset.dev/', '../x', 'a/b', '@a/b/c', '-x', '.x', 'Subset', 'a b', '@a/../b']) {
+    assert.equal(packageNamePattern.test(name), false, name);
+  }
 });

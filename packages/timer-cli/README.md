@@ -129,7 +129,7 @@ In hosts with the MCP Apps extension (`io.modelcontextprotocol/ui`), the results
 
 ## Release
 
-`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
+`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
 
 ## macOS app runtime (SET-81)
 

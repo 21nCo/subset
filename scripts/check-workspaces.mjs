@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { packageNamePattern } from './npm-beta-guard.mjs';
 import { isRepoRelativePath, prereleaseProblems } from './release-macos.mjs';
 import { publishedManifestProblems, WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
 
@@ -61,7 +62,7 @@ const bookmarksCore = workspaces.find((manifest) => manifest.name === '@subset.d
 assert.ok(bookmarksCore, 'Missing workspace @subset.dev/bookmarks-core');
 const bookmarksCoreDependencies = ['@datafn/core', '@subset.dev/links', '@superfunctions/db', 'entities'];
 assert.deepEqual(
-  Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort(),
+  Object.keys({ ...bookmarksCore.dependencies, ...bookmarksCore.optionalDependencies, ...bookmarksCore.peerDependencies }).sort((a, b) => a.localeCompare(b, 'en')),
   bookmarksCoreDependencies,
   '@subset.dev/bookmarks-core may depend only on @datafn/core, @subset.dev/links, @superfunctions/db and entities'
 );
@@ -83,7 +84,7 @@ const linkCapture = workspaces.find((manifest) => manifest.name === '@subset.dev
 assert.ok(linkCapture, 'Missing workspace @subset.dev/link-capture');
 const linkCaptureDependencies = ['@extfn/core', '@subset.dev/links', 'svelte'];
 assert.deepEqual(
-  Object.keys({ ...linkCapture.dependencies, ...linkCapture.optionalDependencies, ...linkCapture.peerDependencies }).sort(),
+  Object.keys({ ...linkCapture.dependencies, ...linkCapture.optionalDependencies, ...linkCapture.peerDependencies }).sort((a, b) => a.localeCompare(b, 'en')),
   linkCaptureDependencies,
   '@subset.dev/link-capture may depend only on @extfn/core, @subset.dev/links and svelte'
 );
@@ -118,6 +119,20 @@ for (const name of ['@subset.dev/links', '@subset.dev/link-capture']) {
   assert.ok(isPublic(name), `${name} must be a published package`);
 }
 
+// `subset <tool>` (the subset.dev launcher) runs exactly the published CLIs: each tool names a public workspace and one
+// of its bins, and every public workspace with a bin (other than the launcher itself) is a tool.
+const { TOOLS: launcherTools } = await import(new URL('packages/subset-dev/src/tools.mjs', root));
+for (const [tool, { package: name, bin }] of Object.entries(launcherTools)) {
+  assert.ok(isPublic(name), `subset ${tool} runs ${name}, which is not a public workspace`);
+  assert.ok(Object.hasOwn(workspacesByName.get(name).bin ?? {}, bin), `subset ${tool} runs bin ${bin}, which ${name} does not declare`);
+  // The launcher imports the bin into its own process, so it must be an ES module that reads process.argv.
+  assert.match(workspacesByName.get(name).bin[bin], /\.mjs$/, `subset ${tool} runs ${name}'s ${bin}, which must be an .mjs ES module`);
+}
+for (const manifest of publicPackages) {
+  if (manifest.bin === undefined || manifest.name === 'subset.dev') continue;
+  assert.ok(Object.values(launcherTools).some((tool) => tool.package === manifest.name), `${manifest.name} is a published CLI but not a subset.dev launcher tool`);
+}
+
 // Native targets reuse capability packages (for example by running their CLI); they do not carry a
 // second Node.js implementation with its own manifest or lockfile.
 const nativeRoot = new URL('native/', root);
@@ -148,6 +163,8 @@ assert.ok(minutesContract && minutesSwift, 'Could not find the Minutes contract 
 assert.equal(minutesSwift[1], minutesContract[1], 'native/minutes supports a different Minutes contract version than @subset.dev/minutes-core');
 for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
+  // publish-tag.yml passes the name to npm-beta-guard.mjs for every beta.
+  assert.match(target.name, packageNamePattern, `${target.name} is not a name npm-beta-guard.mjs accepts`);
   assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
   assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
   // beta-builds.mjs publishes a beta when any of these folders changed; the package's own folder is always one.

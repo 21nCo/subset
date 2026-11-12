@@ -3,5 +3,6 @@
   { "slug": "minutes", "path": "packages/minutes-cli", "name": "@subset.dev/minutes", "inputs": ["packages/minutes-cli", "packages/minutes"] },
   { "slug": "timer", "path": "packages/timer-cli", "name": "@subset.dev/timer", "inputs": ["packages/timer-cli", "packages/timer", "apps/timer"] },
   { "slug": "links", "path": "packages/links", "name": "@subset.dev/links", "inputs": ["packages/links"] },
+  { "slug": "subset-dev", "path": "packages/subset-dev", "name": "subset.dev", "inputs": ["packages/subset-dev"] },
   { "slug": "link-capture", "path": "packages/link-capture", "name": "@subset.dev/link-capture", "inputs": ["packages/link-capture"] }
 ]

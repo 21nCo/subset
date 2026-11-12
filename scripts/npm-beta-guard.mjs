@@ -22,7 +22,8 @@ export function isNewerBeta(a, b) {
 
 // The guard's verdict for a packument (the registry's package document) or null for a missing package.
 export function betaVerdict(packument, version, betaVersion) {
-  if (!packument?.['dist-tags']?.latest) return { error: 'has no live release yet; publish its first version with a live tag' };
+  const latest = packument?.['dist-tags']?.latest;
+  if (!latest || latest === '0.0.0') return { error: 'has no live release yet; publish its first version with a live tag (see docs/macos-release.md, First npm release of a package)' };
   if (packument.versions?.[version]) return { error: `${version} is already released; bump the version in package.json for a new beta` };
   const current = packument['dist-tags'].beta;
   if (current !== undefined && current !== betaVersion && !isNewerBeta(betaVersion, current)) {
@@ -31,13 +32,15 @@ export function betaVerdict(packument, version, betaVersion) {
   return { publish: true };
 }
 
-const namePattern = /^@[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/;
+// A scoped (@subset.dev/usage) or unscoped (subset.dev) npm name; check-workspaces.mjs checks every release target
+// against it.
+export const packageNamePattern = /^(?:@[a-z0-9][a-z0-9.-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const versionPattern = /^\d+\.\d+\.\d+$/;
 
 async function main() {
   const [name, version, betaVersion] = process.argv.slice(2);
-  if (!namePattern.test(name ?? '') || !versionPattern.test(version ?? '') || !betaPattern.test(betaVersion ?? '')) {
-    throw new Error('Usage: npm-beta-guard.mjs <@scope/name> <x.y.z> <x.y.z-beta.n>');
+  if (!packageNamePattern.test(name ?? '') || !versionPattern.test(version ?? '') || !betaPattern.test(betaVersion ?? '')) {
+    throw new Error('Usage: npm-beta-guard.mjs <name> <x.y.z> <x.y.z-beta.n>');
   }
   // A stalled registry must not hold the package's publish slot until the job times out.
   const response = await fetch(`https://registry.npmjs.org/${name.replace('/', '%2f')}`, {
