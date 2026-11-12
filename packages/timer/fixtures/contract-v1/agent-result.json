@@ -312,9 +312,82 @@
           "step": null,
           "next": null
         }
+      },
+      {
+        "definition": {
+          "kind": "interval",
+          "id": "t_4tvjx8bj",
+          "name": "HIIT",
+          "sound": true,
+          "countdownTicks": true,
+          "createdAt": 1792400312000,
+          "segments": [
+            {
+              "label": "Squats",
+              "phase": "work",
+              "durationMs": 40000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 20000
+            },
+            {
+              "label": "Lunges",
+              "phase": "work",
+              "durationMs": 40000
+            },
+            {
+              "label": "Rest",
+              "phase": "rest",
+              "durationMs": 20000
+            },
+            {
+              "label": "Burpees",
+              "phase": "work",
+              "durationMs": 40000
+            }
+          ],
+          "rounds": 1
+        },
+        "runtime": {
+          "status": "running",
+          "startedAt": 1792400312000,
+          "accumulatedMs": 0,
+          "pausedAt": null,
+          "laps": [],
+          "skippedMs": 0
+        },
+        "projection": {
+          "status": "running",
+          "elapsedMs": 88000,
+          "totalMs": 160000,
+          "remainingMs": 72000,
+          "finished": false,
+          "step": {
+            "index": 2,
+            "segmentIndex": 2,
+            "round": 1,
+            "phase": "work",
+            "label": "Lunges",
+            "startMs": 60000,
+            "durationMs": 40000,
+            "elapsedMs": 28000,
+            "remainingMs": 12000
+          },
+          "next": {
+            "index": 3,
+            "segmentIndex": 3,
+            "round": 1,
+            "phase": "rest",
+            "label": "Rest",
+            "startMs": 100000,
+            "durationMs": 20000
+          }
+        }
       }
     ]
   },
-  "text": "Tabata (t_adygqpxx): running · round 3/8 · work · 0:12 left · next rest 0:10\nRun (t_rcrt44q9): running · 10:00 elapsed · 2 laps\nTea (t_dk1facen): paused · 1:40 left\nAMRAP (t_nwkjbbkw): finished · 20:00 total · 1 lap\nStretch (t_daesff02): finished · 0:30 total\nPomodoro (t_ac50bvkp): idle · 2:10:00 total\nStandup (t_v9pdg8p9): idle · 30:00 total",
+  "text": "Tabata (t_adygqpxx): running · work · round 3/8 · 0:12 left · next rest 0:10\nRun (t_rcrt44q9): running · 10:00 elapsed · 2 laps\nTea (t_dk1facen): paused · 1:40 left\nAMRAP (t_nwkjbbkw): finished · 20:00 total · 1 lap\nStretch (t_daesff02): finished · 0:30 total\nPomodoro (t_ac50bvkp): idle · 2:10:00 total\nStandup (t_v9pdg8p9): idle · 30:00 total\nHIIT (t_4tvjx8bj): running · Lunges · step 3/5 · 0:12 left · next rest 0:20",
   "viewId": "subset.timer.board@1"
 }

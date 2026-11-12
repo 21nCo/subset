@@ -10,7 +10,7 @@ oEmbed, site-specific or social-post parsers, readable full text, JSON-LD, robot
 npm install @subset.dev/links
 ```
 
-The package is ES modules only (no CommonJS build) with TypeScript declarations, and its one dependency is `htmlparser2`. It is tested on Node 22 and in workerd, the Cloudflare Workers runtime; any runtime with `URL`, `TextDecoder`, `fetch`, web streams and timers should work. It is published from this repository by a `links-v<version>` tag (`.github/workflows/publish-tag.yml`); until the owner's first release (SET-194) it is not on npm.
+The package is ES modules only (no CommonJS build) with TypeScript declarations, and its one dependency is `htmlparser2`. It is tested on Node 22 and in workerd, the Cloudflare Workers runtime; any runtime with `URL`, `TextDecoder`, `fetch`, web streams and timers should work. It is published from this repository by a `links-v<version>` tag (`.github/workflows/publish-tag.yml`); until the owner's first release (SET-194) it is not on npm. That first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package).
 
 ## Usage
 

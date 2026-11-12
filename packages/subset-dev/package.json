@@ -1,0 +1,31 @@
+{
+  "name": "subset.dev",
+  "version": "0.2.0",
+  "description": "Launcher for the Subset command-line tools: npx subset.dev usage, npx subset.dev timer, npx subset.dev minutes",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "subset": "src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/21nCo/subset.git",
+    "directory": "packages/subset-dev"
+  },
+  "homepage": "https://github.com/21nCo/subset/tree/main/packages/subset-dev#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

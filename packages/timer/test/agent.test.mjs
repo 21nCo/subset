@@ -26,15 +26,33 @@ test('formatDuration rounds time left up and elapsed time down', () => {
 test('interval text in each state', () => {
   const tabata = scenario({ preset: 'tabata' });
   const id = tabata.id;
-  assert.equal(lineAt(tabata, 78_000), `Tabata (${id}): running · round 3/8 · work · 0:12 left · next rest 0:10`);
+  assert.equal(lineAt(tabata, 78_000), `Tabata (${id}): running · work · round 3/8 · 0:12 left · next rest 0:10`);
   assert.equal(lineAt(tabata, 3_000), `Tabata (${id}): running · prep · 0:07 left · next work 0:20`);
-  assert.equal(lineAt(tabata, 245_500), `Tabata (${id}): running · round 8/8 · rest · 0:05 left`);
+  assert.equal(lineAt(tabata, 245_500), `Tabata (${id}): running · rest · round 8/8 · 0:05 left`);
   assert.equal(lineAt(tabata, 250_000), `Tabata (${id}): finished · 4:10 total`);
-  assert.equal(lineAt(scenario({ preset: 'tabata' }, [['pause', 78_000]]), 600_000), `Tabata (${id}): paused · round 3/8 · work · 0:12 left · next rest 0:10`);
+  assert.equal(lineAt(scenario({ preset: 'tabata' }, [['pause', 78_000]]), 600_000), `Tabata (${id}): paused · work · round 3/8 · 0:12 left · next rest 0:10`);
   assert.equal(lineAt(scenario({ preset: 'tabata' }, [['reset', 1_000]]), 2_000), `Tabata (${id}): idle · 4:10 total`);
   // One round of several segments counts segments instead; a label that differs from the phase is shown.
   const pomodoro = scenario({ preset: 'pomodoro' });
-  assert.equal(lineAt(pomodoro, 26 * 60_000), `Pomodoro (${pomodoro.id}): running · segment 2/8 · rest (Break) · 4:00 left · next work (Focus) 25:00`);
+  assert.equal(lineAt(pomodoro, 26 * 60_000), `Pomodoro (${pomodoro.id}): running · Break · step 2/8 · 4:00 left · next Focus 25:00`);
+});
+
+// native/timer/Tests/TimerCoreTests/FormatTests.swift asserts these same lines for the macOS menu rows.
+test('a labelled step leads with its label, then its position', () => {
+  const segments = [['Squats', 'work', 40_000], ['Rest', 'rest', 20_000], ['Lunges', 'work', 40_000], ['Rest', 'rest', 20_000], ['Plank: hold', 'work', 30_000]]
+    .map(([label, phase, durationMs]) => ({ label, phase, durationMs }));
+  const input = { name: 'HIIT', timer: { kind: 'interval', rounds: 1, prepMs: 10_000, segments } };
+  const hiit = scenario(input);
+  const id = hiit.id;
+  assert.equal(lineAt(hiit, 4_000), `HIIT (${id}): running · prep · 0:06 left · next Squats 0:40`);
+  assert.equal(lineAt(hiit, 38_000), `HIIT (${id}): running · Squats · step 1/5 · 0:12 left · next rest 0:20`);
+  assert.equal(lineAt(hiit, 55_000), `HIIT (${id}): running · rest · step 2/5 · 0:15 left · next Lunges 0:40`);
+  assert.equal(lineAt(hiit, 151_000), `HIIT (${id}): running · Plank: hold · step 5/5 · 0:09 left`);
+  assert.equal(lineAt(scenario(input, [['pause', 38_000]]), 900_000), `HIIT (${id}): paused · Squats · step 1/5 · 0:12 left · next rest 0:20`);
+  // Several rounds count rounds; a label that only repeats the phase shows the phase.
+  const legs = scenario({ name: 'Legs', timer: { kind: 'interval', rounds: 2, segments: [{ label: 'Squats', phase: 'work', durationMs: 40_000 }, { label: 'REST', phase: 'rest', durationMs: 20_000 }] } });
+  assert.equal(lineAt(legs, 70_000), `Legs (${legs.id}): running · Squats · round 2/2 · 0:30 left · next rest 0:20`);
+  assert.equal(lineAt(legs, 45_000), `Legs (${legs.id}): running · rest · round 1/2 · 0:15 left · next Squats 0:40`);
 });
 
 test('countdown and stopwatch text in each state', () => {

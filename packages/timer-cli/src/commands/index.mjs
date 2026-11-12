@@ -25,7 +25,12 @@ Timers
                             stopwatch
                             a preset: tabata, emom, hiit, pomodoro, amrap, or a saved one's name or id
                             interval --work 40s [--rest 20s] --rounds 10 [--prep 10s] [--cooldown 60s]
+                            interval --step "Squats:40s" --step "Lunges:40s" [--rest 20s] [--rounds 1]
+                              (labelled steps; --rest goes between them, --rounds defaults to 1)
                             a timer id, to start an idle timer again after reset
+    --file <path|->       Start the workout in a JSON file, or on stdin with -, instead of a <spec>:
+                            {"name","prep","rest","rounds","cooldown","sound",
+                             "steps":[{"label":"Squats","duration":"40s","phase":"work"}]}
     --until <time>        Count down to a local time such as 17:30 instead of a <spec>
     --name <name>         Name the new timer
     --no-sound            Play no sounds for it (notifications still show)
@@ -38,7 +43,8 @@ Timers
 
 Presets
   presets                 List the built-in and saved presets
-  preset save <name>      Save an interval preset from --work, --rest, --rounds, --prep, --cooldown, --no-sound
+  preset save <name>      Save an interval preset from --work or --step, --rest, --rounds, --prep, --cooldown,
+                          --no-sound, or from a workout --file
   preset rm <ref>         Remove a saved preset
 
 Daemon and agent skill
@@ -167,6 +173,8 @@ export async function main(io) {
       values: parsed.values,
       positionals: parsed.positionals,
       now: io.now ?? Date.now,
+      cwd: io.cwd,
+      readStdin: io.readStdin,
       packageRoot: io.packageRoot,
       startDaemon: io.startDaemon,
       foreground: io.foreground,
