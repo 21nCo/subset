@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,6 +69,12 @@ test('start --file runs a 30-step workout from a file or stdin', async (t) => {
 
   // stdin, with explicit phases and numbers of seconds.
   const stdin = JSON.stringify({ rounds: 2, sound: false, steps: [{ label: 'Warm up', duration: 60, phase: 'prep' }, { label: 'Row', duration: '2m' }, { label: 'Easy', duration: '1:00', phase: 'rest' }] });
+  // A FIFO with no writer is refused at once, not waited on.
+  const fifo = join(dir, 'fifo.json');
+  execFileSync('mkfifo', [fifo]);
+  const fromFifo = await run(['start', '--file', fifo, '--json']);
+  assert.deepEqual([fromFifo.code, fromFifo.json().error.message], [2, `--file: ${fifo} is not a file.`]);
+
   const piped = await run(['start', '--file', '-', '--json'], { readStdin: async () => stdin });
   assert.equal(piped.code, 0, piped.stdout);
   const pipedDefinition = piped.json().timer.definition;
@@ -145,6 +152,12 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
     assert.equal(result.code, 2, `${argv.join(' ')}: ${result.stdout}`);
     assert.match(result.json().error.message, message, argv.join(' '));
   }
+  // A FIFO with no writer is refused at once, not waited on.
+  const fifo = join(dir, 'fifo.json');
+  execFileSync('mkfifo', [fifo]);
+  const fromFifo = await run(['start', '--file', fifo, '--json']);
+  assert.deepEqual([fromFifo.code, fromFifo.json().error.message], [2, `--file: ${fifo} is not a file.`]);
+
   const piped = await run(['start', '--file', '-', '--json'], { readStdin: async () => 'x'.repeat(WORKOUT_FILE_LIMIT + 1) });
   assert.match(piped.json().error.message, /stdin is larger than 1 MiB/);
 

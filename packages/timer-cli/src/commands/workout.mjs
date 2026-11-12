@@ -1,4 +1,5 @@
 // Labelled interval workouts: repeatable `--step "Label:40s"` flags and workout files (`--file <path|->`).
+import { constants as fsConstants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { PHASES, TIMER_LIMITS, lineTextIssue } from '@subset.dev/timer-core';
@@ -195,7 +196,8 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
     const path = resolve(cwd, file);
     let handle;
     try {
-      handle = await open(path, 'r');
+      // Non-blocking, so a FIFO with no writer opens at once and is refused as not a file instead of hanging.
+      handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
       if (!(await handle.stat()).isFile()) throw new CliError('invalid_input', `--file: ${file} is not a file.`);
       // Read at most one byte past the limit from the open file, so a file that grows meanwhile is still refused.
       const buffer = Buffer.alloc(WORKOUT_FILE_LIMIT + 1);
