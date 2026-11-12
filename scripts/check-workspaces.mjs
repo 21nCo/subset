@@ -125,6 +125,8 @@ const { TOOLS: launcherTools } = await import(new URL('packages/subset-dev/src/t
 for (const [tool, { package: name, bin }] of Object.entries(launcherTools)) {
   assert.ok(isPublic(name), `subset ${tool} runs ${name}, which is not a public workspace`);
   assert.ok(Object.hasOwn(workspacesByName.get(name).bin ?? {}, bin), `subset ${tool} runs bin ${bin}, which ${name} does not declare`);
+  // The launcher imports the bin into its own process, so it must be an ES module that reads process.argv.
+  assert.match(workspacesByName.get(name).bin[bin], /\.mjs$/, `subset ${tool} runs ${name}'s ${bin}, which must be an .mjs ES module`);
 }
 for (const manifest of publicPackages) {
   if (manifest.bin === undefined || manifest.name === 'subset.dev') continue;

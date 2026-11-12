@@ -15,7 +15,7 @@ const { version } = JSON.parse(readFileSync(new URL('../package.json', import.me
 
 // A stand-in npm and an installed @subset.dev/usage. The npm records its arguments in FAKE_NPM_LOG, prints a PATH
 // whose node_modules/.bin folder holds the tool, and exits with FAKE_NPM_EXIT. The tool prints its arguments as JSON
-// and exits with TOOL_EXIT; with TOOL_WAIT it prints `ready`, then reports the first signal it gets and exits 0.
+// and exits with TOOL_EXIT; with TOOL_WAIT it prints `ready <pid>`, then reports each signal it gets.
 const root = mkdtempSync(path.join(tmpdir(), 'subset-dev-test-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const npmLog = path.join(root, 'npm-args.json');
@@ -26,8 +26,14 @@ writeFileSync(path.join(modules, '@subset.dev', 'usage', 'package.json'), JSON.s
 writeFileSync(
   path.join(modules, '@subset.dev', 'usage', 'cli.mjs'),
   `if (process.env.TOOL_WAIT) {
-     for (const s of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(s, () => { process.stdout.write(s); process.exit(0); });
-     process.stdout.write('ready');
+     // Reports every signal it gets, and exits 0 a moment after the first.
+     for (const s of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+       process.on(s, () => {
+         process.stdout.write(' ' + s);
+         setTimeout(() => process.exit(0), 200);
+       });
+     }
+     process.stdout.write('ready ' + process.pid);
      setTimeout(() => process.exit(9), 5000);
    } else {
      process.stdout.write(JSON.stringify(process.argv.slice(2)));
@@ -148,26 +154,26 @@ test('finds the npm to run without a shell', () => {
   assert.equal(findNpmCli({ env: winEnv, platform: 'win32', execPath, exists: () => false }), undefined);
 });
 
-// Sends `signals` to the launcher alone, 100 ms apart, once the tool is running; resolves with what the tool printed
-// and how the launcher ended. The tool exits on the first signal it gets.
-async function signalLauncher(...signals) {
-  const child = spawn(process.execPath, [cli, 'usage'], { env: { ...env, TOOL_WAIT: '1' } });
+// Starts the launcher on the waiting tool, in its own process group, and sends `signal` once the tool is running: to
+// the launcher's process, or with `group` to its whole process group, as a terminal does for Ctrl-C or a hangup.
+// Resolves with the tool's process ID, the signals it reported and how the launcher ended.
+async function signalLauncher(signal, { group = false } = {}) {
+  const child = spawn(process.execPath, [cli, 'usage'], { env: { ...env, TOOL_WAIT: '1' }, detached: true });
   let stdout = '';
   child.stdout.on('data', (chunk) => {
+    const first = !stdout;
     stdout += chunk;
-    if (stdout === 'ready') signals.forEach((signal, index) => setTimeout(() => child.kill(signal), index * 100));
+    if (first) process.kill(group ? -child.pid : child.pid, signal);
   });
   const [code, endSignal] = await once(child, 'close');
-  return { stdout, code, endSignal };
+  const [, pid, ...signals] = stdout.split(' ');
+  return { sameProcess: Number(pid) === child.pid, signals, code, endSignal };
 }
 
-test('passes SIGTERM and SIGHUP sent to the launcher straight to the tool', { skip: process.platform === 'win32' }, async () => {
-  for (const signal of ['SIGTERM', 'SIGHUP']) {
-    assert.deepEqual(await signalLauncher(signal), { stdout: `ready${signal}`, code: 0, endSignal: null }, signal);
+test('runs the tool in its own process, so each signal reaches the tool exactly once', { skip: process.platform === 'win32' }, async () => {
+  for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+    for (const group of [false, true]) {
+      assert.deepEqual(await signalLauncher(signal, { group }), { sameProcess: true, signals: [signal], code: 0, endSignal: null }, `${signal}${group ? ' to the group' : ''}`);
+    }
   }
-});
-
-test('does not pass on SIGINT, which Ctrl-C already delivers to the tool, and keeps waiting for the tool', { skip: process.platform === 'win32' }, async () => {
-  // The launcher survives the SIGINT and the tool never sees it; the SIGTERM after it is what reaches the tool.
-  assert.deepEqual(await signalLauncher('SIGINT', 'SIGTERM'), { stdout: 'readySIGTERM', code: 0, endSignal: null });
 });

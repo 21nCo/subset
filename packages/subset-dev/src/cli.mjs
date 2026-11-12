@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // subset <tool>[@<version>] [arguments...]: the subset.dev package's command. `npx subset.dev usage status` does what
 // `npx @subset.dev/usage status` does: npm fetches the tool (the launcher depends on none of them), and the launcher
-// runs its bin with Node.js.
-import { spawn, spawnSync } from 'node:child_process';
+// then loads the tool's bin module into this same process.
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
+import { pathToFileURL } from 'node:url';
 import { findToolBin } from './bin.mjs';
 import { findNpmCli } from './npm.mjs';
 import { npmLocateArgs, resolveTool, TOOLS } from './tools.mjs';
@@ -55,25 +56,14 @@ function locate(tool) {
   return findToolBin(reportedPath, tool) ?? fail(`npm fetched ${tool.spec}, but its ${tool.bin} command was not found.`);
 }
 
-// The tool is this process's own child, so a SIGTERM or SIGHUP sent to the launcher alone is passed straight on.
-// SIGINT is not: Ctrl-C already reaches the tool through the terminal's process group, and a second SIGINT would make
-// some tools skip their cleanup. The launcher waits for the tool and exits as it did.
-const FORWARDED_SIGNALS = ['SIGTERM', 'SIGHUP'];
-const ignore = () => {};
-
-function run(tool, args) {
+// Runs the tool in this process, as if Node.js had been started on its bin: no second process stands between the
+// tool and the terminal, so it alone gets every signal (Ctrl-C, a hangup, a SIGTERM to the process or its group)
+// exactly once, reads the terminal directly, and sets the exit code. Tool bins are ES modules
+// (scripts/check-workspaces.mjs) that read their arguments from process.argv.
+async function run(tool, args) {
   const file = locate(tool);
-  const child = spawn(process.execPath, [file, ...args], { stdio: 'inherit' });
-  const forward = (signal) => child.kill(signal);
-  for (const signal of FORWARDED_SIGNALS) process.on(signal, forward);
-  process.on('SIGINT', ignore);
-  child.on('error', (error) => fail(`could not start ${tool.bin}: ${error.message}`));
-  child.on('exit', (code, signal) => {
-    for (const name of FORWARDED_SIGNALS) process.off(name, forward);
-    process.off('SIGINT', ignore);
-    if (signal) process.kill(process.pid, signal);
-    else process.exit(code ?? 1);
-  });
+  process.argv = [process.argv[0], file, ...args];
+  await import(pathToFileURL(file).href);
 }
 
 const [first, ...rest] = process.argv.slice(2);
@@ -87,6 +77,6 @@ if (first === undefined || first === '-h' || first === '--help' || first === 'he
     console.error(`subset: ${tool.error}`);
     process.exitCode = 2;
   } else {
-    run(tool, rest);
+    await run(tool, rest);
   }
 }

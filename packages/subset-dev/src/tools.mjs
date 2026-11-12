@@ -27,7 +27,8 @@ export function resolveTool(argument) {
 /**
  * The npm arguments that fetch a resolved tool (into npm's cache, or from a local install that satisfies it) and
  * print the PATH npm would run it with, whose first matching node_modules/.bin folder holds it. The launcher then
- * starts the tool itself, so signals reach it directly instead of stopping at npm and the shell npm runs commands in.
+ * runs the tool in its own process, rather than through npm and the shell npm runs commands in, which would stand
+ * between the tool and the signals sent to the launcher.
  */
 export function npmLocateArgs({ spec }) {
   return ['exec', '--yes', `--package=${spec}`, '--', 'node', '-p', 'process.env.PATH'];
