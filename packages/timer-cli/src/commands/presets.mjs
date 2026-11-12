@@ -1,6 +1,7 @@
 import { formatDuration } from '@subset.dev/timer-core';
-import { intervalSpec } from './timers.mjs';
-import { call, resolveRef } from './shared.mjs';
+import { INTERVAL_OPTIONS, intervalSpec } from './timers.mjs';
+import { readWorkout, workoutSpec } from './workout.mjs';
+import { call, resolveRef, usageError } from './shared.mjs';
 
 const length = (ms) => formatDuration(ms, 'up');
 const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
@@ -38,11 +39,20 @@ export const presetCommands = {
   'preset save': {
     options: {
       'no-sound': { type: 'boolean' },
-      ...Object.fromEntries(['work', 'rest', 'rounds', 'prep', 'cooldown'].map((flag) => [flag, { type: 'string' }]))
+      ...INTERVAL_OPTIONS
     },
     positionals: [1, 1],
-    async run({ client, positionals: [name], values }) {
-      const timer = { ...intervalSpec(values), ...(values['no-sound'] ? { sound: false } : {}) };
+    async run({ client, positionals: [name], values, cwd, readStdin }) {
+      let spec;
+      if (values.file !== undefined) {
+        const other = ['work', 'rest', 'rounds', 'prep', 'cooldown', 'step'].find((flag) => values[flag] !== undefined);
+        if (other) throw usageError(`--file takes the whole workout; use it without --${other}.`);
+        // The preset is named by <name>; a "name" in the file names only timers started from it directly.
+        spec = workoutSpec(await readWorkout(values.file, { cwd, readStdin })).spec;
+      } else {
+        spec = intervalSpec(values);
+      }
+      const timer = { ...spec, ...(values['no-sound'] ? { sound: false } : {}) };
       const result = await call(client.op('presets.save', { name, timer }));
       return { json: result, text: `Saved preset ${result.preset.name} (${result.preset.id}).` };
     }

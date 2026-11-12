@@ -1,8 +1,14 @@
 import { TIMER_ID_PATTERN, timerLine } from '@subset.dev/timer-core';
 import { parseDuration, parseUntil } from '../parse-duration.mjs';
+import { readWorkout, stepsSpec, workoutSpec } from './workout.mjs';
 import { CliError, call, endsAt, findPreset, formatLocalTime, resolveTimer, usageError } from './shared.mjs';
 
-const INTERVAL_FLAGS = ['work', 'rest', 'rounds', 'prep', 'cooldown'];
+const INTERVAL_FLAGS = ['work', 'rest', 'rounds', 'prep', 'cooldown', 'step'];
+/** Options for an interval's definition, shared by `start` and `preset save`. */
+export const INTERVAL_OPTIONS = {
+  ...Object.fromEntries(['work', 'rest', 'rounds', 'prep', 'cooldown', 'file'].map((flag) => [flag, { type: 'string' }])),
+  step: { type: 'string', multiple: true }
+};
 
 /** The human text for a timer result: its SET-74 line, and when it will end if it is running. */
 export function timerResultText(result) {
@@ -24,8 +30,9 @@ function rounds(value) {
   return Number(value);
 }
 
-/** An interval spec from `--work`, `--rest`, `--rounds`, `--prep` and `--cooldown`. */
+/** An interval spec from `--work` or `--step`, with `--rest`, `--rounds`, `--prep` and `--cooldown`. */
 export function intervalSpec(values) {
+  if (values.step !== undefined) return stepsSpec(values);
   if (values.work === undefined) throw usageError('An interval needs --work, for example --work 40s.');
   if (values.rounds === undefined) throw usageError('An interval needs --rounds, for example --rounds 10.');
   const segments = [{ label: 'Work', phase: 'work', durationMs: duration('work', values.work) }];
@@ -50,10 +57,18 @@ async function resolvePreset(client, ref) {
 }
 
 /** The `start` operation input for `start <spec>` or `start --until <time>`. */
-async function startInput(client, spec, values, now) {
+async function startInput(client, spec, values, now, io) {
   const intervalFlags = INTERVAL_FLAGS.filter((flag) => values[flag] !== undefined);
   const name = values.name === undefined ? {} : { name: values.name };
   const sound = values['no-sound'] ? { sound: false } : {};
+  if (values.file !== undefined) {
+    if (spec !== undefined || values.until !== undefined || intervalFlags.length) {
+      throw usageError('--file takes the whole workout; use it without a <spec>, --until or interval flags.');
+    }
+    const workout = workoutSpec(await readWorkout(values.file, io));
+    const fileName = workout.name === undefined ? {} : { name: workout.name };
+    return { timer: { ...workout.spec, ...sound }, ...fileName, ...name };
+  }
   if (spec !== 'interval' && intervalFlags.length) {
     throw usageError(`--${intervalFlags[0]} applies only to start interval.`);
   }
@@ -114,11 +129,11 @@ export const timerCommands = {
       name: { type: 'string' },
       'no-sound': { type: 'boolean' },
       until: { type: 'string' },
-      ...Object.fromEntries(INTERVAL_FLAGS.map((flag) => [flag, { type: 'string' }]))
+      ...INTERVAL_OPTIONS
     },
     positionals: [0, 1],
-    async run({ client, positionals: [spec], values, now }) {
-      const input = await startInput(client, spec, values, now());
+    async run({ client, positionals: [spec], values, now, cwd, readStdin }) {
+      const input = await startInput(client, spec, values, now(), { cwd, readStdin });
       const result = await call(client.op('start', input));
       return { json: result, text: timerResultText(result) };
     }
