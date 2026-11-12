@@ -67,4 +67,4 @@ An agent should use `status --json` and `doctor --json` to read state. `join` st
 
 Releases are tag-based and follow the `@subset.dev/usage` path. This package is listed in `release-packages.json`. Bump `version` here and merge. Then push a tag `minutes-v<version>`. `.github/workflows/publish-tag.yml` resolves the tag with `scripts/resolve-release-tag.mjs`, then installs, checks, builds, tests (`npm test --workspace=@subset.dev/minutes`), packs, and publishes. The workflow itself is unchanged.
 
-No tag has been pushed and nothing is published. Before listing the CLI as available, verify `npx @subset.dev/minutes@<version> doctor`, then a real `join` in a meeting you control.
+No tag has been pushed and nothing is published. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Before listing the CLI as available, verify `npx @subset.dev/minutes@<version> doctor`, then a real `join` in a meeting you control.

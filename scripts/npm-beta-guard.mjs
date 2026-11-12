@@ -22,7 +22,7 @@ export function isNewerBeta(a, b) {
 
 // The guard's verdict for a packument (the registry's package document) or null for a missing package.
 export function betaVerdict(packument, version, betaVersion) {
-  if (!packument?.['dist-tags']?.latest) return { error: 'has no live release yet; publish its first version with a live tag' };
+  if (!packument?.['dist-tags']?.latest) return { error: 'has no live release yet; publish its first version with a live tag (see docs/macos-release.md, First npm release of a package)' };
   if (packument.versions?.[version]) return { error: `${version} is already released; bump the version in package.json for a new beta` };
   const current = packument['dist-tags'].beta;
   if (current !== undefined && current !== betaVersion && !isNewerBeta(betaVersion, current)) {
