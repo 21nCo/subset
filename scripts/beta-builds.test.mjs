@@ -51,6 +51,7 @@ test('publishes a beta only before its release and never behind a newer beta', (
   assert.deepEqual(betaVerdict(packument, '0.2.0', '0.2.0-beta.1'), { publish: true });
   assert.match(betaVerdict(null, '0.2.0', '0.2.0-beta.1').error, /no live release/);
   assert.match(betaVerdict({ 'dist-tags': {}, versions: {} }, '0.2.0', '0.2.0-beta.1').error, /no live release/);
+  assert.match(betaVerdict({ 'dist-tags': { latest: '0.0.0' }, versions: { '0.0.0': {} } }, '0.2.0', '0.2.0-beta.1').error, /no live release/);
   assert.match(betaVerdict(packument, '0.1.0', '0.1.0-beta.1').error, /already released/);
   const ahead = { ...packument, 'dist-tags': { latest: '0.1.0', beta: '0.2.0-beta.2' } };
   assert.equal(betaVerdict(ahead, '0.2.0', '0.2.0-beta.1').publish, false);
