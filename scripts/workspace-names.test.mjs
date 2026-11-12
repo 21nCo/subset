@@ -17,6 +17,14 @@ test('accepts @subset.dev names for private packages, published packages and app
   assert.deepEqual(workspaceManifestProblems('apps', { name: '@subset.dev/usage-web', private: true }), []);
 });
 
+test('accepts the owned unscoped names only as published packages', () => {
+  assert.deepEqual(workspaceManifestProblems('packages', { name: 'subset.dev', private: false }), []);
+  const problem = ['subset.dev is an unscoped name and must be a published package in packages/'];
+  assert.deepEqual(workspaceManifestProblems('packages', { name: 'subset.dev', private: true }), problem);
+  assert.deepEqual(workspaceManifestProblems('apps', { name: 'subset.dev', private: false }), [...problem, 'subset.dev is an app host and must remain private']);
+  assert.deepEqual(workspaceManifestProblems('packages', { name: 'subset.dev-core', private: false }), ['subset.dev-core must be named @subset.dev/<name>']);
+});
+
 test('requires a declared privacy and private app hosts', () => {
   assert.deepEqual(workspaceManifestProblems('apps', { name: '@subset.dev/x', private: false }), ['@subset.dev/x is an app host and must remain private']);
   assert.deepEqual(workspaceManifestProblems('packages', { name: '@subset.dev/x' }), ['@subset.dev/x must declare whether it is private']);

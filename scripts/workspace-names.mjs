@@ -2,11 +2,19 @@
 // @subset.dev scope: we do not own @subset on npm, so a private @subset/* name could clash with someone else's
 // published package. App hosts must remain private.
 export const WORKSPACE_NAME = /^@subset\.dev\/[a-z0-9-]+$/;
+// Unscoped names we own on npm, each a published package in packages/ (owner direction, 2026-11-12): `subset.dev`
+// runs the Subset CLIs (`npx subset.dev usage`, installed command `subset`).
+export const UNSCOPED_PACKAGES = new Set(['subset.dev']);
 
 /** Problems with a workspace manifest's name and privacy; `kind` is its folder, 'packages' or 'apps'. */
 export function workspaceManifestProblems(kind, manifest) {
   const problems = [];
-  if (typeof manifest.name !== 'string' || !WORKSPACE_NAME.test(manifest.name)) problems.push(`${manifest.name} must be named @subset.dev/<name>`);
+  const unscoped = UNSCOPED_PACKAGES.has(manifest.name);
+  if (unscoped) {
+    if (kind !== 'packages' || manifest.private !== false) problems.push(`${manifest.name} is an unscoped name and must be a published package in packages/`);
+  } else if (typeof manifest.name !== 'string' || !WORKSPACE_NAME.test(manifest.name)) {
+    problems.push(`${manifest.name} must be named @subset.dev/<name>`);
+  }
   if (typeof manifest.private !== 'boolean') problems.push(`${manifest.name} must declare whether it is private`);
   else if (kind === 'apps' && !manifest.private) problems.push(`${manifest.name} is an app host and must remain private`);
   return problems;
