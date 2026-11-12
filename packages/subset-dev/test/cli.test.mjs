@@ -36,7 +36,8 @@ writeFileSync(
      process.stdout.write('ready ' + process.pid);
      setTimeout(() => process.exit(9), 5000);
    } else {
-     process.stdout.write(JSON.stringify(process.argv.slice(2)));
+     if (process.env.TOOL_PRINT_PATH) process.stdout.write(process.env.PATH);
+     else process.stdout.write(JSON.stringify(process.argv.slice(2)));
      process.exitCode = Number(process.env.TOOL_EXIT ?? 0);
    }`
 );
@@ -75,6 +76,11 @@ test('asks npm for the tool, then runs its bin with the arguments unchanged', ()
   assert.deepEqual(npmLocateArgs(resolveTool('usage')), ['exec', '--yes', '--package=@subset.dev/usage@latest', '--', 'node', '-p', 'process.env.PATH']);
 });
 
+test('runs the tool with the PATH npm reported', () => {
+  const result = subset(['usage'], { TOOL_PRINT_PATH: '1' });
+  assert.equal(result.stdout, `/elsewhere/node_modules/.bin${path.delimiter}${path.join(modules, '.bin')}${path.delimiter}/usr/bin`);
+});
+
 test("exits with the tool's exit code, and fails when npm or the tool's bin does", () => {
   assert.equal(subset(['usage'], { TOOL_EXIT: '3' }).status, 3);
   const npmFailed = subset(['usage'], { FAKE_NPM_EXIT: '7' });
@@ -107,7 +113,9 @@ test("finds a tool's bin in the first node_modules/.bin folder that holds its pa
   const files = {
     '/a/node_modules/@subset.dev/usage/package.json': JSON.stringify({ name: '@subset.dev/usage', version: '0.1.0', bin: { 'subset-usage': 'dist/cli.mjs' } }),
     '/b/node_modules/@subset.dev/usage/package.json': JSON.stringify({ name: '@subset.dev/usage', version: '0.2.0', bin: { 'subset-usage': 'dist/cli.mjs' } }),
-    '/c/node_modules/@subset.dev/usage/package.json': JSON.stringify({ name: '@subset.dev/usage', version: '0.3.0', bin: { 'subset-usage': '../../../escape.mjs' } })
+    '/c/node_modules/@subset.dev/usage/package.json': JSON.stringify({ name: '@subset.dev/usage', version: '0.3.0', bin: { 'subset-usage': '../../../escape.mjs' } }),
+    '/d/node_modules/@subset.dev/usage/package.json': JSON.stringify({ name: '@subset.dev/usage', version: '0.4.0', bin: { 'subset-usage': '..cli.mjs' } }),
+    '/e/node_modules/@subset.dev/usage/package.json': 'null'
   };
   const readFile = (file) => {
     if (!(file in files)) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
@@ -120,6 +128,9 @@ test("finds a tool's bin in the first node_modules/.bin folder that holds its pa
   assert.equal(find(pathValue, 'usage@0.9.0'), undefined);
   // A bin that points outside its package is ignored.
   assert.equal(find('/c/node_modules/.bin', 'usage'), undefined);
+  // A file whose name starts with `..` is still inside the package; a package.json that is not an object is skipped.
+  assert.equal(find('/d/node_modules/.bin', 'usage'), '/d/node_modules/@subset.dev/usage/..cli.mjs');
+  assert.equal(find('/e/node_modules/.bin:/b/node_modules/.bin', 'usage'), '/b/node_modules/@subset.dev/usage/dist/cli.mjs');
   assert.equal(
     findToolBin('C:\\p\\node_modules\\.bin;C:\\Windows', resolveTool('usage'), {
       platform: 'win32',

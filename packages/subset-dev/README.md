@@ -30,7 +30,7 @@ With `npm install -g subset.dev`, the same commands are `subset usage`, `subset 
 
 `subset <tool>[@<version>] [arguments...]` first asks npm for the tool: `npm exec --yes --package=@subset.dev/<tool>@<version>` fetches it into npm's cache (or uses a local install that satisfies the version) and reports the `PATH` it would run it with. The launcher takes the tool's bin from the first `node_modules/.bin` folder on that `PATH` that holds the package, and loads that ES module into its own Node.js process, as if Node.js had been started on it. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both.
 
-npm runs as the `npm-cli.js` of the npm that started the launcher (through `npm_execpath`), or otherwise as `npm` from `PATH`; on Windows it is always `npm-cli.js` (beside the first `npm.cmd` on `PATH`, or the npm installed with Node.js), never `cmd.exe`. No shell is involved, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged.
+npm runs as the `npm-cli.js` of the npm that started the launcher (through `npm_execpath`), or otherwise as `npm` from `PATH`; on Windows it is always `npm-cli.js` (from the first `PATH` folder that holds both `npm.cmd` and `node_modules\npm\bin\npm-cli.js`, or else the npm installed with Node.js), never `cmd.exe`. No shell is involved, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged.
 
 Because the tool runs in the launcher's own process, there is no second process to pass signals on: Ctrl-C, a hangup or a SIGTERM reaches the tool once, whether it is sent to the process or to its whole process group, and the tool reads the terminal and sets the exit code itself.
 

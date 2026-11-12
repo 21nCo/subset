@@ -19,13 +19,14 @@ export function findToolBin(pathValue, tool, { platform = process.platform, read
     } catch {
       continue;
     }
-    if (manifest.name !== tool.package || (exact && manifest.version !== tool.version)) continue;
+    if (manifest?.name !== tool.package || (exact && manifest.version !== tool.version)) continue;
     const bin = typeof manifest.bin === 'string' ? { [tool.bin]: manifest.bin } : manifest.bin;
     const file = bin?.[tool.bin];
     if (typeof file !== 'string') continue;
     const resolved = paths.resolve(packageDir, file);
-    // A bin must stay inside its package.
-    if (paths.relative(packageDir, resolved).startsWith('..')) continue;
+    // A bin must stay inside its package (a file named `..x` inside it is fine).
+    const relative = paths.relative(packageDir, resolved);
+    if (relative === '' || relative === '..' || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) continue;
     return resolved;
   }
   return undefined;

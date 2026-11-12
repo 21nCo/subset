@@ -43,7 +43,7 @@ function fail(message) {
   process.exit(1);
 }
 
-// The tool's bin file, fetched by npm. npm's own messages and errors go to stderr.
+// The tool's bin file, fetched by npm, and the PATH npm would run it with. npm's own messages and errors go to stderr.
 function locate(tool) {
   const npmCli = findNpmCli();
   if (npmCli === undefined && process.platform === 'win32') fail(`could not find npm. Run npx ${tool.spec} instead.`);
@@ -53,7 +53,8 @@ function locate(tool) {
   if (result.error) fail(`could not start npm: ${result.error.message}`);
   if (result.status !== 0) fail(`npm could not fetch ${tool.spec}.`);
   const reportedPath = result.stdout.trim().split(/\r?\n/).at(-1) ?? '';
-  return findToolBin(reportedPath, tool) ?? fail(`npm fetched ${tool.spec}, but its ${tool.bin} command was not found.`);
+  const file = findToolBin(reportedPath, tool) ?? fail(`npm fetched ${tool.spec}, but its ${tool.bin} command was not found.`);
+  return { file, reportedPath };
 }
 
 // Runs the tool in this process, as if Node.js had been started on its bin: no second process stands between the
@@ -61,7 +62,9 @@ function locate(tool) {
 // exactly once, reads the terminal directly, and sets the exit code. Tool bins are ES modules
 // (scripts/check-workspaces.mjs) that read their arguments from process.argv.
 async function run(tool, args) {
-  const file = locate(tool);
+  const { file, reportedPath } = locate(tool);
+  // The tool and the commands it starts see the PATH they would have under npx, with its packages' bin folders.
+  process.env.PATH = reportedPath;
   process.argv = [process.argv[0], file, ...args];
   await import(pathToFileURL(file).href);
 }
