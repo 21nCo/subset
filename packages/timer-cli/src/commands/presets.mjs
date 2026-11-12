@@ -1,6 +1,6 @@
 import { formatDuration } from '@subset.dev/timer-core';
 import { INTERVAL_OPTIONS, intervalSpec } from './timers.mjs';
-import { optionError, readWorkout, workoutSpec } from './workout.mjs';
+import { inputError, readWorkout, workoutSpec } from './workout.mjs';
 import { call, resolveRef } from './shared.mjs';
 
 const length = (ms) => formatDuration(ms, 'up');
@@ -46,7 +46,7 @@ export const presetCommands = {
       let spec;
       if (values.file !== undefined) {
         const other = ['work', 'rest', 'rounds', 'prep', 'cooldown', 'step'].find((flag) => values[flag] !== undefined);
-        if (other) throw optionError(`--${other}`, `--file takes the whole workout; use it without --${other}.`);
+        if (other) throw inputError(`--${other}`, 'cannot be combined with --file', `--file takes the whole workout; use it without --${other}.`);
         // The preset is named by <name>; a "name" in the file names only timers started from it directly.
         spec = workoutSpec(await readWorkout(values.file, { cwd, readStdin })).spec;
       } else {
