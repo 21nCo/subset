@@ -8,14 +8,17 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { findToolBin } from '../src/bin.mjs';
 import { findNpmCli } from '../src/npm.mjs';
-import { npmLocateArgs, resolveTool, TOOLS } from '../src/tools.mjs';
+import { RESERVED_NAMES, route, VERBS } from '../src/commands.mjs';
+import { fetchFailureMessage, npmDistTagsArgs, npmLocateArgs, resolveTool, TOOLS } from '../src/tools.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-// A stand-in npm and an installed @subset.dev/usage. The npm records its arguments in FAKE_NPM_LOG, prints a PATH
-// whose node_modules/.bin folder holds the tool, and exits with FAKE_NPM_EXIT. The tool prints its arguments as JSON
-// and exits with TOOL_EXIT; with TOOL_WAIT it prints `ready <pid>`, then reports each signal it gets.
+// A stand-in npm and an installed @subset.dev/usage. The npm appends its arguments to the npm log, one JSON line per
+// run. `npm view` prints FAKE_VIEW_OUT and exits with FAKE_VIEW_EXIT; anything else prints a PATH whose
+// node_modules/.bin folder holds the tool, and exits with FAKE_NPM_EXIT. The tool prints its arguments as JSON and
+// exits with TOOL_EXIT; with TOOL_PRINT_ENV it prints that environment variable instead; with TOOL_WAIT it prints
+// `ready <pid>`, then reports each signal it gets.
 const root = mkdtempSync(path.join(tmpdir(), 'subset-dev-test-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const npmLog = path.join(root, 'npm-args.json');
@@ -36,7 +39,7 @@ writeFileSync(
      process.stdout.write('ready ' + process.pid);
      setTimeout(() => process.exit(9), 5000);
    } else {
-     if (process.env.TOOL_PRINT_PATH) process.stdout.write(process.env.PATH);
+     if (process.env.TOOL_PRINT_ENV) process.stdout.write(String(process.env[process.env.TOOL_PRINT_ENV]));
      else process.stdout.write(JSON.stringify(process.argv.slice(2)));
      process.exitCode = Number(process.env.TOOL_EXIT ?? 0);
    }`
@@ -44,13 +47,28 @@ writeFileSync(
 mkdirSync(path.join(root, 'npm'));
 writeFileSync(
   path.join(root, 'npm', 'npm-cli.js'),
-  `require('node:fs').writeFileSync(${JSON.stringify(npmLog)}, JSON.stringify(process.argv.slice(2)));
+  `require('node:fs').appendFileSync(${JSON.stringify(npmLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+   if (process.argv[2] === 'view') {
+     process.stdout.write(process.env.FAKE_VIEW_OUT ?? '');
+     process.exit(Number(process.env.FAKE_VIEW_EXIT ?? 0));
+   }
    process.stdout.write('some npm output\\n' + ${JSON.stringify(`/elsewhere/node_modules/.bin${path.delimiter}${path.join(modules, '.bin')}${path.delimiter}/usr/bin`)} + '\\n');
    process.exit(Number(process.env.FAKE_NPM_EXIT ?? 0));`
 );
 const env = { ...process.env, npm_execpath: path.join(root, 'npm', 'npx-cli.js') };
 
 const subset = (args, extra = {}) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { ...env, ...extra } });
+// The npm runs since the last call: the arguments of each.
+function npmCalls() {
+  let lines = '';
+  try {
+    lines = readFileSync(npmLog, 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  rmSync(npmLog, { force: true });
+  return lines.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
 
 test('resolves a tool to its package at latest, a dist-tag or an exact version', () => {
   assert.deepEqual(resolveTool('usage'), { name: 'usage', package: '@subset.dev/usage', bin: 'subset-usage', version: 'latest', spec: '@subset.dev/usage@latest' });
@@ -68,22 +86,23 @@ test('refuses unknown tools, and versions that are not a published dist-tag or e
   }
 });
 
-test('asks npm for the tool, then runs its bin with the arguments unchanged', () => {
+test('asks npm for the tool, then runs its bin with the arguments unchanged, asking the registry nothing more', () => {
+  npmCalls();
   const result = subset(['usage', 'status', '--help', 'two words', '%PATH%', 'trailing\\']);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), ['status', '--help', 'two words', '%PATH%', 'trailing\\']);
-  assert.deepEqual(JSON.parse(readFileSync(npmLog, 'utf8')), npmLocateArgs(resolveTool('usage')));
+  assert.deepEqual(npmCalls(), [npmLocateArgs(resolveTool('usage'))]);
   assert.deepEqual(npmLocateArgs(resolveTool('usage')), ['exec', '--yes', '--package=@subset.dev/usage@latest', '--', 'node', '-p', 'process.env.PATH']);
 });
 
 test('runs the tool with the PATH npm reported', () => {
-  const result = subset(['usage'], { TOOL_PRINT_PATH: '1' });
+  const result = subset(['usage'], { TOOL_PRINT_ENV: 'PATH' });
   assert.equal(result.stdout, `/elsewhere/node_modules/.bin${path.delimiter}${path.join(modules, '.bin')}${path.delimiter}/usr/bin`);
 });
 
 test("exits with the tool's exit code, and fails when npm or the tool's bin does", () => {
   assert.equal(subset(['usage'], { TOOL_EXIT: '3' }).status, 3);
-  const npmFailed = subset(['usage'], { FAKE_NPM_EXIT: '7' });
+  const npmFailed = subset(['usage'], { FAKE_NPM_EXIT: '7', FAKE_VIEW_OUT: '{"latest":"0.2.0"}' });
   assert.equal(npmFailed.status, 1);
   assert.match(npmFailed.stderr, /npm could not fetch @subset\.dev\/usage@latest/);
   // The fake prefix holds usage 0.2.0 only.
@@ -91,22 +110,127 @@ test("exits with the tool's exit code, and fails when npm or the tool's bin does
   assert.match(subset(['timer']).stderr, /its subset-timer command was not found/);
 });
 
-test('prints help listing every tool, and its version', () => {
+test('prints help listing every tool and command, and its version', () => {
   for (const args of [[], ['--help'], ['-h'], ['help']]) {
     const result = subset(args);
     assert.equal(result.status, 0);
     for (const [name, tool] of Object.entries(TOOLS)) assert.match(result.stdout, new RegExp(`^  ${name}\\s.*\\(${tool.package}\\)$`, 'm'));
+    for (const name of RESERVED_NAMES) {
+      const pending = MANAGEMENT_VERBS.includes(name) ? ' \\(not available yet\\)' : '';
+      assert.match(result.stdout, new RegExp(`^  ${name}\\s+${VERBS[name].summary}${pending}$`, 'm'), name);
+    }
   }
   assert.equal(subset(['--version']).stdout.trim(), version);
 });
 
 test('fails with exit code 2 and starts nothing for an unknown tool', () => {
-  rmSync(npmLog, { force: true });
+  npmCalls();
   const result = subset(['nope']);
   assert.equal(result.status, 2);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /Unknown tool "nope"/);
-  assert.throws(() => readFileSync(npmLog), { code: 'ENOENT' });
+  assert.deepEqual(npmCalls(), []);
+});
+
+const MANAGEMENT_VERBS = ['install', 'uninstall', 'update', 'list'];
+
+test('reserves the command names: no tool takes one, and resolving one as a tool is refused', () => {
+  assert.deepEqual([...RESERVED_NAMES].sort(), ['help', 'install', 'list', 'uninstall', 'update', 'version']);
+  for (const name of Object.keys(TOOLS)) assert.ok(!RESERVED_NAMES.includes(name), `the tool "${name}" takes a reserved command name`);
+  for (const name of RESERVED_NAMES) {
+    assert.match(resolveTool(name).error, /is a subset command, not a tool/, name);
+    assert.match(resolveTool(`${name}@beta`).error, /is a subset command, not a tool/, name);
+  }
+});
+
+test('routes each management command to "not available yet" with exit code 2, starting no npm', () => {
+  npmCalls();
+  for (const verb of MANAGEMENT_VERBS) {
+    for (const args of [[verb], [verb, 'timer', '--beta'], [verb, '--', '--help']]) {
+      const result = subset(args);
+      assert.equal(result.status, 2, args.join(' '));
+      assert.equal(result.stdout, '', args.join(' '));
+      assert.equal(result.stderr, `subset ${verb} is not available yet.\n`, args.join(' '));
+    }
+  }
+  assert.deepEqual(npmCalls(), []);
+});
+
+test("prints a command's usage for subset help <command> and subset <command> --help", () => {
+  npmCalls();
+  for (const verb of RESERVED_NAMES) {
+    // `subset help --help` is the launcher's help, and `subset help <tool>` points to the tool's.
+    for (const args of verb === 'help' ? [['help', 'help']] : [['help', verb], [verb, '--help'], [verb, 'timer', '-h']]) {
+      const result = subset(args);
+      assert.equal(result.status, 0, args.join(' '));
+      assert.equal(result.stderr, '', args.join(' '));
+      assert.ok(result.stdout.startsWith(`Usage: ${VERBS[verb].usage}\n`), args.join(' '));
+      assert.equal(result.stdout.includes('Not available yet'), MANAGEMENT_VERBS.includes(verb), args.join(' '));
+    }
+  }
+  assert.ok(subset(['help', 'install']).stdout.startsWith('Usage: subset install <app> [--beta] [--user]\n'));
+  assert.deepEqual(npmCalls(), []);
+});
+
+test('subset help points to a tool\'s own help, and refuses an unknown topic with exit code 2', () => {
+  const tool = subset(['help', 'usage']);
+  assert.equal(tool.status, 0);
+  assert.match(tool.stdout, /"subset usage --help" shows the help of usage \(@subset\.dev\/usage\)/);
+  const unknown = subset(['help', 'nope']);
+  assert.equal(unknown.status, 2);
+  assert.equal(unknown.stdout, '');
+  assert.match(unknown.stderr, /Unknown command "nope"/);
+  assert.equal(subset(['version']).stdout.trim(), version);
+});
+
+test('routes arguments to help, version, a command or a tool', () => {
+  const isTool = (name) => Object.hasOwn(TOOLS, name);
+  assert.deepEqual(route([], { isTool }), { action: 'help' });
+  assert.deepEqual(route(['help', '--help'], { isTool }), { action: 'help' });
+  assert.deepEqual(route(['version', 'x'], { isTool }), { action: 'version' });
+  assert.deepEqual(route(['list', '--json'], { isTool }), { action: 'unavailable', verb: 'list' });
+  // A tool's arguments, --help included, go to the tool.
+  assert.deepEqual(route(['usage', 'list', '--help'], { isTool }), { action: 'tool', argument: 'usage', args: ['list', '--help'] });
+  assert.deepEqual(route(['install@beta'], { isTool }), { action: 'tool', argument: 'install@beta', args: [] });
+});
+
+test('says why npm could not fetch a tool, asking the registry once', () => {
+  const cases = [
+    // No such package on npm: npm view --json prints the E404 error on stdout.
+    [{ FAKE_VIEW_EXIT: '1', FAKE_VIEW_OUT: JSON.stringify({ error: { code: 'E404', summary: 'Not Found' } }) }, 'subset: usage is not on npm yet.\n'],
+    // Only a beta.
+    [{ FAKE_VIEW_OUT: JSON.stringify({ beta: '0.2.0-beta.1' }) }, 'subset: usage has no live release yet; try subset usage@beta\n'],
+    // The registry cannot be reached.
+    [{ FAKE_VIEW_EXIT: '1', FAKE_VIEW_OUT: JSON.stringify({ error: { code: 'ENOTFOUND', summary: 'request failed' } }) }, 'subset: npm could not fetch @subset.dev/usage@latest.\n']
+  ];
+  for (const [extra, stderr] of cases) {
+    npmCalls();
+    const result = subset(['usage', 'status'], { FAKE_NPM_EXIT: '1', ...extra });
+    assert.equal(result.status, 1, stderr);
+    assert.equal(result.stdout, '', stderr);
+    assert.equal(result.stderr, stderr);
+    assert.deepEqual(npmCalls(), [npmLocateArgs(resolveTool('usage')), npmDistTagsArgs(resolveTool('usage'))], stderr);
+  }
+  assert.deepEqual(npmDistTagsArgs(resolveTool('timer@beta')), ['view', '@subset.dev/timer', 'dist-tags', '--json']);
+});
+
+test('reports the fetch failure when the registry answer does not explain it', () => {
+  const usage = resolveTool('usage');
+  const failure = 'npm could not fetch @subset.dev/usage@latest.';
+  // A live release exists, the answer is unreadable or not an object, or the probe did not run or timed out.
+  for (const probe of [{ status: 0, stdout: '{"latest":"0.2.0","beta":"0.3.0-beta.1"}' }, { status: 0, stdout: 'oops' }, { status: 0, stdout: '["beta"]' }, { status: 0, stdout: 'null' }, { status: 1, stdout: '' }, { status: null, stdout: '' }, undefined]) {
+    assert.equal(fetchFailureMessage(usage, probe), failure, JSON.stringify(probe));
+  }
+  // Only the default version is told to try the beta; a missing exact version or tag is the fetch failure.
+  assert.equal(fetchFailureMessage(resolveTool('usage@0.9.0'), { status: 0, stdout: '{"beta":"0.2.0-beta.1"}' }), 'npm could not fetch @subset.dev/usage@0.9.0.');
+  assert.equal(fetchFailureMessage(resolveTool('usage@next'), { status: 1, stdout: '{"error":{"code":"E404"}}' }), 'usage is not on npm yet.');
+});
+
+test('tells the tool it was started as subset <tool>', () => {
+  const result = subset(['usage'], { TOOL_PRINT_ENV: 'SUBSET_COMMAND', SUBSET_COMMAND: 'something else' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'subset usage');
+  assert.equal(subset(['usage@0.2.0'], { TOOL_PRINT_ENV: 'SUBSET_COMMAND' }).stdout, 'subset usage');
 });
 
 test("finds a tool's bin in the first node_modules/.bin folder that holds its package", () => {

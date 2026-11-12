@@ -1,6 +1,6 @@
 {
   "name": "subset.dev",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Launcher for the Subset command-line tools: npx subset.dev usage, npx subset.dev timer, npx subset.dev minutes",
   "license": "MIT",
   "private": false,
