@@ -6,24 +6,29 @@ export const TOOLS = Object.freeze({
   usage: Object.freeze({ package: '@subset.dev/usage', bin: 'subset-usage', summary: 'Local dashboard and CLI for AI subscription usage' })
 });
 
-// A dist-tag (latest, beta) or exact version (0.2.0, 0.2.0-beta.3). Ranges and other specs are refused, so an
-// argument can never become an npm option or a URL, file or git dependency.
-const VERSION_SPEC = /^(?:[a-z][a-z0-9-]*|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
+// The dist-tags the release workflow publishes, or an exact version (0.2.0, 0.2.0-beta.3). Ranges and other specs
+// are refused (npm would read a tag-like `x` or `v1` as a range), so an argument can never become an npm option or a
+// URL, file or git dependency.
+const VERSION_SPEC = /^(?:latest|beta|next|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
 
 /**
- * Resolves `usage` or `usage@<version>` to the package spec and bin to run, or returns { error }.
+ * Resolves `usage` or `usage@<version>` to the tool's package, bin and npm spec, or returns { error }.
  */
 export function resolveTool(argument) {
   const at = argument.indexOf('@');
   const name = at === -1 ? argument : argument.slice(0, at);
   const version = at === -1 ? 'latest' : argument.slice(at + 1);
   if (!Object.hasOwn(TOOLS, name)) return { error: `Unknown tool "${name}". Run "subset --help" to list the tools.` };
-  if (!VERSION_SPEC.test(version)) return { error: `"${version}" is not a dist-tag or exact version (for example latest, beta or 0.2.0).` };
+  if (!VERSION_SPEC.test(version)) return { error: `"${version}" is not latest, beta, next or an exact version such as 0.2.0.` };
   const tool = TOOLS[name];
-  return { name, spec: `${tool.package}@${version}`, bin: tool.bin };
+  return { name, package: tool.package, bin: tool.bin, version, spec: `${tool.package}@${version}` };
 }
 
-/** The npm arguments that run a resolved tool with the user's arguments. */
-export function npmExecArgs({ spec, bin }, args) {
-  return ['exec', '--yes', `--package=${spec}`, '--', bin, ...args];
+/**
+ * The npm arguments that fetch a resolved tool (into npm's cache, or from a local install that satisfies it) and
+ * print the PATH npm would run it with, whose first matching node_modules/.bin folder holds it. The launcher then
+ * starts the tool itself, so signals reach it directly instead of stopping at npm and the shell npm runs commands in.
+ */
+export function npmLocateArgs({ spec }) {
+  return ['exec', '--yes', `--package=${spec}`, '--', 'node', '-p', 'process.env.PATH'];
 }

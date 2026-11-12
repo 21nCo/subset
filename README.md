@@ -49,7 +49,7 @@ scripts/
 
 Future capability packages belong under `packages/<capability>/`; their standalone hosts belong under `apps/<app>/`. Native Swift packages and app targets may live under `native/` and are validated through Xcode rather than npm workspaces. The directory is a discovery and distribution surface, not the runtime owner of every capability.
 
-Every workspace, published or private, uses the `@subset.dev/<name>` scope; we do not own `@subset` on npm. The exception is the launcher `subset.dev` (`packages/subset-dev`, command `subset`), which runs the published CLIs as `npx subset.dev <tool>`. A private domain package that would share a name with a published CLI takes the `-core` suffix (for example `@subset.dev/usage-core`). App hosts remain private. No npm package is published from this scaffold.
+Every workspace, published or private, uses the `@subset.dev/<name>` scope; we do not own `@subset` on npm. The exception is the launcher `subset.dev` (`packages/subset-dev`, command `subset`), which runs the published CLIs as `npx subset.dev <tool>`. A private domain package that would share a name with a published CLI takes the `-core` suffix (for example `@subset.dev/usage-core`). App hosts remain private. The packages that are released to npm are listed in `release-packages.json`.
 
 ## Development
 

@@ -2,7 +2,7 @@
 
 A launcher for the Subset command-line tools. `npx subset.dev usage` runs `@subset.dev/usage`, so you do not have to type the scoped package name. Installed, its command is `subset`.
 
-> Status: prepared for npm, not yet published.
+> Status: 0.1.0 is published on npm. Later versions are released with a `subset-dev-v<version>` tag.
 
 ## Use
 
@@ -13,7 +13,7 @@ npx subset.dev                      # list the tools
 npx subset.dev usage                # same as npx @subset.dev/usage
 npx subset.dev usage status         # arguments after the tool name go to the tool unchanged
 npx subset.dev timer --help         # the tool's own help
-npx subset.dev usage@beta           # a dist-tag or exact version (default: latest)
+npx subset.dev usage@beta           # latest, beta, next or an exact version (default: latest)
 ```
 
 With `npm install -g subset.dev`, the same commands are `subset usage`, `subset usage status`, and so on. Note that `npx subset` (without `.dev`) runs a different, unrelated npm package.
@@ -28,9 +28,13 @@ With `npm install -g subset.dev`, the same commands are `subset usage`, `subset 
 
 ## How it works
 
-`subset <tool>[@<version>] [arguments...]` runs `npm exec --yes --package=@subset.dev/<tool>@<version> -- <bin> [arguments...]`. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both. It uses the npm that started it (through `npm_execpath`), or otherwise `npm` from `PATH`; on Windows it runs that npm's `npm-cli.js` with Node.js directly, never through `cmd.exe`, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged. It passes on the tool's exit code. A SIGINT or SIGTERM sent to the launcher alone is forwarded to the tool, and so is SIGHUP, as SIGTERM, since npm does not pass SIGHUP on.
+`subset <tool>[@<version>] [arguments...]` first asks npm for the tool: `npm exec --yes --package=@subset.dev/<tool>@<version>` fetches it into npm's cache (or uses a local install that satisfies the version) and reports the `PATH` it would run it with. The launcher takes the tool's bin from the first `node_modules/.bin` folder on that `PATH` that holds the package, and starts it with Node.js as its own child process. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both.
 
-The version is a dist-tag (`latest`, `beta`) or an exact version (`0.2.0`, `0.2.0-beta.3`). The launcher refuses ranges and other npm specs, so an argument cannot turn into an npm option or a file, URL or git dependency. Unknown tools exit with code 2 without starting npm.
+npm runs as the `npm-cli.js` of the npm that started the launcher (through `npm_execpath`), or otherwise as `npm` from `PATH`; on Windows it is always `npm-cli.js` (beside the first `npm.cmd` on `PATH`, or the npm installed with Node.js), never `cmd.exe`. No shell is involved, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged.
+
+The launcher exits with the tool's exit code. A SIGTERM or SIGHUP sent to the launcher alone goes straight to the tool. SIGINT is not passed on: Ctrl-C already reaches the tool through the terminal, and a second SIGINT would make some tools skip their cleanup. The launcher keeps waiting for the tool instead.
+
+The version is a dist-tag the release workflow publishes (`latest`, `beta`, `next`) or an exact version (`0.2.0`, `0.2.0-beta.3`). The launcher refuses ranges (including tag-like ones such as `x` or `v1`) and other npm specs, so an argument cannot turn into an npm option or a file, URL or git dependency. Unknown tools exit with code 2 without starting npm.
 
 ## Adding a tool
 
