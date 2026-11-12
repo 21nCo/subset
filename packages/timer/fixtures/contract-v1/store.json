@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "idSequence": 8,
+  "idSequence": 9,
   "timers": [
     {
       "definition": {
@@ -207,6 +207,52 @@
       "runtime": {
         "status": "idle",
         "startedAt": null,
+        "accumulatedMs": 0,
+        "pausedAt": null,
+        "laps": [],
+        "skippedMs": 0
+      }
+    },
+    {
+      "definition": {
+        "kind": "interval",
+        "id": "t_4tvjx8bj",
+        "name": "HIIT",
+        "sound": true,
+        "countdownTicks": true,
+        "createdAt": 1792400312000,
+        "segments": [
+          {
+            "label": "Squats",
+            "phase": "work",
+            "durationMs": 40000
+          },
+          {
+            "label": "Rest",
+            "phase": "rest",
+            "durationMs": 20000
+          },
+          {
+            "label": "Lunges",
+            "phase": "work",
+            "durationMs": 40000
+          },
+          {
+            "label": "Rest",
+            "phase": "rest",
+            "durationMs": 20000
+          },
+          {
+            "label": "Burpees",
+            "phase": "work",
+            "durationMs": 40000
+          }
+        ],
+        "rounds": 1
+      },
+      "runtime": {
+        "status": "running",
+        "startedAt": 1792400312000,
         "accumulatedMs": 0,
         "pausedAt": null,
         "laps": [],

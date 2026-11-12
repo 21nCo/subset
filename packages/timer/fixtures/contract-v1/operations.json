@@ -17,7 +17,7 @@
         "timer": {
           "definition": {
             "kind": "countdown",
-            "id": "t_4tvjx8bj",
+            "id": "t_mrbfgsp7",
             "name": "Eggs",
             "sound": true,
             "countdownTicks": false,
@@ -59,7 +59,7 @@
         "timer": {
           "definition": {
             "kind": "interval",
-            "id": "t_4tvjx8bj",
+            "id": "t_mrbfgsp7",
             "name": "Leg ladder",
             "sound": true,
             "countdownTicks": true,
@@ -317,7 +317,7 @@
         "timer": {
           "definition": {
             "kind": "interval",
-            "id": "t_4tvjx8bj",
+            "id": "t_mrbfgsp7",
             "name": "EMOM",
             "sound": true,
             "countdownTicks": true,
@@ -1098,6 +1098,79 @@
               "step": null,
               "next": null
             }
+          },
+          {
+            "definition": {
+              "kind": "interval",
+              "id": "t_4tvjx8bj",
+              "name": "HIIT",
+              "sound": true,
+              "countdownTicks": true,
+              "createdAt": 1792400312000,
+              "segments": [
+                {
+                  "label": "Squats",
+                  "phase": "work",
+                  "durationMs": 40000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 20000
+                },
+                {
+                  "label": "Lunges",
+                  "phase": "work",
+                  "durationMs": 40000
+                },
+                {
+                  "label": "Rest",
+                  "phase": "rest",
+                  "durationMs": 20000
+                },
+                {
+                  "label": "Burpees",
+                  "phase": "work",
+                  "durationMs": 40000
+                }
+              ],
+              "rounds": 1
+            },
+            "runtime": {
+              "status": "running",
+              "startedAt": 1792400312000,
+              "accumulatedMs": 0,
+              "pausedAt": null,
+              "laps": [],
+              "skippedMs": 0
+            },
+            "projection": {
+              "status": "running",
+              "elapsedMs": 88000,
+              "totalMs": 160000,
+              "remainingMs": 72000,
+              "finished": false,
+              "step": {
+                "index": 2,
+                "segmentIndex": 2,
+                "round": 1,
+                "phase": "work",
+                "label": "Lunges",
+                "startMs": 60000,
+                "durationMs": 40000,
+                "elapsedMs": 28000,
+                "remainingMs": 12000
+              },
+              "next": {
+                "index": 3,
+                "segmentIndex": 3,
+                "round": 1,
+                "phase": "rest",
+                "label": "Rest",
+                "startMs": 100000,
+                "durationMs": 20000
+              }
+            }
           }
         ]
       }
@@ -1340,7 +1413,7 @@
       "now": 1792400400000,
       "result": {
         "preset": {
-          "id": "p_4tvjx8bj",
+          "id": "p_mrbfgsp7",
           "name": "Plank",
           "builtIn": false,
           "timer": {

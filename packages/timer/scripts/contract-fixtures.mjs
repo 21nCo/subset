@@ -54,6 +54,19 @@ export function fixtureStore() {
       ]
     }
   }, at(-30 * minute));
+  // Running workout of labelled steps: 12 s left in Lunges, the third of five steps in one round.
+  run('start', {
+    timer: {
+      kind: 'interval', name: 'HIIT', rounds: 1,
+      segments: [
+        { label: 'Squats', phase: 'work', durationMs: 40_000 },
+        { label: 'Rest', phase: 'rest', durationMs: 20_000 },
+        { label: 'Lunges', phase: 'work', durationMs: 40_000 },
+        { label: 'Rest', phase: 'rest', durationMs: 20_000 },
+        { label: 'Burpees', phase: 'work', durationMs: 40_000 }
+      ]
+    }
+  }, at(-88_000));
   return store;
 }
 

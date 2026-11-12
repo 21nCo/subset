@@ -80,7 +80,7 @@ Time left rounds up and elapsed time rounds down. A segment label that differs f
 
 `schemas` holds draft 2020-12 JSON Schemas generated from the runtime validators: `inputs` and `outputs` for every operation (each input has an object root, as MCP tool definitions need), `store`, `result` (the `structuredContent`), `error` and `viewProps`. `viewProps` covers the serializable board props `{ result, capabilities: { create, destructive }, density: compact | full }`; the host also passes `actions` and an optional `now` clock, which are functions. The rules the schemas cannot state are that `until` lies within 24 hours of `now`, which the operations check, and the store's position rule, which `parseStore` checks.
 
-`fixtures/contract-v1/` holds the shared test vectors, exported as `@subset.dev/timer-core/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset.dev/timer-core`; the tests fail when they drift.
+`fixtures/contract-v1/` holds the shared test vectors, exported as `@subset.dev/timer-core/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state and a running workout of labelled steps, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset.dev/timer-core`; the tests fail when they drift.
 
 ## Board view (SET-75)
 

@@ -60,7 +60,7 @@ test('an empty board says so', async (t) => {
 const OPERATION_COMMANDS = [
   ['start an idle timer', ['start', 't_ac50bvkp'], 'Pomodoro (t_ac50bvkp): running · Focus · step 1/8 · 25:00 left · next Break 5:00\nEnds at 11:10:00.'],
   ['start fixes an until countdown to a duration', ['start', 't_v9pdg8p9'], 'Standup (t_v9pdg8p9): running · 30:00 left\nEnds at 09:30:00.'],
-  ['start a preset in one step', ['start', 'emom'], 'EMOM (t_4tvjx8bj): running · work · round 1/10 · 1:00 left · next work 1:00\nEnds at 09:10:00.'],
+  ['start a preset in one step', ['start', 'emom'], 'EMOM (t_mrbfgsp7): running · work · round 1/10 · 1:00 left · next work 1:00\nEnds at 09:10:00.'],
   ['pause a running interval', ['pause', 't_adygqpxx'], 'Tabata (t_adygqpxx): paused · work · round 3/8 · 0:12 left · next rest 0:10'],
   ['resume a paused countdown', ['resume', 't_dk1facen'], 'Tea (t_dk1facen): running · 1:40 left\nEnds at 09:01:40.'],
   ['lap a stopwatch', ['lap', 't_rcrt44q9'], 'Run (t_rcrt44q9): running · 10:00 elapsed · 3 laps'],

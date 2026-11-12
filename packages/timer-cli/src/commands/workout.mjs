@@ -12,6 +12,11 @@ export const WORKOUT_FILE_LIMIT = 1024 * 1024;
 const WORKOUT_FIELDS = new Set(['name', 'prep', 'cooldown', 'rest', 'rounds', 'sound', 'steps']);
 const STEP_FIELDS = new Set(['label', 'duration', 'phase']);
 
+/** An `invalid_input` refusal of one option, with that option as its issue path for `--json` callers. */
+export function optionError(path, message) {
+  return new CliError('invalid_input', message, { issues: [{ path, message }] });
+}
+
 class WorkoutIssues {
   constructor(prefix) {
     this.prefix = prefix;
@@ -111,7 +116,7 @@ export function parseStep(text, index, issues) {
 export function stepsSpec(values) {
   const issues = new WorkoutIssues('');
   for (const flag of ['work', 'file']) {
-    if (values[flag] !== undefined) throw new CliError('invalid_input', `--step cannot be combined with --${flag}.`);
+    if (values[flag] !== undefined) throw optionError(`--${flag}`, `--step cannot be combined with --${flag}.`);
   }
   const steps = values.step.map((text, index) => parseStep(text, index, issues));
   const flagMs = (flag) => (values[flag] === undefined ? undefined : durationMs(values[flag], `--${flag}`, issues));
@@ -181,7 +186,7 @@ export function workoutSpec(workout) {
 async function readLimited(read, label) {
   const text = await read();
   if (Buffer.byteLength(text) > WORKOUT_FILE_LIMIT) {
-    throw new CliError('invalid_input', `${label} is larger than 1 MiB.`);
+    throw optionError('--file', `${label} is larger than 1 MiB.`);
   }
   return text;
 }
@@ -190,7 +195,7 @@ async function readLimited(read, label) {
 export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {}) {
   let text;
   if (file === '-') {
-    if (!readStdin) throw new CliError('invalid_input', '--file - needs a workout on stdin.');
+    if (!readStdin) throw optionError('--file', '--file - needs a workout on stdin.');
     text = await readLimited(readStdin, 'The workout on stdin');
   } else {
     const path = resolve(cwd, file);
@@ -198,7 +203,7 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
     try {
       // Non-blocking, so a FIFO with no writer opens at once and is refused as not a file instead of hanging.
       handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-      if (!(await handle.stat()).isFile()) throw new CliError('invalid_input', `--file: ${file} is not a file.`);
+      if (!(await handle.stat()).isFile()) throw optionError('--file', `--file: ${file} is not a file.`);
       // Read at most one byte past the limit from the open file, so a file that grows meanwhile is still refused.
       const buffer = Buffer.alloc(WORKOUT_FILE_LIMIT + 1);
       let size = 0;
@@ -206,12 +211,12 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
         const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
         if (!bytesRead) break;
         size += bytesRead;
-        if (size > WORKOUT_FILE_LIMIT) throw new CliError('invalid_input', `--file: ${file} is larger than 1 MiB.`);
+        if (size > WORKOUT_FILE_LIMIT) throw optionError('--file', `--file: ${file} is larger than 1 MiB.`);
       }
       text = buffer.subarray(0, size).toString('utf8');
     } catch (error) {
       if (error instanceof CliError) throw error;
-      throw new CliError('invalid_input', `--file: cannot read ${file} (${error.code ?? error.message}).`);
+      throw optionError('--file', `--file: cannot read ${file} (${error.code ?? error.message}).`);
     } finally {
       await handle?.close();
     }
@@ -219,7 +224,7 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new CliError('invalid_input', `Workout file: not valid JSON (${error.message}).`);
+    throw optionError('--file', `Workout file: not valid JSON (${error.message}).`);
   }
 }
 

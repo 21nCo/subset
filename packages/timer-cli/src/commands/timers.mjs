@@ -1,6 +1,6 @@
 import { TIMER_ID_PATTERN, timerLine } from '@subset.dev/timer-core';
 import { parseDuration, parseUntil } from '../parse-duration.mjs';
-import { readWorkout, stepsSpec, workoutSpec } from './workout.mjs';
+import { optionError, readWorkout, stepsSpec, workoutSpec } from './workout.mjs';
 import { CliError, call, endsAt, findPreset, formatLocalTime, resolveTimer, usageError } from './shared.mjs';
 
 const INTERVAL_FLAGS = ['work', 'rest', 'rounds', 'prep', 'cooldown', 'step'];
@@ -62,15 +62,15 @@ async function startInput(client, spec, values, now, io) {
   const name = values.name === undefined ? {} : { name: values.name };
   const sound = values['no-sound'] ? { sound: false } : {};
   if (values.file !== undefined) {
-    if (spec !== undefined || values.until !== undefined || intervalFlags.length) {
-      throw usageError('--file takes the whole workout; use it without a <spec>, --until or interval flags.');
-    }
+    // Name the most specific option the file replaces: an interval flag, then --until, then the <spec>.
+    const other = intervalFlags.length ? `--${intervalFlags[0]}` : values.until !== undefined ? '--until' : spec !== undefined ? '<spec>' : undefined;
+    if (other) throw optionError(other, `--file takes the whole workout; use it without ${other === '<spec>' ? 'a <spec>' : other}.`);
     const workout = workoutSpec(await readWorkout(values.file, io));
     const fileName = workout.name === undefined ? {} : { name: workout.name };
     return { timer: { ...workout.spec, ...sound }, ...fileName, ...name };
   }
   if (spec !== 'interval' && intervalFlags.length) {
-    throw usageError(`--${intervalFlags[0]} applies only to start interval.`);
+    throw optionError(`--${intervalFlags[0]}`, `--${intervalFlags[0]} applies only to start interval.`);
   }
   if (values.until !== undefined) {
     if (spec !== undefined) throw usageError('Use either a <spec> or --until, not both.');

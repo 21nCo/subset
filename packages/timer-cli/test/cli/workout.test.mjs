@@ -45,7 +45,7 @@ test('start interval --step makes labelled steps, with --rest between them and o
 });
 
 test('start --file runs a 30-step workout from a file or stdin', async (t) => {
-  const { run, client } = await cliDaemon(t);
+  const { run, client, clock } = await cliDaemon(t);
   const dir = workDir(t);
   const workout = { name: '15 min standing HIIT', prep: '10s', rest: 20, steps: EXERCISES.map((label) => ({ label, duration: '40s' })) };
   const path = writeWorkout(dir, 'hiit.json', workout);
@@ -62,6 +62,18 @@ test('start --file runs a 30-step workout from a file or stdin', async (t) => {
   const listed = (await client.timers()).body.structuredContent.timers.find((timer) => timer.definition.id === definition.id);
   assert.ok(listed);
 
+  // The agent text and status lead each step with its own label and count steps within the round.
+  const { id } = definition;
+  const agentLine = async () => (await client.timers()).body.text.split('\n').find((line) => line.includes(`(${id})`));
+  assert.equal(await agentLine(), `15 min standing HIIT (${id}): running · prep · 0:10 left · next Jumping jacks 0:40`);
+  // 10 s of prep, then 15 moves of 40 s with 14 rests of 20 s: 14:50 from the start at 09:00.
+  clock.advance(10_000 + 40_000 + 20_000 + 28_000);
+  const squats = `15 min standing HIIT (${id}): running · Squats · step 3/29 · 0:12 left · next rest 0:20`;
+  assert.equal(await agentLine(), squats);
+  assert.equal((await run(['status', id])).stdout, `${squats}\nEnds at 09:14:50.\n`);
+  const skipped = await run(['skip', id]);
+  assert.match(skipped.stdout, new RegExp(`^15 min standing HIIT \\(${id}\\): running · rest · step 4/29 · 0:20 left · next High knees 0:40\n`));
+
   // A relative path is read from the working directory; --name and --no-sound override the file.
   const relative = await run(['start', '--file', 'hiit.json', '--name', 'Morning', '--no-sound', '--json'], { cwd: dir });
   assert.equal(relative.code, 0, relative.stdout);
@@ -73,7 +85,7 @@ test('start --file runs a 30-step workout from a file or stdin', async (t) => {
   const fifo = join(dir, 'fifo.json');
   execFileSync('mkfifo', [fifo]);
   const fromFifo = await run(['start', '--file', fifo, '--json']);
-  assert.deepEqual([fromFifo.code, fromFifo.json().error.message], [2, `--file: ${fifo} is not a file.`]);
+  assert.deepEqual([fromFifo.code, fromFifo.json().error.message, fromFifo.json().error.issues[0].path], [2, `--file: ${fifo} is not a file.`, '--file']);
 
   const piped = await run(['start', '--file', '-', '--json'], { readStdin: async () => stdin });
   assert.equal(piped.code, 0, piped.stdout);
@@ -123,7 +135,20 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
     [['start', 'interval', '--step', 'A:40s', '--step', 'B\u202Eevil:40s'], '--step 2', /bidi/],
     [['start', '--file', writeWorkout(dir, 'invisible.json', { rest: 10, steps: [{ label: 'A', duration: 10 }, { label: 'B', duration: 10 }, { label: '\u200B', duration: 10 }] })], 'steps[2].label', /visible character/],
     [['start', '--file', writeWorkout(dir, 'tab-name.json', { name: 'A\tB', steps: [{ label: 'A', duration: 10 }] })], 'name', /control/],
-    [['start', '--file', writeWorkout(dir, 'null-phase.json', { steps: [{ label: 'A', duration: 1, phase: null }] })], 'steps[0].phase', /one of prep, work, rest, cooldown/]
+    [['start', '--file', writeWorkout(dir, 'null-phase.json', { steps: [{ label: 'A', duration: 1, phase: null }] })], 'steps[0].phase', /one of prep, work, rest, cooldown/],
+    // Refusals of a whole option name that option.
+    [['start', 'interval', '--step', 'A:40s', '--work', '40s'], '--work', /--step cannot be combined with --work/],
+    [['start', 'interval', '--step', 'A:40s', '--file', join(dir, 'empty.json')], '--step', /--file takes the whole workout; use it without --step\./],
+    [['start', '--file', join(dir, 'missing.json')], '--file', /cannot read .*ENOENT/],
+    [['start', '--file', dir], '--file', /is not a file/],
+    [['start', '--file', writeWorkout(dir, 'broken.json', '{"steps": [')], '--file', /not valid JSON/],
+    [['start', '--file', writeWorkout(dir, 'large.json', ' '.repeat(WORKOUT_FILE_LIMIT + 1))], '--file', /larger than 1 MiB/],
+    [['start', 'tabata', '--file', join(dir, 'empty.json')], '<spec>', /--file takes the whole workout; use it without a <spec>\./],
+    [['start', '--file', join(dir, 'empty.json'), '--rest', '10s'], '--rest', /--file takes the whole workout/],
+    [['start', '--file', join(dir, 'empty.json'), '--until', '17:30'], '--until', /--file takes the whole workout; use it without --until\./],
+    [['start', '--step', 'A:40s'], '--step', /--step applies only to start interval/],
+    [['preset', 'save', 'X', '--file', join(dir, 'empty.json'), '--step', 'A:1m'], '--step', /--file takes the whole workout; use it without --step/],
+    [['preset', 'save', 'X', '--file', join(dir, 'empty.json'), '--work', '1m'], '--work', /--file takes the whole workout; use it without --work/]
   ];
   for (const [argv, path, message] of cases) {
     const result = await run([...argv, '--json']);
@@ -135,31 +160,13 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
     assert.match(issue.message, message, argv.join(' '));
   }
 
-  const plain = [
-    [['start', 'interval', '--step', 'A:40s', '--work', '40s'], /--step cannot be combined with --work/],
-    [['start', '--file', join(dir, 'missing.json')], /cannot read .*ENOENT/],
-    [['start', '--file', dir], /is not a file/],
-    [['start', '--file', writeWorkout(dir, 'broken.json', '{"steps": [')], /not valid JSON/],
-    [['start', '--file', writeWorkout(dir, 'large.json', ' '.repeat(WORKOUT_FILE_LIMIT + 1))], /larger than 1 MiB/],
-    [['start', 'tabata', '--file', join(dir, 'empty.json')], /--file takes the whole workout/],
-    [['start', '--file', join(dir, 'empty.json'), '--rest', '10s'], /--file takes the whole workout/],
-    [['start', '--file', join(dir, 'empty.json'), '--until', '17:30'], /--file takes the whole workout/],
-    [['start', '--step', 'A:40s'], /--step applies only to start interval/],
-    [['preset', 'save', 'X', '--file', join(dir, 'empty.json'), '--step', 'A:1m'], /--file takes the whole workout; use it without --step/]
-  ];
-  for (const [argv, message] of plain) {
-    const result = await run([...argv, '--json']);
-    assert.equal(result.code, 2, `${argv.join(' ')}: ${result.stdout}`);
-    assert.match(result.json().error.message, message, argv.join(' '));
+  // Workouts on stdin are refused the same way.
+  for (const [body, message] of [['x'.repeat(WORKOUT_FILE_LIMIT + 1), /stdin is larger than 1 MiB/], ['not json', /not valid JSON/]]) {
+    const piped = await run(['start', '--file', '-', '--json'], { readStdin: async () => body });
+    assert.equal(piped.code, 2);
+    assert.deepEqual(piped.json().error.issues.map((issue) => issue.path), ['--file']);
+    assert.match(piped.json().error.message, message);
   }
-  // A FIFO with no writer is refused at once, not waited on.
-  const fifo = join(dir, 'fifo.json');
-  execFileSync('mkfifo', [fifo]);
-  const fromFifo = await run(['start', '--file', fifo, '--json']);
-  assert.deepEqual([fromFifo.code, fromFifo.json().error.message], [2, `--file: ${fifo} is not a file.`]);
-
-  const piped = await run(['start', '--file', '-', '--json'], { readStdin: async () => 'x'.repeat(WORKOUT_FILE_LIMIT + 1) });
-  assert.match(piped.json().error.message, /stdin is larger than 1 MiB/);
 
   // A symbolic link to a workout file is read like the file itself.
   const link = join(dir, 'link.json');

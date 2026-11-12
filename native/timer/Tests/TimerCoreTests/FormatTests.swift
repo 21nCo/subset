@@ -31,6 +31,38 @@ private func countdown(_ id: String, durationMs: Int, status: TimerStatus, start
     #expect(TimerFormat.state(timer, now: 900_000) == "running · 6:00 left")
 }
 
+private func interval(_ id: String, rounds: Int, prepMs: Int? = nil, segments: [Segment], startedAt: Int) -> StoredTimer {
+    StoredTimer(definition: TimerDefinition(kind: .interval, id: id, name: id, sound: true, countdownTicks: false, createdAt: 0,
+                                            segments: segments, rounds: rounds, prepMs: prepMs),
+                runtime: TimerRuntime(status: .running, startedAt: startedAt, accumulatedMs: 0, laps: [], skippedMs: 0))
+}
+
+@Test func intervalStepsLeadWithTheirOwnLabel() {
+    let start = 1_000_000
+    let minute = 60_000
+    // A labelled step shows its label, then its place in a single round as step x/y; so does a labelled next step.
+    let focus = interval("t_focus000", rounds: 1, segments: [
+        Segment(label: "Focus", phase: .work, durationMs: 25 * minute), Segment(label: "Break", phase: .rest, durationMs: 5 * minute),
+        Segment(label: "Focus", phase: .work, durationMs: 25 * minute), Segment(label: "Break", phase: .rest, durationMs: 5 * minute)
+    ], startedAt: start)
+    #expect(TimerFormat.state(focus, now: start + 26 * minute) == "running · Break · step 2/4 · 4:00 left · next Focus 25:00")
+    #expect(TimerFormat.state(focus, now: start + 1_000) == "running · Focus · step 1/4 · 24:59 left · next Break 5:00")
+    // A label that only repeats its phase shows the phase, and several rounds count rounds.
+    let tabata = interval("t_tabata00", rounds: 8, prepMs: 10_000, segments: [
+        Segment(label: "Work", phase: .work, durationMs: 20_000), Segment(label: "Rest", phase: .rest, durationMs: 10_000)
+    ], startedAt: start)
+    #expect(TimerFormat.state(tabata, now: start + 78_000) == "running · work · round 3/8 · 0:12 left · next rest 0:10")
+    #expect(TimerFormat.state(tabata, now: start + 3_000) == "running · prep · 0:07 left · next work 0:20")
+    // A labelled step in a workout of several rounds leads with its label too.
+    let ladder = interval("t_ladder00", rounds: 3, segments: [
+        Segment(label: "Squats", phase: .work, durationMs: 45_000), Segment(label: "Rest", phase: .rest, durationMs: 15_000)
+    ], startedAt: start)
+    #expect(TimerFormat.state(ladder, now: start + 70_000) == "running · Squats · round 2/3 · 0:35 left · next rest 0:15")
+    // One step in one round has no position.
+    let hold = interval("t_hold0000", rounds: 1, segments: [Segment(label: "Hold", phase: .work, durationMs: 30_000)], startedAt: start)
+    #expect(TimerFormat.state(hold, now: start + 10_000) == "running · Hold · 0:20 left")
+}
+
 @Test func statusItemShowsTheRunningTimerThatEndsSoonest() {
     let now = 10_000_000
     let long = countdown("t_long0000", durationMs: 600_000, status: .running, startedAt: now - 1_000)

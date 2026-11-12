@@ -35,6 +35,11 @@ test('interval text in each state', () => {
   // One round of several segments counts segments instead; a label that differs from the phase is shown.
   const pomodoro = scenario({ preset: 'pomodoro' });
   assert.equal(lineAt(pomodoro, 26 * 60_000), `Pomodoro (${pomodoro.id}): running · Break · step 2/8 · 4:00 left · next Focus 25:00`);
+  // A labelled step leads with its label in a workout of several rounds too; one step in one round has no position.
+  const ladder = scenario({ timer: { kind: 'interval', name: 'Ladder', rounds: 3, segments: [{ label: 'Squats', phase: 'work', durationMs: 45_000 }, { label: 'Rest', phase: 'rest', durationMs: 15_000 }] } });
+  assert.equal(lineAt(ladder, 70_000), `Ladder (${ladder.id}): running · Squats · round 2/3 · 0:35 left · next rest 0:15`);
+  const hold = scenario({ timer: { kind: 'interval', name: 'Hold', rounds: 1, segments: [{ label: 'Hold', phase: 'work', durationMs: 30_000 }] } });
+  assert.equal(lineAt(hold, 10_000), `Hold (${hold.id}): running · Hold · 0:20 left`);
 });
 
 test('countdown and stopwatch text in each state', () => {
