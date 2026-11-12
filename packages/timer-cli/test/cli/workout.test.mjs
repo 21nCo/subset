@@ -40,7 +40,7 @@ test('start interval --step makes labelled steps, with --rest between them and o
 
   const human = await run(['start', 'interval', '--step', 'Squats:40s', '--step', 'Lunges:40s', '--rest', '20s', '--name', 'Text']);
   assert.equal(human.code, 0);
-  assert.match(human.stdout, /^Text \(t_[0-9a-z]{8}\): running · segment 1\/3 · work \(Squats\) · 0:40 left · next rest 0:20\nEnds at /);
+  assert.match(human.stdout, /^Text \(t_[0-9a-z]{8}\): running · Squats · step 1\/3 · 0:40 left · next rest 0:20\nEnds at /);
 });
 
 test('start --file runs a 30-step workout from a file or stdin', async (t) => {

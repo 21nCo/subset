@@ -26,15 +26,15 @@ test('formatDuration rounds time left up and elapsed time down', () => {
 test('interval text in each state', () => {
   const tabata = scenario({ preset: 'tabata' });
   const id = tabata.id;
-  assert.equal(lineAt(tabata, 78_000), `Tabata (${id}): running · round 3/8 · work · 0:12 left · next rest 0:10`);
+  assert.equal(lineAt(tabata, 78_000), `Tabata (${id}): running · work · round 3/8 · 0:12 left · next rest 0:10`);
   assert.equal(lineAt(tabata, 3_000), `Tabata (${id}): running · prep · 0:07 left · next work 0:20`);
-  assert.equal(lineAt(tabata, 245_500), `Tabata (${id}): running · round 8/8 · rest · 0:05 left`);
+  assert.equal(lineAt(tabata, 245_500), `Tabata (${id}): running · rest · round 8/8 · 0:05 left`);
   assert.equal(lineAt(tabata, 250_000), `Tabata (${id}): finished · 4:10 total`);
-  assert.equal(lineAt(scenario({ preset: 'tabata' }, [['pause', 78_000]]), 600_000), `Tabata (${id}): paused · round 3/8 · work · 0:12 left · next rest 0:10`);
+  assert.equal(lineAt(scenario({ preset: 'tabata' }, [['pause', 78_000]]), 600_000), `Tabata (${id}): paused · work · round 3/8 · 0:12 left · next rest 0:10`);
   assert.equal(lineAt(scenario({ preset: 'tabata' }, [['reset', 1_000]]), 2_000), `Tabata (${id}): idle · 4:10 total`);
   // One round of several segments counts segments instead; a label that differs from the phase is shown.
   const pomodoro = scenario({ preset: 'pomodoro' });
-  assert.equal(lineAt(pomodoro, 26 * 60_000), `Pomodoro (${pomodoro.id}): running · segment 2/8 · rest (Break) · 4:00 left · next work (Focus) 25:00`);
+  assert.equal(lineAt(pomodoro, 26 * 60_000), `Pomodoro (${pomodoro.id}): running · Break · step 2/8 · 4:00 left · next Focus 25:00`);
 });
 
 test('countdown and stopwatch text in each state', () => {

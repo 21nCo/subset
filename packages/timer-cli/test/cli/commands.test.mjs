@@ -58,13 +58,13 @@ test('an empty board says so', async (t) => {
 
 // Each SET-74 operation fixture the CLI can express, as the command that runs it and the human text it prints.
 const OPERATION_COMMANDS = [
-  ['start an idle timer', ['start', 't_ac50bvkp'], 'Pomodoro (t_ac50bvkp): running · segment 1/8 · work (Focus) · 25:00 left · next rest (Break) 5:00\nEnds at 11:10:00.'],
+  ['start an idle timer', ['start', 't_ac50bvkp'], 'Pomodoro (t_ac50bvkp): running · Focus · step 1/8 · 25:00 left · next Break 5:00\nEnds at 11:10:00.'],
   ['start fixes an until countdown to a duration', ['start', 't_v9pdg8p9'], 'Standup (t_v9pdg8p9): running · 30:00 left\nEnds at 09:30:00.'],
-  ['start a preset in one step', ['start', 'emom'], 'EMOM (t_4tvjx8bj): running · round 1/10 · work · 1:00 left · next work 1:00\nEnds at 09:10:00.'],
-  ['pause a running interval', ['pause', 't_adygqpxx'], 'Tabata (t_adygqpxx): paused · round 3/8 · work · 0:12 left · next rest 0:10'],
+  ['start a preset in one step', ['start', 'emom'], 'EMOM (t_4tvjx8bj): running · work · round 1/10 · 1:00 left · next work 1:00\nEnds at 09:10:00.'],
+  ['pause a running interval', ['pause', 't_adygqpxx'], 'Tabata (t_adygqpxx): paused · work · round 3/8 · 0:12 left · next rest 0:10'],
   ['resume a paused countdown', ['resume', 't_dk1facen'], 'Tea (t_dk1facen): running · 1:40 left\nEnds at 09:01:40.'],
   ['lap a stopwatch', ['lap', 't_rcrt44q9'], 'Run (t_rcrt44q9): running · 10:00 elapsed · 3 laps'],
-  ['skip to the next segment', ['skip', 't_adygqpxx'], 'Tabata (t_adygqpxx): running · round 3/8 · rest · 0:10 left · next work 0:20\nEnds at 09:02:40.'],
+  ['skip to the next segment', ['skip', 't_adygqpxx'], 'Tabata (t_adygqpxx): running · rest · round 3/8 · 0:10 left · next work 0:20\nEnds at 09:02:40.'],
   ['reset a finished timer', ['reset', 't_daesff02'], 'Stretch (t_daesff02): idle · 0:30 total'],
   ['get one timer', ['status', 't_dk1facen'], 'Tea (t_dk1facen): paused · 1:40 left'],
   ['remove a timer', ['rm', 't_rcrt44q9'], 'Removed Run (t_rcrt44q9).'],
