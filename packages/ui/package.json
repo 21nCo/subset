@@ -1,0 +1,36 @@
+{
+  "name": "@subset.dev/ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./base.css": "./src/styles/base.css",
+    "./schemes.css": "./src/styles/schemes.css",
+    "./components/*": "./src/components/*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./tsconfig.view.json --fail-on-warnings",
+    "schemes": "npm run build && node scripts/generate-schemes.mjs",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "gallery": "vite --config gallery/vite.config.ts"
+  },
+  "dependencies": {
+    "@21n/fonts": "1.0.1",
+    "phosphor-svelte": "3.1.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1"
+  },
+  "peerDependencies": {
+    "svelte": "^5.57.1"
+  }
+}

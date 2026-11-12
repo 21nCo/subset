@@ -35,7 +35,7 @@ Do not create a cross-platform abstraction merely to make two examples look alik
 
 ## Superfunctions reuse gate
 
-Before adding infrastructure or generic framework code, inspect the corresponding current implementation, public package manifest, and documentation in `/Users/serro/Documents/dev/n/superfunctions-dev`. This checkout is a reference, not a source directory to vendor or a runtime path dependency. Prefer a compatible published package or supported interface; if a package is unpublished or unsuitable, document that fact and keep any local alternative narrow.
+Before adding infrastructure or generic framework code, inspect the corresponding current implementation, public package manifest, and documentation in an up-to-date checkout of `21nCo/superfunctions` (its `dev` branch; uifn lives under `uifn/`). The checkout is a reference, not a source directory to vendor or a runtime path dependency. Prefer a compatible published package or supported interface; if a package is unpublished or unsuitable, document that fact and keep any local alternative narrow.
 
 Check at least these families when relevant:
 
@@ -52,6 +52,19 @@ Check at least these families when relevant:
 | Observability | `@superfunctions/observability` |
 
 For each new capability, add a short `README.md` section naming the Superfunctions packages evaluated, the package/version actually used, and any gap. Avoid copying source from Superfunctions or building a competing auth, storage, billing, MCP, or upload layer inside Subset. Do not assume every alpha package is production ready: verify compatibility, release status, and targeted behavior at the chosen version.
+
+## Web UI conventions
+
+Subset's web views (the shared Svelte views under `packages/*/src` and the hosts under `apps/*`) look and behave as one product. Follow these rules for new UI and when touching existing UI:
+
+- **Svelte 5 with runes** (`$state`, `$derived`, `$props`, `$effect`), TypeScript, Vite. No legacy `export let` or stores in new components.
+- **`@subset.dev/ui` first.** Take colours, type, spacing and shape from its `--ui-*` CSS custom properties and use its primitives (Button, IconButton, Card, Pill, SegmentedControl, Menu, MenuItem, Dialog, Icon, AppearancePicker) before writing your own. A view's root carries `class="ui-root"` plus `data-ui-scheme` and `data-ui-mode` (`appearanceAttributes()`). Never hard-code a colour a token covers; app-specific colours (for example the Timer's phase colours) derive from scheme tokens.
+- **Fixed appearance.** The typeface is Twenty One Native from `@21n/fonts@1.0.1` and the shape is semi-rounded (controls 0.375rem, panels 0.75rem); neither is user-configurable in Subset. People choose a colour scheme family and light, dark or system through the shared appearance picker; a host keeps that choice per browser in `localStorage` (inside try/catch, rendering correctly without it) and passes it in.
+- **Icons:** Phosphor through `phosphor-svelte@3.1.0` (`import PlayIcon from 'phosphor-svelte/lib/PlayIcon'`), rendered through `Icon`/`IconButton`. No emoji as icons, no other icon sets, no hand-drawn SVG where Phosphor has the glyph.
+- **Styling:** scoped component CSS on the tokens. Tailwind stays only where an app already uses it (`apps/directory`, Tailwind 4); don't add it elsewhere.
+- **No network assets.** Fonts are bundled from `@21n/fonts` (inlined in single-file MCP App builds); no Google Fonts, CDNs or remote images, and no runtime style injection that a strict CSP would block.
+- **Accessibility:** real buttons, inputs and labels; an accessible name on every icon-only control; visible focus (the `--ui-focus-ring`); text at least 4.5:1 against its surface in every scheme (the `@subset.dev/ui` tests enforce this for the tokens); respect `prefers-reduced-motion`.
+- **uifn and Nucleum.** `@subset.dev/ui` uses uifn's semantic token vocabulary and Nucleum's colour schemes so Subset can move onto uifn when its web packages are ready. Before adding a primitive, check whether uifn (`@uifn/components-svelte`) now covers it; record the version checked and any gap in `packages/ui/README.md`. Port Nucleum scheme changes through `packages/ui/src/schemes/nucleum.json` rather than editing colours in views.
 
 ## Agent interface contract
 

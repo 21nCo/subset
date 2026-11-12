@@ -1,0 +1,50 @@
+/*
+  Subset's fixed appearance: the Twenty One Native typeface and Nucleum's semi-rounded shape (controls 0.375rem,
+  panels 0.75rem). Colours come from schemes.css. Import this file once in a host, with schemes.css and the
+  @21n/fonts stylesheet, and put class="ui-root" (plus data-ui-scheme and data-ui-mode) on the view's root.
+*/
+.ui-root {
+  --ui-font-family: 'Twenty One Native', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --ui-font-size-xs: 0.75rem;
+  --ui-font-size-sm: 0.8125rem;
+  --ui-font-size-md: 0.875rem;
+  --ui-font-size-lg: 1rem;
+  --ui-font-size-xl: 1.25rem;
+  --ui-font-weight-light: 300;
+  --ui-font-weight-regular: 400;
+  --ui-font-weight-medium: 500;
+  --ui-font-weight-bold: 700;
+  --ui-space-1: 0.25rem;
+  --ui-space-2: 0.5rem;
+  --ui-space-3: 0.75rem;
+  --ui-space-4: 1rem;
+  --ui-space-5: 1.25rem;
+  --ui-space-6: 1.5rem;
+  --ui-space-8: 2rem;
+  /* Shape: Nucleum's "semi" app style (TIDY-492), fixed for Subset. */
+  --ui-radius-control: 0.375rem;
+  --ui-radius-panel: 0.75rem;
+  --ui-radius-tab: 0.75rem;
+  --ui-radius-pill: 9999px;
+  --ui-shell-gap: 0.75rem;
+  --ui-control-height: 2.25rem;
+  --ui-focus-ring: 0 0 0 2px var(--ui-color-surface-raised), 0 0 0 4px var(--ui-color-accent-solid);
+  --ui-shadow-raised: 0 1px 2px rgb(0 0 0 / 6%), 0 1px 3px rgb(0 0 0 / 4%);
+  --ui-shadow-overlay: 0 12px 32px rgb(0 0 0 / 18%), 0 2px 6px rgb(0 0 0 / 8%);
+  font-family: var(--ui-font-family);
+  font-size: var(--ui-font-size-md);
+  line-height: 1.4;
+  color: var(--ui-color-text-primary);
+  background: var(--ui-color-surface-canvas);
+  -webkit-font-smoothing: antialiased;
+}
+.ui-root :where(*:focus-visible) {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-root :where(*) {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
