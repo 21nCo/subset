@@ -178,11 +178,8 @@ jobs:
         if: env.NPM_TAG == 'beta'
         run: node scripts/npm-beta-guard.mjs "$PKG_NAME" "$PKG_VERSION" "$PUBLISH_VERSION"
 
-      # Publishes through the package's npm trusted publisher (OIDC). NPM_TOKEN is only a fallback for a package's first
-      # release, before a trusted publisher can be added on npmjs.com.
+      # Publishes only through the package's npm trusted publisher (OIDC); the workflow has no npm token.
       - name: Publish package
         if: env.NPM_TAG != 'beta' || steps.guard.outputs.publish == 'true'
         # Betas publish under `beta` and other prereleases under `next`, so they never become the default install.
         run: npm publish "$RUNNER_TEMP"/package/*.tgz --access public --tag "$NPM_TAG"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
