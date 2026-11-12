@@ -1,0 +1,40 @@
+{
+  "schema": "subset.catalog@1",
+  "generatedAt": "2026-11-12T00:00:00Z",
+  "apps": [
+    {
+      "id": "breaks",
+      "name": "Breaks",
+      "summary": "Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.",
+      "appName": "Breaks",
+      "bundleId": "dev.subset.breaks",
+      "helpers": [],
+      "channels": {
+        "live": {
+          "version": "0.1.0",
+          "url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg",
+          "sha256": "5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e",
+          "releaseUrl": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0"
+        }
+      }
+    },
+    {
+      "id": "breaks",
+      "name": "Breaks",
+      "summary": "Take well-timed screen breaks on Mac, iPhone, and iPad, with a menu bar timer, smart pause, optional Screen Time shields, and on-device history.",
+      "appName": "Breaks",
+      "bundleId": "dev.subset.breaks",
+      "helpers": [],
+      "channels": {
+        "beta": {
+          "version": "0.1.1",
+          "build": 4,
+          "url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.4/Breaks-0.1.1-beta.4.dmg",
+          "sha256": "6d37efbe0af41ce3b1acbdff2b70990988be4318799e40f99dcedf417c612f4d",
+          "releaseUrl": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-beta.4"
+        }
+      }
+    }
+  ],
+  "tools": []
+}

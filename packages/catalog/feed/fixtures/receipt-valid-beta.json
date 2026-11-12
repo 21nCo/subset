@@ -1,0 +1,9 @@
+{
+  "schema": "subset.receipt@1",
+  "channel": "beta",
+  "version": "0.1.0",
+  "sha256": "5fba2c0d603fc50817287495ce588446c1acb63921f4d975c908bdb6ddbf4a83",
+  "installedAt": "2026-11-12T09:30:00Z",
+  "path": "/Users/alex/Applications/Timer.app",
+  "build": 2
+}

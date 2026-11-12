@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "subset.receipt@1",
+  "description": "What `subset` or the Subset manager app installed from the catalog feed, kept at ~/Library/Application Support/Subset/receipts/<bundleId>.json. Advisory only: the installed app's own Info.plist is the truth about what is installed. Closed: an unknown field is invalid.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "channel", "version", "sha256", "installedAt", "path"],
+  "properties": {
+    "schema": { "const": "subset.receipt@1" },
+    "channel": { "enum": ["live", "beta"] },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "build": {
+      "description": "The beta build number, present exactly when channel is beta.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999999
+    },
+    "sha256": {
+      "description": "SHA-256 of the DMG the app was installed from, as listed in the feed.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "installedAt": {
+      "description": "A UTC time to the second, such as 2026-11-12T00:00:00Z.",
+      "type": "string",
+      "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\dZ$"
+    },
+    "path": {
+      "description": "The installed app: an absolute path to a .app directly inside an Applications folder (/Applications or ~/Applications), with no . or .. segments.",
+      "type": "string",
+      "maxLength": 1024,
+      "pattern": "^(?:/(?!\\.\\.?/)[^/]+)*/Applications/(?!\\.)[^/]+\\.app$"
+    }
+  },
+  "if": { "properties": { "channel": { "const": "beta" } } },
+  "then": { "properties": { "build": true }, "required": ["build"] },
+  "else": { "properties": { "build": false } }
+}

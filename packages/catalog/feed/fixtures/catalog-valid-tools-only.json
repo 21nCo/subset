@@ -1,0 +1,24 @@
+{
+  "schema": "subset.catalog@1",
+  "generatedAt": "2026-11-12T00:00:00Z",
+  "apps": [],
+  "tools": [
+    {
+      "id": "usage",
+      "package": "@subset.dev/usage",
+      "bin": "subset-usage",
+      "distTags": {
+        "latest": "0.2.0",
+        "beta": "0.2.1-beta.1"
+      }
+    },
+    {
+      "id": "timer",
+      "package": "@subset.dev/timer",
+      "bin": "subset-timer",
+      "distTags": {
+        "beta": "0.1.0-beta.3"
+      }
+    }
+  ]
+}
