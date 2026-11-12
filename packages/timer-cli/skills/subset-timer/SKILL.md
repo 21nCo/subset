@@ -64,7 +64,7 @@ subset-timer start --file workout.json --json
 - Step fields: `label` (up to 40 characters, one line), `duration` (`"40s"`, `"1:30"`, or a number of seconds) and `phase` (`work` by default, or `rest`, `prep`, `cooldown`). Write a rest step yourself when rests differ; use `rest` when they are all the same.
 - A workout has at most 100 steps, counting the rests `rest` adds. Each duration is from 1 second to 24 hours.
 - `--name` and `--no-sound` on the command line override the file's `name` and `sound`.
-- An invalid file is `invalid_input` with `issues`, each with the `path` of the field (such as `steps[3].duration`) and a `message`. Fix that field and start again.
+- An invalid file is `invalid_input` with `issues`, each with the `path` of the field (such as `steps[3].duration`, `(root)` for a file that is not JSON, or `--file` for one that cannot be read or is over 1 MiB) and a `message`. Fix that field and start again.
 
 `start` prints `{ "timer": { "definition", "runtime", "projection" }, "observedAt" }`. `projection.status` is `running`; `projection.remainingMs` is the time left and `projection.step` the current interval step (phase, label, round).
 

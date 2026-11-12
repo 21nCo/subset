@@ -31,6 +31,33 @@ private func countdown(_ id: String, durationMs: Int, status: TimerStatus, start
     #expect(TimerFormat.state(timer, now: 900_000) == "running · 6:00 left")
 }
 
+private func interval(_ id: String, name: String, rounds: Int, prepMs: Int? = nil, segments: [(String, Phase, Int)], status: TimerStatus,
+                      startedAt: Int? = nil, accumulatedMs: Int = 0) -> StoredTimer {
+    StoredTimer(definition: TimerDefinition(kind: .interval, id: id, name: name, sound: true, countdownTicks: false, createdAt: 0,
+                                            segments: segments.map { Segment(label: $0.0, phase: $0.1, durationMs: $0.2) },
+                                            rounds: rounds, prepMs: prepMs),
+                runtime: TimerRuntime(status: status, startedAt: startedAt, accumulatedMs: accumulatedMs, laps: [], skippedMs: 0))
+}
+
+// The same lines as packages/timer/test/agent.test.mjs ("a labelled step leads with its label, then its position").
+@Test func aLabelledStepLeadsWithItsLabelThenItsPosition() {
+    let start = 1_000_000
+    let segments: [(String, Phase, Int)] = [("Squats", .work, 40_000), ("Rest", .rest, 20_000), ("Lunges", .work, 40_000),
+                                            ("Rest", .rest, 20_000), ("Plank: hold", .work, 30_000)]
+    let hiit = interval("t_hiit0000", name: "HIIT", rounds: 1, prepMs: 10_000, segments: segments, status: .running, startedAt: start)
+    #expect(TimerFormat.line(hiit, now: start + 4_000) == "HIIT (t_hiit0000): running · prep · 0:06 left · next Squats 0:40")
+    #expect(TimerFormat.line(hiit, now: start + 38_000) == "HIIT (t_hiit0000): running · Squats · step 1/5 · 0:12 left · next rest 0:20")
+    #expect(TimerFormat.line(hiit, now: start + 55_000) == "HIIT (t_hiit0000): running · rest · step 2/5 · 0:15 left · next Lunges 0:40")
+    #expect(TimerFormat.line(hiit, now: start + 151_000) == "HIIT (t_hiit0000): running · Plank: hold · step 5/5 · 0:09 left")
+    let paused = interval("t_hiit0000", name: "HIIT", rounds: 1, prepMs: 10_000, segments: segments, status: .paused, accumulatedMs: 38_000)
+    #expect(TimerFormat.line(paused, now: start + 900_000) == "HIIT (t_hiit0000): paused · Squats · step 1/5 · 0:12 left · next rest 0:20")
+    // Several rounds count rounds; a label that only repeats the phase shows the phase.
+    let legs = interval("t_legs0000", name: "Legs", rounds: 2, segments: [("Squats", .work, 40_000), ("REST", .rest, 20_000)],
+                        status: .running, startedAt: start)
+    #expect(TimerFormat.line(legs, now: start + 70_000) == "Legs (t_legs0000): running · Squats · round 2/2 · 0:30 left · next rest 0:20")
+    #expect(TimerFormat.line(legs, now: start + 45_000) == "Legs (t_legs0000): running · rest · round 1/2 · 0:15 left · next Squats 0:40")
+}
+
 @Test func statusItemShowsTheRunningTimerThatEndsSoonest() {
     let now = 10_000_000
     let long = countdown("t_long0000", durationMs: 600_000, status: .running, startedAt: now - 1_000)
