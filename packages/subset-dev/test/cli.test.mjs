@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { findNpmCli } from '../src/npm.mjs';
 import { npmExecArgs, resolveTool, TOOLS } from '../src/tools.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
@@ -68,4 +70,45 @@ test('fails with exit code 2 and starts nothing for an unknown tool', () => {
   assert.equal(result.status, 2);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /Unknown tool "nope"/);
+});
+
+test('finds the npm to run without a shell', () => {
+  const only = (...files) => (file) => files.includes(file);
+  // The npm that launched the command, from npx-cli.js or npm-cli.js.
+  assert.equal(
+    findNpmCli({ env: { npm_execpath: '/n/lib/node_modules/npm/bin/npx-cli.js' }, platform: 'darwin', exists: only('/n/lib/node_modules/npm/bin/npm-cli.js') }),
+    '/n/lib/node_modules/npm/bin/npm-cli.js'
+  );
+  // Not launched by npm on macOS and Linux: the caller runs npm from PATH.
+  assert.equal(findNpmCli({ env: { npm_execpath: '/x/yarn.js' }, platform: 'linux', exists: () => true }), undefined);
+  // On Windows, the first PATH folder with npm.cmd and its npm-cli.js, then the npm installed with Node.js.
+  const execPath = 'C:\\Program Files\\nodejs\\node.exe';
+  const roaming = 'C:\\Users\\a\\AppData\\Roaming\\npm';
+  const bundled = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+  const env = { PATH: `C:\\Windows;${roaming};C:\\Program Files\\nodejs` };
+  assert.equal(
+    findNpmCli({ env, platform: 'win32', execPath, exists: only(`${roaming}\\npm.cmd`, `${roaming}\\node_modules\\npm\\bin\\npm-cli.js`, bundled) }),
+    `${roaming}\\node_modules\\npm\\bin\\npm-cli.js`
+  );
+  assert.equal(findNpmCli({ env, platform: 'win32', execPath, exists: only(`${roaming}\\node_modules\\npm\\bin\\npm-cli.js`, bundled) }), bundled);
+  assert.equal(findNpmCli({ env, platform: 'win32', execPath, exists: () => false }), undefined);
+});
+
+test('passes a hangup on to npm as SIGTERM, which npm forwards to the tool', { skip: process.platform === 'win32' }, async () => {
+  // The stand-in npm reports the signal it gets, then exits.
+  const signalNpmDir = mkdtempSync(path.join(tmpdir(), 'subset-dev-signal-'));
+  after(() => rmSync(signalNpmDir, { recursive: true, force: true }));
+  writeFileSync(
+    path.join(signalNpmDir, 'npm-cli.js'),
+    "for (const s of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(s, () => { process.stdout.write(s); process.exit(0); }); process.stdout.write('ready'); setInterval(() => {}, 1000);"
+  );
+  const child = spawn(process.execPath, [cli, 'usage'], { env: { ...process.env, npm_execpath: path.join(signalNpmDir, 'npm-cli.js') } });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (stdout === 'ready') child.kill('SIGHUP');
+  });
+  const [code] = await once(child, 'exit');
+  assert.equal(stdout, 'readySIGTERM');
+  assert.equal(code, 0);
 });

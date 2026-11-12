@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { packageNamePattern } from './npm-beta-guard.mjs';
 import { isRepoRelativePath, prereleaseProblems } from './release-macos.mjs';
 import { publishedManifestProblems, WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
 
@@ -160,6 +161,8 @@ assert.ok(minutesContract && minutesSwift, 'Could not find the Minutes contract 
 assert.equal(minutesSwift[1], minutesContract[1], 'native/minutes supports a different Minutes contract version than @subset.dev/minutes-core');
 for (const target of releaseTargets) {
   assert.match(target.slug, /^[a-z0-9][a-z0-9-]*$/);
+  // publish-tag.yml passes the name to npm-beta-guard.mjs for every beta.
+  assert.match(target.name, packageNamePattern, `${target.name} is not a name npm-beta-guard.mjs accepts`);
   assert.equal(releaseTargets.filter((entry) => entry.slug === target.slug).length, 1, `Release slug ${target.slug} is listed more than once`);
   assert.ok(publicPackages.some((manifest) => manifest.name === target.name), `${target.name} in release-packages.json is not a public workspace`);
   // beta-builds.mjs publishes a beta when any of these folders changed; the package's own folder is always one.

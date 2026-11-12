@@ -3,9 +3,9 @@
 // through `npm exec`, so `npx subset.dev usage status` is `npx @subset.dev/usage status`. It depends on none of the
 // tools; npm fetches only the one that is run.
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import process from 'node:process';
+import { findNpmCli } from './npm.mjs';
 import { npmExecArgs, resolveTool, TOOLS } from './tools.mjs';
 
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -36,33 +36,27 @@ Options:
 `;
 }
 
-// How to start npm: the npm that launched this command (npx or npm exec set npm_execpath) through this Node.js, so nothing
-// is looked up on PATH or through a shell; otherwise `npm` from PATH.
-function npmCommand() {
-  const execPath = process.env.npm_execpath;
-  if (execPath && /(?:^|[\\/])np[mx]-cli\.js$/.test(execPath)) {
-    const npmCli = path.join(path.dirname(execPath), 'npm-cli.js');
-    if (existsSync(npmCli)) return { command: process.execPath, prefix: [npmCli], shell: false };
-  }
-  // npm is a .cmd script on Windows, which only a shell can start.
-  return { command: 'npm', prefix: [], shell: process.platform === 'win32' };
-}
-
-const quoteForCmd = (argument) => (/^[\w@./:=-]+$/.test(argument) ? argument : `"${argument.replaceAll('"', '""')}"`);
+// npm passes SIGINT and SIGTERM on to the tool but not SIGHUP, so a hangup is sent to npm as SIGTERM.
+const FORWARDED_SIGNALS = { SIGINT: 'SIGINT', SIGTERM: 'SIGTERM', SIGHUP: 'SIGTERM' };
 
 function run(tool, args) {
-  const npm = npmCommand();
-  const argv = [...npm.prefix, ...npmExecArgs(tool, args)];
-  const child = spawn(npm.command, npm.shell ? argv.map(quoteForCmd) : argv, { stdio: 'inherit', shell: npm.shell });
+  const npmCli = findNpmCli();
+  if (npmCli === undefined && process.platform === 'win32') {
+    console.error(`subset: could not find npm. Run npx ${tool.spec} instead.`);
+    process.exit(1);
+  }
+  // Without npm_execpath on macOS and Linux, `npm` from PATH is an executable script, started without a shell.
+  const [command, argv] = npmCli ? [process.execPath, [npmCli, ...npmExecArgs(tool, args)]] : ['npm', npmExecArgs(tool, args)];
+  const child = spawn(command, argv, { stdio: 'inherit' });
   // Ctrl-C reaches the whole process group; a signal sent to this process alone is passed on so the tool can clean up.
-  const forward = (signal) => child.kill(signal);
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, forward);
+  const forward = (signal) => child.kill(FORWARDED_SIGNALS[signal]);
+  for (const signal of Object.keys(FORWARDED_SIGNALS)) process.on(signal, forward);
   child.on('error', (error) => {
     console.error(`subset: could not start npm: ${error.message}`);
     process.exit(1);
   });
   child.on('exit', (code, signal) => {
-    for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.off(name, forward);
+    for (const name of Object.keys(FORWARDED_SIGNALS)) process.off(name, forward);
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 1);
   });

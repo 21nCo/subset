@@ -28,7 +28,7 @@ With `npm install -g subset.dev`, the same commands are `subset usage`, `subset 
 
 ## How it works
 
-`subset <tool>[@<version>] [arguments...]` runs `npm exec --yes --package=@subset.dev/<tool>@<version> -- <bin> [arguments...]`. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both. It uses the npm that started it (through `npm_execpath`), or `npm` from `PATH` otherwise. It passes on the tool's exit code, and a signal sent to the launcher alone is forwarded to the tool.
+`subset <tool>[@<version>] [arguments...]` runs `npm exec --yes --package=@subset.dev/<tool>@<version> -- <bin> [arguments...]`. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both. It uses the npm that started it (through `npm_execpath`), or otherwise `npm` from `PATH`; on Windows it runs that npm's `npm-cli.js` with Node.js directly, never through `cmd.exe`, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged. It passes on the tool's exit code. A SIGINT or SIGTERM sent to the launcher alone is forwarded to the tool, and so is SIGHUP, as SIGTERM, since npm does not pass SIGHUP on.
 
 The version is a dist-tag (`latest`, `beta`) or an exact version (`0.2.0`, `0.2.0-beta.3`). The launcher refuses ranges and other npm specs, so an argument cannot turn into an npm option or a file, URL or git dependency. Unknown tools exit with code 2 without starting npm.
 
