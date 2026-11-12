@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { RESERVED_NAMES } from '../packages/subset-dev/src/commands.mjs';
 import {
   appMetadataProblems,
@@ -15,6 +16,7 @@ import {
   parseArgs,
   parseReleaseTag,
   prereleaseProblems,
+  readMacosReleaseManifests,
   releaseVersion,
   selectAppSettings,
   unsafeOutDirReason,
@@ -215,17 +217,7 @@ test('check-workspaces refuses a helper path outside the app\'s Contents folder'
 });
 
 test('every committed macos-release.json passes check-workspaces', () => {
-  const nativeRoot = new URL('../native/', import.meta.url);
-  const entries = readdirSync(nativeRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => {
-      try {
-        return [{ appId: entry.name, manifest: JSON.parse(readFileSync(new URL(`${entry.name}/macos-release.json`, nativeRoot), 'utf8')) }];
-      } catch (error) {
-        if (error.code === 'ENOENT') return [];
-        throw error;
-      }
-    });
+  const entries = readMacosReleaseManifests(fileURLToPath(new URL('../native/', import.meta.url)));
   assert.ok(entries.length > 0);
   assert.deepEqual(macosReleaseManifestProblems(entries, RESERVED_NAMES), []);
   const commands = Object.fromEntries(entries.flatMap(({ manifest }) => (manifest.helpers ?? []).map(({ command, path: helperPath, kind }) => [command, `${kind} ${helperPath}`])));
@@ -235,6 +227,26 @@ test('every committed macos-release.json passes check-workspaces', () => {
     system: 'native Contents/Helpers/subset-system',
     timer: 'node Contents/Resources/timer-cli/dist/cli.mjs',
   });
+});
+
+test('check-workspaces reads the manifest of an app folder whose name contains "?" or "#"', (t) => {
+  const nativeDirectory = mkdtempSync(path.join(tmpdir(), 'native-'));
+  t.after(() => rmSync(nativeDirectory, { recursive: true, force: true }));
+  const write = (appId, manifest) => {
+    mkdirSync(path.join(nativeDirectory, appId));
+    writeFileSync(path.join(nativeDirectory, appId, 'macos-release.json'), JSON.stringify(manifest));
+  };
+  const { bundleId, ...withoutBundleId } = systemRelease.manifest;
+  write('a?b', withoutBundleId);
+  write('c#d', { ...timerRelease.manifest, bundleId: 'not a bundle id' });
+  write('system', systemRelease.manifest);
+  mkdirSync(path.join(nativeDirectory, 'no-release'));
+  const entries = readMacosReleaseManifests(nativeDirectory);
+  assert.deepEqual(entries.map(({ appId }) => appId).sort(), ['a?b', 'c#d', 'system']);
+  const problems = macosReleaseManifestProblems(entries, RESERVED_NAMES).join('\n');
+  assert.match(problems, /^native\/a\?b\/macos-release\.json: "bundleId" must be/m);
+  assert.match(problems, /^native\/c#d\/macos-release\.json: "bundleId" must be/m);
+  assert.doesNotMatch(problems, /native\/system\//);
 });
 
 // A fixture Subset System.app and a stand-in for plutil: it answers `plutil -extract CFBundleIdentifier raw -expect

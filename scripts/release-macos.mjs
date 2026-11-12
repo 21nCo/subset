@@ -147,6 +147,16 @@ export function macosReleaseManifestProblems(entries, reservedNames) {
   return problems;
 }
 
+// The { appId, manifest } entries for every <nativeDirectory>/<app-id>/macos-release.json, appId being the folder's
+// name. Filesystem paths, not URLs, so a folder named with "?" or "#" is still read rather than silently skipped.
+export function readMacosReleaseManifests(nativeDirectory) {
+  return readdirSync(nativeDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ appId: entry.name, file: path.join(nativeDirectory, entry.name, 'macos-release.json') }))
+    .filter(({ file }) => existsSync(file))
+    .map(({ appId, file }) => ({ appId, manifest: JSON.parse(readFileSync(file, 'utf8')) }));
+}
+
 // codesign lists every CodeDirectory flag, e.g. flags=0x12000(library-validation,runtime).
 export function hasHardenedRuntime(signature) {
   return /flags=0x[0-9a-f]+\(([^)]*)\)/.exec(signature)?.[1].split(',').includes('runtime') ?? false;

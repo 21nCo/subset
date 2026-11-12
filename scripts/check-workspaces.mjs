@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { packageNamePattern } from './npm-beta-guard.mjs';
-import { isRepoRelativePath, macosReleaseManifestProblems, prereleaseProblems } from './release-macos.mjs';
+import { isRepoRelativePath, macosReleaseManifestProblems, prereleaseProblems, readMacosReleaseManifests } from './release-macos.mjs';
 import { publishedManifestProblems, WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -161,10 +162,7 @@ if (existsSync(nativeRoot)) {
 // checks them against the signed app.
 if (existsSync(nativeRoot)) {
   const { RESERVED_NAMES } = await import(new URL('packages/subset-dev/src/commands.mjs', root));
-  const macosReleases = readdirSync(nativeRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && existsSync(new URL(`native/${entry.name}/macos-release.json`, root)))
-    .map((entry) => ({ appId: entry.name, manifest: readJson(`native/${entry.name}/macos-release.json`) }));
-  assert.deepEqual(macosReleaseManifestProblems(macosReleases, RESERVED_NAMES), [], 'A native macos-release.json is invalid');
+  assert.deepEqual(macosReleaseManifestProblems(readMacosReleaseManifests(fileURLToPath(nativeRoot)), RESERVED_NAMES), [], 'A native macos-release.json is invalid');
 }
 
 // The Minutes macOS app decodes the CLI's NDJSON contract; its supported version must match the package's.
