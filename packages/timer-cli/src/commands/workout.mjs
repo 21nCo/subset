@@ -1,7 +1,7 @@
 // Labelled interval workouts: repeatable `--step "Label:40s"` flags and workout files (`--file <path|->`).
-import { readFile, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { PHASES, TIMER_LIMITS, textLength } from '@subset.dev/timer-core';
+import { PHASES, TIMER_LIMITS, lineTextIssue } from '@subset.dev/timer-core';
 import { parseDuration } from '../parse-duration.mjs';
 import { CliError } from './shared.mjs';
 
@@ -49,10 +49,18 @@ function durationMs(value, path, issues) {
   }
 }
 
+/** Checks one line of text (a label or a name) by the core's rules, after trimming it as the CLI sends it. */
+function checkLine(value, max, path, issues, empty) {
+  if (typeof value !== 'string' || !value.trim()) {
+    issues.add(path, empty);
+    return;
+  }
+  const issue = lineTextIssue(value.trim(), max);
+  if (issue) issues.add(path, issue);
+}
+
 function checkLabel(label, path, issues) {
-  if (typeof label !== 'string' || !label.trim()) issues.add(path, 'must be a non-empty label');
-  else if (/[\r\n]/.test(label)) issues.add(path, 'must be a single line');
-  else if (textLength(label.trim()) > TIMER_LIMITS.labelLength) issues.add(path, `must be at most ${TIMER_LIMITS.labelLength} characters`);
+  checkLine(label, TIMER_LIMITS.labelLength, path, issues, 'must be a non-empty label');
 }
 
 function checkRounds(value, path, issues) {
@@ -131,10 +139,7 @@ export function workoutSpec(workout) {
     issues.check();
   }
   for (const key of Object.keys(workout)) if (!WORKOUT_FIELDS.has(key)) issues.add(key, 'is not a workout field');
-  if (workout.name !== undefined) {
-    if (typeof workout.name !== 'string' || !workout.name.trim() || /[\r\n]/.test(workout.name)) issues.add('name', 'must be a non-empty single line');
-    else if (textLength(workout.name.trim()) > TIMER_LIMITS.nameLength) issues.add('name', `must be at most ${TIMER_LIMITS.nameLength} characters`);
-  }
+  if (workout.name !== undefined) checkLine(workout.name, TIMER_LIMITS.nameLength, 'name', issues, 'must be a non-empty name');
   if (workout.sound !== undefined && typeof workout.sound !== 'boolean') issues.add('sound', 'must be true or false');
   const rounds = workout.rounds === undefined ? 1 : checkRounds(workout.rounds, 'rounds', issues);
   const optionalMs = (key) => (workout[key] === undefined ? undefined : durationMs(workout[key], key, issues));
@@ -156,7 +161,8 @@ export function workoutSpec(workout) {
       let ms;
       if (step.duration === undefined) issues.add(`${path}.duration`, 'is required');
       else ms = durationMs(step.duration, `${path}.duration`, issues);
-      const phase = step.phase ?? 'work';
+      // Only a missing phase means work; null or any other value is refused.
+      const phase = step.phase === undefined ? 'work' : step.phase;
       if (!PHASES.includes(phase)) issues.add(`${path}.phase`, `must be one of ${PHASES.join(', ')}`);
       if (typeof step.label === 'string') steps.push({ label: step.label.trim(), phase, durationMs: ms });
     });
@@ -187,14 +193,25 @@ export async function readWorkout(file, { cwd = process.cwd(), readStdin } = {})
     text = await readLimited(readStdin, 'The workout on stdin');
   } else {
     const path = resolve(cwd, file);
+    let handle;
     try {
-      const info = await stat(path);
-      if (!info.isFile()) throw new CliError('invalid_input', `--file: ${file} is not a file.`);
-      if (info.size > WORKOUT_FILE_LIMIT) throw new CliError('invalid_input', `--file: ${file} is larger than 1 MiB.`);
-      text = await readFile(path, 'utf8');
+      handle = await open(path, 'r');
+      if (!(await handle.stat()).isFile()) throw new CliError('invalid_input', `--file: ${file} is not a file.`);
+      // Read at most one byte past the limit from the open file, so a file that grows meanwhile is still refused.
+      const buffer = Buffer.alloc(WORKOUT_FILE_LIMIT + 1);
+      let size = 0;
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
+        if (!bytesRead) break;
+        size += bytesRead;
+        if (size > WORKOUT_FILE_LIMIT) throw new CliError('invalid_input', `--file: ${file} is larger than 1 MiB.`);
+      }
+      text = buffer.subarray(0, size).toString('utf8');
     } catch (error) {
       if (error instanceof CliError) throw error;
       throw new CliError('invalid_input', `--file: cannot read ${file} (${error.code ?? error.message}).`);
+    } finally {
+      await handle?.close();
     }
   }
   try {

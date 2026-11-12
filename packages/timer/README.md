@@ -74,7 +74,7 @@ Limits: 50 timers in any state (finished timers count until they are reset or re
 - `text`: one line per timer, for example `Tabata (t_ab12cd34): running · work · round 3/8 · 0:12 left · next rest 0:10` (a step with its own label shows that label, `HIIT (t_ab12cd34): running · Squats · step 3/29 · 0:12 left · next rest 0:20`), or `No timers.`;
 - `viewId`: `subset.timer.board@1`.
 
-Time left rounds up and elapsed time rounds down. A segment label that differs from its phase is shown in parentheses.
+Time left rounds up and elapsed time rounds down. A segment label that differs from its phase is shown instead of the phase, first, ahead of the step's position (`round x/y`, or `step x/y` within a single round).
 
 ## JSON Schemas and fixtures
 

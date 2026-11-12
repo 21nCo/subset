@@ -111,7 +111,12 @@ test('labelled workouts refuse bad input with the step it concerns, and change n
     [['start', '--file', writeWorkout(dir, 'phase.json', { steps: [{ label: 'A', duration: '1m', phase: 'sprint' }] })], 'steps[0].phase', /one of prep, work, rest, cooldown/],
     [['start', '--file', writeWorkout(dir, 'empty.json', { steps: [] })], 'steps', /at least one step/],
     [['start', '--file', writeWorkout(dir, 'array.json', [])], '(root)', /JSON object/],
-    [['start', '--file', writeWorkout(dir, 'name.json', { name: 'two\nlines', steps: [{ label: 'A', duration: '1m' }] })], 'name', /single line/]
+    [['start', '--file', writeWorkout(dir, 'name.json', { name: 'two\nlines', steps: [{ label: 'A', duration: '1m' }] })], 'name', /one line/],
+    [['start', 'interval', '--step', 'A:40s', '--step', 'B\tC:40s', '--rest', '10s'], '--step 2', /one line without control/],
+    [['start', 'interval', '--step', 'A:40s', '--step', 'B\u202Eevil:40s'], '--step 2', /bidi/],
+    [['start', '--file', writeWorkout(dir, 'invisible.json', { rest: 10, steps: [{ label: 'A', duration: 10 }, { label: 'B', duration: 10 }, { label: '\u200B', duration: 10 }] })], 'steps[2].label', /visible character/],
+    [['start', '--file', writeWorkout(dir, 'tab-name.json', { name: 'A\tB', steps: [{ label: 'A', duration: 10 }] })], 'name', /control/],
+    [['start', '--file', writeWorkout(dir, 'null-phase.json', { steps: [{ label: 'A', duration: 1, phase: null }] })], 'steps[0].phase', /one of prep, work, rest, cooldown/]
   ];
   for (const [argv, path, message] of cases) {
     const result = await run([...argv, '--json']);
