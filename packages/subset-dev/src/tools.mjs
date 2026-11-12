@@ -1,5 +1,8 @@
+import { isVerb } from './commands.mjs';
+
 // The Subset command-line tools `subset <tool>` runs. Each entry names a published @subset.dev package and the bin it
-// runs; scripts/check-workspaces.mjs checks that this list matches the repository's published CLIs.
+// runs; scripts/check-workspaces.mjs checks that this list matches the repository's published CLIs. A tool may not take
+// the name of a command (commands.mjs).
 export const TOOLS = Object.freeze({
   minutes: Object.freeze({ package: '@subset.dev/minutes', bin: 'subset-minutes', summary: 'Send a notetaker bot to a Google Meet or Zoom meeting and keep the audio locally' }),
   timer: Object.freeze({ package: '@subset.dev/timer', bin: 'subset-timer', summary: 'Multi-timers and interval workouts with sound and notifications' }),
@@ -18,6 +21,7 @@ export function resolveTool(argument) {
   const at = argument.indexOf('@');
   const name = at === -1 ? argument : argument.slice(0, at);
   const version = at === -1 ? 'latest' : argument.slice(at + 1);
+  if (isVerb(name)) return { error: `"${name}" is a subset command, not a tool. Run "subset help ${name}" for its usage.` };
   if (!Object.hasOwn(TOOLS, name)) return { error: `Unknown tool "${name}". Run "subset --help" to list the tools.` };
   if (!VERSION_SPEC.test(version)) return { error: `"${version}" is not latest, beta, next or an exact version such as 0.2.0.` };
   const tool = TOOLS[name];
@@ -32,4 +36,41 @@ export function resolveTool(argument) {
  */
 export function npmLocateArgs({ spec }) {
   return ['exec', '--yes', `--package=${spec}`, '--', 'node', '-p', 'process.env.PATH'];
+}
+
+/**
+ * The npm arguments that ask the registry for a tool's dist-tags. The launcher runs them only after npm could not
+ * fetch the tool, to say why. `npm dist-tag ls` reads the registry's dist-tags of the package directly; `npm view
+ * <package> dist-tags` would first pick the `latest` version, and so prints nothing for a package with only a beta.
+ * With --json, npm prints an error (E404 for no such package) as JSON on stdout; the tags it prints as `tag: version`
+ * lines.
+ */
+export function npmDistTagsArgs({ package: name }) {
+  return ['dist-tag', 'ls', name, '--json'];
+}
+
+// The dist-tags in the answer of `npm dist-tag ls --json`: `tag: version` lines, or a JSON object of them.
+function distTags(stdout) {
+  try {
+    const answer = JSON.parse(stdout);
+    return typeof answer === 'object' && answer !== null && !Array.isArray(answer) ? answer : undefined;
+  } catch {
+    const lines = stdout.split(/\r?\n/).filter((line) => line.trim() !== '');
+    const entries = lines.map((line) => /^([^\s:]+): (\S+)$/.exec(line.trim()));
+    return lines.length > 0 && entries.every(Boolean) ? Object.fromEntries(entries.map(([, tag, version]) => [tag, version])) : undefined;
+  }
+}
+
+/**
+ * Why npm could not fetch a resolved tool, from the result ({ status, stdout }) of npmDistTagsArgs: the registry has
+ * no such package, the tool has no live release but a beta (when the default `latest` was asked for), or, for
+ * anything else (a network failure, an unreadable answer, a missing version), the fetch failure.
+ */
+export function fetchFailureMessage(tool, probe) {
+  const tags = typeof probe?.stdout === 'string' ? distTags(probe.stdout) : undefined;
+  if (probe?.status !== 0 && tags?.error?.code === 'E404') return `${tool.name} is not on npm yet.`;
+  if (probe?.status === 0 && tags && tool.version === 'latest' && !Object.hasOwn(tags, 'latest') && typeof tags.beta === 'string') {
+    return `${tool.name} has no live release yet; try subset ${tool.name}@beta`;
+  }
+  return `npm could not fetch ${tool.spec}.`;
 }
