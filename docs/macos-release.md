@@ -78,4 +78,5 @@ The npm packages in `release-packages.json` get betas the same way: when a run n
 
 1. A maintainer claims the name by publishing a `0.0.0` placeholder by hand with 2FA (`npm publish --access public` from a minimal `package.json` with that name and version). Don't hand-publish the real version: its live tag would then fail at `npm publish` because the version already exists, and `scripts/beta-builds.mjs` counts a package as released only once a live `<slug>-v<x.y.z>` tag exists.
 2. On npmjs.com, add a GitHub Actions trusted publisher for the package: repository `21nCo/subset`, workflow `publish-tag.yml`, with **Allow npm publish** enabled (npm defaults new connections to staged publishing only).
-3. Within 2 days, push the live `<slug>-v<x.y.z>` tag. npm expires a trusted publisher that has not completed a successful publish within 2 days of being created; if that happens, delete and recreate it.
+3. Within 2 days, push the live `<slug>-v<x.y.z>` tag. npm expires a trusted publisher that has not completed a successful publish within 2 days of being created; if that happens, delete and recreate it. The live release takes `latest` from the placeholder.
+4. Deprecate the placeholder: `npm deprecate <name>@0.0.0 "Name placeholder; install a released version"`.
