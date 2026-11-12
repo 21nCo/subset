@@ -71,16 +71,16 @@ Limits: 50 timers in any state (finished timers count until they are reset or re
 `agentTimerResult(store, now)` mirrors `agentUsageResult` in `@subset.dev/usage-core`:
 
 - `structuredContent`: `{ schemaVersion: 1, observedAt, timers[] }`, one snapshot per timer, so a view can re-project from timestamps without asking again;
-- `text`: one line per timer, for example `Tabata (t_ab12cd34): running · round 3/8 · work · 0:12 left · next rest 0:10`, or `No timers.`;
+- `text`: one line per timer, for example `Tabata (t_ab12cd34): running · work · round 3/8 · 0:12 left · next rest 0:10` (a step with its own label shows that label, `HIIT (t_ab12cd34): running · Squats · step 3/29 · 0:12 left · next rest 0:20`), or `No timers.`;
 - `viewId`: `subset.timer.board@1`.
 
-Time left rounds up and elapsed time rounds down. A segment label that differs from its phase is shown in parentheses.
+Time left rounds up and elapsed time rounds down. A segment label that differs from its phase is shown instead of the phase, first, ahead of the step's position (`round x/y`, or `step x/y` within a single round).
 
 ## JSON Schemas and fixtures
 
 `schemas` holds draft 2020-12 JSON Schemas generated from the runtime validators: `inputs` and `outputs` for every operation (each input has an object root, as MCP tool definitions need), `store`, `result` (the `structuredContent`), `error` and `viewProps`. `viewProps` covers the serializable board props `{ result, capabilities: { create, destructive }, density: compact | full }`; the host also passes `actions` and an optional `now` clock, which are functions. The rules the schemas cannot state are that `until` lies within 24 hours of `now`, which the operations check, and the store's position rule, which `parseStore` checks.
 
-`fixtures/contract-v1/` holds the shared test vectors, exported as `@subset.dev/timer-core/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset.dev/timer-core`; the tests fail when they drift.
+`fixtures/contract-v1/` holds the shared test vectors, exported as `@subset.dev/timer-core/fixtures/contract-v1/*`, for the CLI tests and the Swift client (SET-81): a store with every kind and state and a running workout of labelled steps, its agent result, each operation's recorded result or error against that store, inputs that both validators accept or reject, and example view props. Regenerate them with `npm run fixtures --workspace=@subset.dev/timer-core`; the tests fail when they drift.
 
 ## Board view (SET-75)
 

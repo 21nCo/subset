@@ -35,13 +35,17 @@ export function formatDuration(ms: number, rounding: 'up' | 'down'): string {
   return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
 }
 
+/** A step's own label (`Squats`, `Focus`), or its phase when the label only repeats it (`work`, `rest`). */
 function stepName(step: IntervalStep): string {
-  return step.label.toLowerCase() === step.phase ? step.phase : `${step.phase} (${step.label})`;
+  return step.label.toLowerCase() === step.phase ? step.phase : step.label;
 }
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
-/** One line, for example `Tabata (t_ab12cd34): running · round 3/8 · work · 0:12 left · next rest 0:10`. */
+/**
+ * One line, for example `Tabata (t_ab12cd34): running · work · round 3/8 · 0:12 left · next rest 0:10`, or for
+ * a workout of labelled steps `HIIT (t_ab12cd34): running · Squats · step 3/29 · 0:12 left · next rest 0:20`.
+ */
 export function timerLine(snapshot: TimerSnapshot): string {
   const { definition, runtime, projection } = snapshot;
   const parts: string[] = [projection.status];
@@ -52,9 +56,10 @@ export function timerLine(snapshot: TimerSnapshot): string {
     parts.push(`${formatDuration(projection.totalMs ?? 0, 'up')} total`);
   } else if (definition.kind === 'interval' && projection.step) {
     const { step, next } = projection;
+    parts.push(stepName(step));
     if (step.round !== null && definition.rounds > 1) parts.push(`round ${step.round}/${definition.rounds}`);
-    else if (step.segmentIndex !== null && definition.segments.length > 1) parts.push(`segment ${step.segmentIndex + 1}/${definition.segments.length}`);
-    parts.push(stepName(step), `${formatDuration(step.remainingMs, 'up')} left`);
+    else if (step.segmentIndex !== null && definition.segments.length > 1) parts.push(`step ${step.segmentIndex + 1}/${definition.segments.length}`);
+    parts.push(`${formatDuration(step.remainingMs, 'up')} left`);
     if (next) parts.push(`next ${stepName(next)} ${formatDuration(next.durationMs, 'up')}`);
   } else {
     parts.push(`${formatDuration(projection.remainingMs ?? 0, 'up')} left`);

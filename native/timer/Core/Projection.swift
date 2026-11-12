@@ -115,7 +115,7 @@ public enum TimerFormat {
         return hours > 0 ? "\(hours):\(String(format: "%02d", minutes)):\(rest)" : "\(minutes):\(rest)"
     }
 
-    /// The timer's state at `now`, for example `running · round 3/8 · work · 0:12 left · next rest 0:10`.
+    /// The timer's state at `now`, for example `running · work · round 3/8 · 0:12 left · next rest 0:10`.
     public static func state(_ timer: StoredTimer, now: Int) -> String {
         let (definition, runtime) = (timer.definition, timer.runtime)
         let projection = Projection.project(timer, now: now)
@@ -128,12 +128,13 @@ public enum TimerFormat {
         } else if definition.kind == .interval, let step = projection.step {
             let rounds = definition.rounds ?? 0
             let segments = definition.segments?.count ?? 0
+            parts.append(stepName(step))
             if let round = step.round, rounds > 1 {
                 parts.append("round \(round)/\(rounds)")
             } else if let segmentIndex = step.segmentIndex, segments > 1 {
-                parts.append("segment \(segmentIndex + 1)/\(segments)")
+                parts.append("step \(segmentIndex + 1)/\(segments)")
             }
-            parts += [stepName(step), "\(duration(step.remainingMs ?? 0, rounding: .up)) left"]
+            parts.append("\(duration(step.remainingMs ?? 0, rounding: .up)) left")
             if let next = projection.next { parts.append("next \(stepName(next)) \(duration(next.durationMs, rounding: .up))") }
         } else {
             parts.append("\(duration(projection.remainingMs ?? 0, rounding: .up)) left")
@@ -148,8 +149,9 @@ public enum TimerFormat {
         "\(timer.definition.name) (\(timer.definition.id)): \(state(timer, now: now))"
     }
 
+    /// A step's own label (`Squats`, `Focus`), or its phase when the label only repeats it (`work`, `rest`).
     private static func stepName(_ step: IntervalStep) -> String {
-        step.label.lowercased() == step.phase.rawValue ? step.phase.rawValue : "\(step.phase.rawValue) (\(step.label))"
+        step.label.lowercased() == step.phase.rawValue ? step.phase.rawValue : step.label
     }
 
     /// The running timer that ends soonest and its time left, which the status item shows. Stopwatches never

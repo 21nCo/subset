@@ -11,7 +11,7 @@ Use it when the user asks you to:
 
 - time something ("set a 25 minute timer", "remind me in 90 seconds");
 - count down to a time today ("until 17:30");
-- run a workout or focus interval (Tabata, EMOM, HIIT, Pomodoro, AMRAP, or custom work and rest rounds);
+- run a workout or focus interval (Tabata, EMOM, HIIT, Pomodoro, AMRAP, custom work and rest rounds, or a workout of named exercises);
 - check, pause, resume, lap, skip, reset or remove a timer.
 
 ## Rules
@@ -33,6 +33,39 @@ subset-timer start interval --work 40s --rest 20s --rounds 10 --prep 10s --coold
 subset-timer start pomodoro --no-sound --json           # notifications only, no sounds
 ```
 
+### A workout of named steps
+
+For a workout where each step has its own name (a list of exercises, a routine), give each step a label. For a few steps, use `--step "Label:duration"` (repeat it; `--rest` goes between the steps, not after the last; `--rounds` defaults to 1):
+
+```sh
+subset-timer start interval --step "Squats:40s" --step "Lunges:40s" --step "Plank:1:00" --rest 20s --prep 10s --name "Legs" --json
+```
+
+For longer workouts, write a JSON workout file and start it with `--file` (or pipe it with `--file -`):
+
+```sh
+cat > workout.json <<'JSON'
+{
+  "name": "15 min standing HIIT",
+  "prep": "10s",
+  "rest": "20s",
+  "rounds": 1,
+  "steps": [
+    { "label": "Jumping jacks", "duration": "40s" },
+    { "label": "Squats", "duration": "40s" },
+    { "label": "High knees", "duration": "40s" }
+  ]
+}
+JSON
+subset-timer start --file workout.json --json
+```
+
+- Workout fields: `name`, `prep`, `rest`, `rounds` (1 to 99), `cooldown`, `sound` (true or false) and `steps`. Every field but `steps` is optional.
+- Step fields: `label` (up to 40 characters, one line), `duration` (`"40s"`, `"1:30"`, or a number of seconds) and `phase` (`work` by default, or `rest`, `prep`, `cooldown`). Write a rest step yourself when rests differ; use `rest` when they are all the same.
+- A workout has at most 100 steps, counting the rests `rest` adds. Each duration is from 1 second to 24 hours.
+- `--name` and `--no-sound` on the command line override the file's `name` and `sound`.
+- An invalid file is `invalid_input` with `issues`, each with the `path` of the field (such as `steps[3].duration`, `(root)` for a file that is not JSON, or `--file` for one that cannot be read or is over 1 MiB) and a `message`. Fix that field and start again.
+
 `start` prints `{ "timer": { "definition", "runtime", "projection" }, "observedAt" }`. `projection.status` is `running`; `projection.remainingMs` is the time left and `projection.step` the current interval step (phase, label, round).
 
 Saved presets work like the built-in ones, by name or id:
@@ -40,6 +73,7 @@ Saved presets work like the built-in ones, by name or id:
 ```sh
 subset-timer presets --json                             # { "presets": [...] }, built-ins first
 subset-timer preset save "Leg day" --work 45s --rest 15s --rounds 8 --json
+subset-timer preset save "Morning HIIT" --file workout.json --json   # or --step flags; the file's name is not used
 subset-timer start "Leg day" --json
 subset-timer preset rm "Leg day" --json                 # only when the user asks
 ```

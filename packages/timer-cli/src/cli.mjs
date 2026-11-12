@@ -3,12 +3,14 @@
 // package root, which holds skills/; the daemon a client starts runs this same file as `daemon run`.
 import { fileURLToPath } from 'node:url';
 import { main } from './commands/index.mjs';
+import { stdinReader } from './commands/workout.mjs';
 
 process.exitCode = await main({
   argv: process.argv.slice(2),
   env: process.env,
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
+  readStdin: stdinReader(process.stdin),
   cliPath: fileURLToPath(import.meta.url),
   packageRoot: fileURLToPath(new URL('..', import.meta.url))
 });

@@ -17,6 +17,17 @@ import { BUILT_IN_PRESET_IDS } from './presets.js';
 // length check (a code point is at most two UTF-16 units) bounds the input before either runs.
 const ONE_LINE = /^[^\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]*$/u;
 const VISIBLE = /[^\s\p{Z}\p{Cc}\p{Cf}\p{Cs}\p{M}\p{Default_Ignorable_Code_Point}]/u;
+/**
+ * Why `value` is not a valid one-line text of at most `max` characters (a timer name, a segment label),
+ * by the same rules as the schemas, or null when it is. Hosts use it to report an issue at their own path.
+ */
+export function lineTextIssue(value: string, max: number): string | null {
+  if (value.length > max * 2 || textLength(value) > max) return `must be at most ${max} characters`;
+  if (!ONE_LINE.test(value)) return 'must be one line without control or bidi formatting characters';
+  if (!VISIBLE.test(value)) return 'must have a visible character';
+  return null;
+}
+
 const line = (max: number) =>
   z.string()
     .max(max * 2, { abort: true, message: `must be at most ${max} characters` })
