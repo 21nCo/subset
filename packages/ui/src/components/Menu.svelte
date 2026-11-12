@@ -30,6 +30,15 @@
   onpointerdown={(event) => {
     if (open && root && !root.contains(event.target as Node)) close(false);
   }}
+  onkeydown={(event) => {
+    // Focus outside the menu: on the window, so Escape works when a mouse click opened it and left focus on the page
+    // (Safari does not focus clicked buttons). Focus returns to the toggle unless it is elsewhere on purpose.
+    if (open && event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close(root?.contains(document.activeElement) || document.activeElement === document.body);
+    }
+  }}
 />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -37,6 +46,7 @@
   class="ui-menu"
   bind:this={root}
   onkeydown={(event) => {
+    // Focus inside the menu: close it here, and keep Escape from also closing a dialog the menu sits in.
     if (event.key === 'Escape' && open) {
       event.preventDefault();
       event.stopPropagation();

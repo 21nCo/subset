@@ -50,7 +50,11 @@
   }
   .family input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
   .family.checked { border-color: var(--ui-color-accent-solid); box-shadow: inset 0 0 0 1px var(--ui-color-accent-solid); }
-  .family:has(input:focus-visible) { box-shadow: var(--ui-focus-ring); }
+  .family:has(input:focus-visible) { outline: 2px solid transparent; outline-offset: 2px; box-shadow: var(--ui-focus-ring); }
+  @media (forced-colors: active) {
+    .family.checked { outline: 2px solid Highlight; outline-offset: -2px; }
+    .family:has(input:focus-visible) { outline: 2px solid CanvasText; outline-offset: 2px; }
+  }
   .swatch { display: grid; grid-template-columns: 1fr 1fr; height: 2rem; border-radius: calc(var(--ui-radius-control) - 2px); overflow: hidden; border: 1px solid var(--ui-color-border-subtle); }
   .swatch > span { display: grid; place-items: center; }
   .swatch i { width: 0.75rem; height: 0.75rem; border-radius: 50%; }

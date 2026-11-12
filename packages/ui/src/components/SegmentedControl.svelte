@@ -64,6 +64,11 @@
   }
   .segment input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
   .segment.checked { color: var(--ui-color-text-primary); font-weight: var(--ui-font-weight-medium); background: var(--ui-color-surface-raised); box-shadow: var(--ui-shadow-raised); }
-  .segment:has(input:focus-visible) { box-shadow: var(--ui-focus-ring); }
+  .segment:has(input:focus-visible) { outline: 2px solid transparent; outline-offset: 2px; box-shadow: var(--ui-focus-ring); }
+  /* Forced colours drop backgrounds and shadows; outline the chosen segment in the system highlight. */
+  @media (forced-colors: active) {
+    .segment.checked { outline: 2px solid Highlight; outline-offset: -2px; }
+    .segment:has(input:focus-visible) { outline: 2px solid CanvasText; outline-offset: 2px; }
+  }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>

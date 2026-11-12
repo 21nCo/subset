@@ -42,7 +42,8 @@
   .ui-button:disabled { opacity: 0.45; cursor: default; }
   .sm { height: 1.875rem; padding: 0 var(--ui-space-3); font-size: var(--ui-font-size-sm); }
   .primary { background: var(--ui-color-accent-solid); border-color: var(--ui-color-accent-solid); color: var(--ui-color-accent-contrast); }
-  .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); filter: brightness(1.06); }
+  /* Hover keeps the fill (and so the label's contrast) and adds a halo. */
+  .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); box-shadow: 0 0 0 3px var(--ui-color-accent-soft); }
   .ghost { background: transparent; border-color: transparent; color: var(--ui-color-text-secondary); }
   .ghost:not(:disabled):hover { color: var(--ui-color-text-primary); }
   .danger { color: var(--ui-color-danger-text); border-color: var(--ui-color-danger-subtle); }
