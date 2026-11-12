@@ -34,8 +34,8 @@ Components: `import Button from '@subset.dev/ui/components/Button.svelte'` (also
 | Surfaces | `--ui-color-surface-canvas`, `-raised`, `-sunken`, `-overlay`, `-hover` |
 | Text | `--ui-color-text-primary`, `-secondary`, `-muted`, `-disabled` |
 | Borders | `--ui-color-border-subtle`, `-default`, `-strong` |
-| Accent | `--ui-color-accent-solid`, `-subtle`, `-soft`, `-contrast` (text on solid), `-on-soft` (text on soft) |
-| Tones | `--ui-color-secondary-*`, `--ui-color-success-*`, `--ui-color-danger-*` (`solid`, `subtle`; success and danger also `on-subtle`, text on the subtle tone) |
+| Accent | `--ui-color-accent-solid`, `-subtle`, `-soft`, `-contrast` (text on solid), `-on-soft` (text on soft), `-text` (accent-coloured text) |
+| Tones | `--ui-color-secondary-*`, `--ui-color-success-*`, `--ui-color-danger-*`: `solid` and `subtle` fills, `contrast` (text on solid), `text` (tone-coloured text); success and danger also `on-subtle` |
 | App chrome | `--ui-color-frame-surface`, `-text`, `-border`, `-accent` |
 | Type | `--ui-font-family`, `--ui-font-size-xs…xl`, `--ui-font-weight-light|regular|medium|bold` |
 | Space and shape | `--ui-space-1…8`, `--ui-radius-control` (0.375rem), `--ui-radius-panel` (0.75rem), `--ui-radius-tab`, `--ui-radius-pill`, `--ui-shell-gap`, `--ui-control-height` |
@@ -56,7 +56,12 @@ Names follow uifn's semantic vocabulary (`color.surface.*`, `color.text.*`, `col
 | `secondary-*`, `success-*`, `danger-*` | `ass1–2`, `ags1–2`, `ars1–2` |
 | `frame-*` | Nucleum's frame palette (`fbgs1`, `ffgs1`, `fbrs3`, `faps1`) when the scheme has one (Graphite), else the content slots |
 
-Families pair a light and a dark scheme, as Nucleum's scheme families do (PR #638 / TIDY-513): **Default** (blue, Oxide), **Mono** (mono, Oxide), **Graphite** and **Solarized**. `SUBSET_ADJUSTMENTS` lists the only departures from Nucleum's colours: Solarized dark's `fgs2` and `fgs3` are lightened to reach 4.5:1 and 3:1 on nested surfaces (Nucleum's measure 4.15:1 and 2.90:1); they should be raised upstream.
+Families pair a light and a dark scheme, as Nucleum's scheme families do (PR #638 / TIDY-513): **Default** (blue, Oxide), **Mono** (mono, Oxide), **Graphite** and **Solarized**.
+
+**Contrast.** Nucleum's slots are kept as they are, except where text would be hard to read:
+
+* `text-primary` must reach 4.5:1 on every surface (canvas, raised, sunken, hover, overlay); `text-secondary` 4.5:1 and `text-muted` 3:1 on every resting surface (hovered controls switch to primary text). A slot that falls short keeps its hue and saturation and moves in lightness, away from the surfaces, until it passes (`ensureContrast`). `schemeAdjustments()` lists every such change, and the tests pin the list. Today only Solarized dark changes (its three text slots), which should be raised upstream.
+* Tone fills (`-solid`) are never used as text. `-text` tokens are the tone moved until it reaches 4.5:1 on every surface; `-contrast`, `-on-soft` and `-on-subtle` are the first of the scheme's own choice (`onaps3`), white, near-black and black that reaches 4.5:1 on that fill.
 
 `npm run schemes --workspace=@subset.dev/ui` regenerates `src/styles/schemes.css`; the tests fail when the checked-in file is stale. `data-ui-mode="system"` follows `prefers-color-scheme` in CSS, with no script.
 
@@ -73,4 +78,4 @@ Reviewed on 2026-11-12:
 
 ## Verification
 
-`npm test --workspace=@subset.dev/ui` builds the module and checks that every scheme defines every token, that primary and secondary text reach 4.5:1 (muted 3:1) on the canvas and raised surfaces, that text on the accent, frame and tinted tone colours reaches 4.5:1, that the mapping covers every token, that appearance parsing falls back to defaults, and that `schemes.css` is current. `npm run check --workspace=@subset.dev/ui` type-checks the module and every component with `svelte-check --fail-on-warnings`.
+`npm test --workspace=@subset.dev/ui` builds the module and checks that every scheme defines every token, that every text colour reaches its contrast target on every surface it can sit on and on every tone it is drawn over, that the list of departures from Nucleum's colours is the expected one, that the mapping covers every token, that appearance parsing falls back to defaults, and that `schemes.css` is current. `npm run check --workspace=@subset.dev/ui` type-checks the module and every component with `svelte-check --fail-on-warnings`.

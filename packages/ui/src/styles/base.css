@@ -39,7 +39,9 @@
   -webkit-font-smoothing: antialiased;
 }
 .ui-root :where(*:focus-visible) {
-  outline: none;
+  /* A transparent outline keeps focus visible in forced-colours (high contrast) mode, which drops box-shadow. */
+  outline: 2px solid transparent;
+  outline-offset: 2px;
   box-shadow: var(--ui-focus-ring);
 }
 @media (prefers-reduced-motion: reduce) {

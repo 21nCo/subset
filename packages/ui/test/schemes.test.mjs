@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { COLOR_TOKENS, COMPUTED_TOKENS, NUCLEUM_MAPPING, SCHEME_FAMILIES, SUBSET_ADJUSTMENTS, contrast, schemeFrom, schemesCss } from '../dist/index.js';
+import { COLOR_TOKENS, COMPUTED_TOKENS, NUCLEUM_MAPPING, SCHEME_FAMILIES, TEXT_SURFACES, contrast, ensureContrast, schemeAdjustments, schemeFrom, schemesCss } from '../dist/index.js';
 
 const nucleum = JSON.parse(readFileSync(new URL('../src/schemes/nucleum.json', import.meta.url), 'utf8'));
 const schemes = SCHEME_FAMILIES.flatMap((family) => [['light', family.light, family], ['dark', family.dark, family]]);
@@ -24,12 +24,16 @@ test('the mapping covers every token except the computed accent contrast, and ev
   const blue = schemeFrom('clean_tidyblue_light');
   assert.equal(blue.colors['frame-surface'], nucleum.schemes.clean_tidyblue_light.colors.bgs1);
   assert.throws(() => schemeFrom('nope'), /Unknown Nucleum scheme/);
-  // The only departures from Nucleum are the listed contrast adjustments.
-  assert.deepEqual(Object.keys(SUBSET_ADJUSTMENTS), ['clean_solarized_dark']);
-  assert.equal(schemeFrom('clean_solarized_dark').colors['text-secondary'], SUBSET_ADJUSTMENTS.clean_solarized_dark.fgs2);
+  // The only departures from Nucleum's colours are text lightened or darkened to reach Subset's contrast. A change
+  // here means a ported scheme changed: check the new values read well before updating the list.
+  assert.deepEqual(schemeAdjustments().map(({ source, token, from, to }) => `${source} ${token} ${from} -> ${to}`), [
+    'clean_solarized_dark text-primary hsl(180 7% 60%) -> hsl(180 7% 74%)',
+    'clean_solarized_dark text-secondary hsl(186 8% 55%) -> hsl(186 8% 68%)',
+    'clean_solarized_dark text-muted hsl(196 13% 45%) -> hsl(196 13% 55%)'
+  ]);
 });
 
-test('text and accent pairs are readable in every scheme', () => {
+test('every text colour is readable on every surface it can sit on, in every scheme', () => {
   const failures = [];
   const check = (label, fg, bg, min) => {
     const ratio = contrast(fg, bg);
@@ -37,18 +41,31 @@ test('text and accent pairs are readable in every scheme', () => {
   };
   for (const [mode, { colors }, family] of schemes) {
     const name = `${family.id} ${mode}`;
-    for (const surface of ['surface-canvas', 'surface-raised']) {
+    for (const surface of TEXT_SURFACES) {
       check(`${name} text-primary on ${surface}`, colors['text-primary'], colors[surface], 4.5);
+      for (const tone of ['accent', 'secondary', 'success', 'danger']) check(`${name} ${tone}-text on ${surface}`, colors[`${tone}-text`], colors[surface], 4.5);
+      // Hovered controls switch to primary text.
+      if (surface === 'surface-hover') continue;
       check(`${name} text-secondary on ${surface}`, colors['text-secondary'], colors[surface], 4.5);
       check(`${name} text-muted on ${surface}`, colors['text-muted'], colors[surface], 3);
     }
-    check(`${name} accent-contrast on accent-solid`, colors['accent-contrast'], colors['accent-solid'], 4.5);
+    for (const tone of ['accent', 'secondary', 'success', 'danger']) check(`${name} ${tone}-contrast on ${tone}-solid`, colors[`${tone}-contrast`], colors[`${tone}-solid`], 4.5);
     check(`${name} accent-on-soft on accent-soft`, colors['accent-on-soft'], colors['accent-soft'], 4.5);
     check(`${name} success-on-subtle on success-subtle`, colors['success-on-subtle'], colors['success-subtle'], 4.5);
     check(`${name} danger-on-subtle on danger-subtle`, colors['danger-on-subtle'], colors['danger-subtle'], 4.5);
     check(`${name} frame-text on frame-surface`, colors['frame-text'], colors['frame-surface'], 4.5);
   }
   assert.deepEqual(failures, []);
+});
+
+test('ensureContrast keeps hue and saturation and moves lightness away from the surfaces', () => {
+  assert.equal(ensureContrast('hsl(0 0% 20%)', ['hsl(0 0% 100%)'], 4.5), 'hsl(0 0% 20%)');
+  const darkened = ensureContrast('hsl(0 89% 71%)', ['hsl(0 0% 100%)', 'hsl(228 26% 98%)'], 4.5);
+  assert.match(darkened, /^hsl\(0 89% (\d+)%\)$/);
+  assert.ok(contrast(darkened, 'hsl(228 26% 98%)') >= 4.5);
+  const lightened = ensureContrast('hsl(0 70% 40%)', ['hsl(0 0% 8%)'], 4.5);
+  assert.ok(Number(/(\d+)%\)$/.exec(lightened)[1]) > 40 && contrast(lightened, 'hsl(0 0% 8%)') >= 4.5);
+  assert.equal(ensureContrast('hsl(37, 72%, 52%)', ['hsl(0 0% 100%)'], 1), 'hsl(37, 72%, 52%)');
 });
 
 test('contrast() matches known WCAG ratios', () => {

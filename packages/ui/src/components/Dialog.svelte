@@ -18,6 +18,9 @@
   let { title, open = $bindable(false), width = '32rem', children, footer }: Props = $props();
   const titleId = $props.id();
   let dialog = $state<HTMLDialogElement>();
+  // A click closes the dialog only when the press also began on the backdrop, so a drag (selecting text in a
+  // field, say) that ends outside the panel keeps it open.
+  let pressedBackdrop = false;
 
   $effect(() => {
     if (!dialog) return;
@@ -33,8 +36,10 @@
   style:--ui-dialog-width={width}
   aria-labelledby={titleId}
   onclose={() => (open = false)}
+  onpointerdown={(event) => (pressedBackdrop = event.target === dialog)}
   onclick={(event) => {
-    if (event.target === dialog) open = false;
+    if (pressedBackdrop && event.target === dialog) open = false;
+    pressedBackdrop = false;
   }}
 >
   <div class="panel">

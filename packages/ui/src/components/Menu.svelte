@@ -1,6 +1,6 @@
 <!--
   A disclosure menu: an icon button that opens a small panel of actions. Escape closes it and returns focus to
-  the button; moving focus out of it, or clicking elsewhere, closes it. Put MenuItem buttons in `children`.
+  the button; moving focus to another element, or pressing anywhere outside it, closes it. Put MenuItem buttons in `children`.
 -->
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
@@ -44,7 +44,10 @@
     }
   }}
   onfocusout={(event) => {
-    if (open && !root?.contains(event.relatedTarget as Node | null)) open = false;
+    // Focus moving to another element outside closes the menu. Focus lost to nothing (Safari clears it on a
+    // mouse press, before the item's click) does not: an outside press is handled by the window listener.
+    const next = event.relatedTarget as Node | null;
+    if (open && next && !root?.contains(next)) open = false;
   }}
 >
   <IconButton {icon} {label} {size} variant="ghost" aria-expanded={open} aria-controls={id} onclick={() => (open = !open)} />

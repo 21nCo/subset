@@ -11,10 +11,10 @@
     children: Snippet;
   }
 
-  let { variant = 'secondary', size = 'md', icon, children, type = 'button', ...rest }: Props = $props();
+  let { variant = 'secondary', size = 'md', icon, children, type = 'button', class: className = '', ...rest }: Props = $props();
 </script>
 
-<button {type} class="ui-button {variant} {size}" {...rest}>
+<button {type} {...rest} class="ui-button {variant} {size} {className}">
   {#if icon}<Icon {icon} size={size === 'sm' ? 16 : 18} />{/if}
   {@render children()}
 </button>
@@ -44,5 +44,6 @@
   .primary { background: var(--ui-color-accent-solid); border-color: var(--ui-color-accent-solid); color: var(--ui-color-accent-contrast); }
   .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); filter: brightness(1.06); }
   .ghost { background: transparent; border-color: transparent; color: var(--ui-color-text-secondary); }
-  .danger { color: var(--ui-color-danger-solid); border-color: var(--ui-color-danger-subtle); }
+  .ghost:not(:disabled):hover { color: var(--ui-color-text-primary); }
+  .danger { color: var(--ui-color-danger-text); border-color: var(--ui-color-danger-subtle); }
 </style>

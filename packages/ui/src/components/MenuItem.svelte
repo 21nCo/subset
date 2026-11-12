@@ -10,10 +10,10 @@
     children: Snippet;
   }
 
-  let { icon, tone = 'neutral', children, type = 'button', ...rest }: Props = $props();
+  let { icon, tone = 'neutral', children, type = 'button', class: className = '', ...rest }: Props = $props();
 </script>
 
-<button {type} class="ui-menu-item {tone}" {...rest}>
+<button {type} {...rest} class="ui-menu-item {tone} {className}">
   {#if icon}<Icon {icon} size={16} />{/if}
   {@render children()}
 </button>
@@ -35,5 +35,5 @@
   }
   .ui-menu-item:not(:disabled):hover { background: var(--ui-color-surface-hover); }
   .ui-menu-item:disabled { opacity: 0.45; cursor: default; }
-  .danger { color: var(--ui-color-danger-solid); }
+  .danger { color: var(--ui-color-danger-text); }
 </style>

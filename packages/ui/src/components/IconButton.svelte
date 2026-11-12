@@ -14,11 +14,11 @@
     hint?: string;
   }
 
-  let { icon, label, variant = 'secondary', size = 'md', weight = 'regular', hint, type = 'button', ...rest }: Props = $props();
+  let { icon, label, variant = 'secondary', size = 'md', weight = 'regular', hint, type = 'button', class: className = '', ...rest }: Props = $props();
   const iconSize = $derived(size === 'sm' ? 16 : size === 'lg' ? 24 : 18);
 </script>
 
-<button {type} class="ui-icon-button {variant} {size}" aria-label={label} title={hint ?? label} {...rest}>
+<button {type} {...rest} class="ui-icon-button {variant} {size} {className}" aria-label={label} title={hint ?? label}>
   <Icon {icon} size={iconSize} {weight} />
 </button>
 
@@ -44,4 +44,5 @@
   .primary { background: var(--ui-color-accent-solid); border-color: var(--ui-color-accent-solid); color: var(--ui-color-accent-contrast); }
   .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); filter: brightness(1.06); }
   .ghost { background: transparent; border-color: transparent; color: var(--ui-color-text-secondary); }
+  .ghost:not(:disabled):hover { color: var(--ui-color-text-primary); }
 </style>

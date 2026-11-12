@@ -8,10 +8,10 @@ export const COLOR_TOKENS = [
   'surface-canvas', 'surface-raised', 'surface-sunken', 'surface-overlay', 'surface-hover',
   'text-primary', 'text-secondary', 'text-muted', 'text-disabled',
   'border-subtle', 'border-default', 'border-strong',
-  'accent-solid', 'accent-subtle', 'accent-soft', 'accent-contrast', 'accent-on-soft',
-  'secondary-solid', 'secondary-subtle',
-  'success-solid', 'success-subtle', 'success-on-subtle',
-  'danger-solid', 'danger-subtle', 'danger-on-subtle',
+  'accent-solid', 'accent-subtle', 'accent-soft', 'accent-contrast', 'accent-on-soft', 'accent-text',
+  'secondary-solid', 'secondary-subtle', 'secondary-contrast', 'secondary-text',
+  'success-solid', 'success-subtle', 'success-contrast', 'success-on-subtle', 'success-text',
+  'danger-solid', 'danger-subtle', 'danger-contrast', 'danger-on-subtle', 'danger-text',
   'frame-surface', 'frame-text', 'frame-border', 'frame-accent'
 ] as const;
 export type ColorToken = (typeof COLOR_TOKENS)[number];
@@ -25,7 +25,12 @@ const SOURCE = nucleum.schemes as Record<string, NucleumScheme>;
  * scheme's lightest and darkest text reads best on `accent-solid`.
  */
 /** Text colours computed for readability on a tinted background, rather than taken from a Nucleum slot. */
-export const COMPUTED_TOKENS = ['accent-contrast', 'accent-on-soft', 'success-on-subtle', 'danger-on-subtle'] as const;
+export const COMPUTED_TOKENS = [
+  'accent-contrast', 'accent-on-soft', 'accent-text',
+  'secondary-contrast', 'secondary-text',
+  'success-contrast', 'success-on-subtle', 'success-text',
+  'danger-contrast', 'danger-on-subtle', 'danger-text'
+] as const;
 type ComputedToken = (typeof COMPUTED_TOKENS)[number];
 
 export const NUCLEUM_MAPPING: Record<Exclude<ColorToken, ComputedToken>, string[]> = {
@@ -58,14 +63,20 @@ export const NUCLEUM_MAPPING: Record<Exclude<ColorToken, ComputedToken>, string[
   'frame-accent': ['faps1', 'aps1']
 };
 
-/**
- * Subset's only departures from Nucleum's colours: slots whose text falls short of the contrast Subset requires
- * on a nested surface, lightened just enough to pass. Report them upstream so the schemes can converge again.
- */
-export const SUBSET_ADJUSTMENTS: Record<string, Record<string, string>> = {
-  // fgs2 and fgs3 on bgs2 measure 4.15:1 and 2.90:1 in Nucleum; these give 4.55:1 and 3.01:1.
-  clean_solarized_dark: { fgs2: 'hsl(186 8% 58%)', fgs3: 'hsl(196 13% 46%)' }
-};
+/** Surfaces that text can sit on, directly or as a nested control (hover holds primary text only). */
+export const TEXT_SURFACES = ['surface-canvas', 'surface-raised', 'surface-sunken', 'surface-hover', 'surface-overlay'] as const;
+
+/** The contrast Subset requires for body text and tone-coloured text (4.5:1), and for muted hints (3:1). */
+export const TEXT_CONTRAST = 4.5;
+export const MUTED_CONTRAST = 3;
+
+/** A token whose Nucleum colour was moved to reach Subset's contrast; `schemeAdjustments()` lists them. */
+export interface SchemeAdjustment {
+  source: string;
+  token: ColorToken;
+  from: string;
+  to: string;
+}
 
 export type SchemeMode = 'light' | 'dark';
 
@@ -87,13 +98,12 @@ export interface SchemeFamily {
 
 // --- Colour arithmetic, for the accent contrast token and the contrast tests ----------------------------------
 
-/** sRGB channels 0-1 of `hsl(H S% L%)` (the CSS Color 4 space-separated form Nucleum writes). */
+/** sRGB channels 0-1 of an `hsl()` colour. */
 export function hslToRgb(value: string): [number, number, number] {
-  const match = /^hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*\)$/.exec(value.trim());
-  if (!match) throw new Error(`Not an hsl() colour: ${value}`);
-  const h = Number(match[1]) / 360;
-  const s = Number(match[2]) / 100;
-  const l = Number(match[3]) / 100;
+  const [hue, saturation, lightness] = hslParts(value);
+  const h = hue / 360;
+  const s = saturation / 100;
+  const l = lightness / 100;
   const k = (n: number) => (n + h * 12) % 12;
   const a = s * Math.min(l, 1 - l);
   const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
@@ -112,6 +122,31 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+function hslParts(value: string): [number, number, number] {
+  // Nucleum writes both the space-separated and the older comma-separated form.
+  const match = /^hsl\(\s*([\d.]+)[\s,]+([\d.]+)%[\s,]+([\d.]+)%\s*\)$/.exec(value.trim());
+  if (!match) throw new Error(`Not an hsl() colour: ${value}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/**
+ * `color`, or the nearest colour of the same hue and saturation that reaches `min` contrast against every one of
+ * `backgrounds`: lightness moves away from the backgrounds (darker on light surfaces, lighter on dark ones) one
+ * percentage point at a time.
+ */
+export function ensureContrast(color: string, backgrounds: string[], min: number): string {
+  const passes = (candidate: string) => backgrounds.every((background) => contrast(candidate, background) >= min);
+  if (passes(color)) return color;
+  const [h, s, l] = hslParts(color);
+  const darkSurfaces = backgrounds.reduce((sum, background) => sum + luminance(background), 0) / backgrounds.length < 0.18;
+  const step = darkSurfaces ? 1 : -1;
+  for (let lightness = Math.round(l) + step; lightness >= 0 && lightness <= 100; lightness += step) {
+    const candidate = `hsl(${h} ${s}% ${lightness}%)`;
+    if (passes(candidate)) return candidate;
+  }
+  return darkSurfaces ? 'hsl(0 0% 100%)' : 'hsl(0 0% 0%)';
+}
+
 // --- Schemes -------------------------------------------------------------------------------------------------
 
 function pick(colors: Record<string, string>, slots: string[], source: string, token: string): string {
@@ -119,22 +154,55 @@ function pick(colors: Record<string, string>, slots: string[], source: string, t
   throw new Error(`Nucleum scheme ${source} has none of ${slots.join(', ')} for ${token}`);
 }
 
+const ADJUSTMENTS = new Map<string, SchemeAdjustment[]>();
+
+/** Every text token Subset moved away from Nucleum's colour to reach its contrast targets, scheme by scheme. */
+export function schemeAdjustments(): SchemeAdjustment[] {
+  return SCHEME_FAMILIES.flatMap((family) => [family.light, family.dark])
+    .filter((scheme, index, all) => all.findIndex((other) => other.source === scheme.source) === index)
+    .flatMap((scheme) => ADJUSTMENTS.get(scheme.source) ?? []);
+}
+
 /** The Subset scheme for the Nucleum scheme `source`. */
 export function schemeFrom(source: string): Scheme {
   const entry = SOURCE[source];
   if (!entry) throw new Error(`Unknown Nucleum scheme ${source}`);
-  const palette = { ...entry.colors, ...SUBSET_ADJUSTMENTS[source] };
   const colors = {} as Record<ColorToken, string>;
-  for (const [token, slots] of Object.entries(NUCLEUM_MAPPING)) colors[token as ColorToken] = pick(palette, slots, source, token);
-  // Text on a tinted background: the scheme's own choice where it has one (onaps3), else whichever of its primary
-  // text, white and near-black reads best. In some dark schemes the "subtle" tones are light, so primary text fails.
-  const readableOn = (background: string, preferred: (string | undefined)[]) =>
-    ([...preferred, 'hsl(0 0% 100%)', 'hsl(0 0% 7%)'].filter(Boolean) as string[]).reduce((best, next) =>
-      contrast(next, background) > contrast(best, background) + 0.01 ? next : best);
+  for (const [token, slots] of Object.entries(NUCLEUM_MAPPING)) colors[token as ColorToken] = pick(entry.colors, slots, source, token);
+  const adjustments: SchemeAdjustment[] = [];
+  const surfaces = TEXT_SURFACES.map((surface) => colors[surface]);
+  // Hovered controls switch to primary text, so secondary and muted text only need the resting surfaces.
+  const resting = TEXT_SURFACES.filter((surface) => surface !== 'surface-hover').map((surface) => colors[surface]);
+  const settle = (token: ColorToken, value: string, min: number, on = surfaces) => {
+    const settled = ensureContrast(value, on, min);
+    if (settled !== value) adjustments.push({ source, token, from: value, to: settled });
+    colors[token] = settled;
+  };
+  // Text must read on every surface it can sit on, including nested controls and hover states.
+  settle('text-primary', colors['text-primary'], TEXT_CONTRAST);
+  settle('text-secondary', colors['text-secondary'], TEXT_CONTRAST, resting);
+  settle('text-muted', colors['text-muted'], MUTED_CONTRAST, resting);
+  // Tone colours are fills; text in a tone (a Remove label, a phase name) takes the tone moved until it reads.
+  for (const tone of ['accent', 'secondary', 'success', 'danger'] as const) {
+    colors[`${tone}-text`] = ensureContrast(colors[`${tone}-solid`], surfaces, TEXT_CONTRAST);
+  }
+  // Text on a tinted background: the scheme's own choice where it has one (onaps3) or its primary text. In some
+  // dark schemes the "subtle" tones are light, so primary text fails there.
+  // The first candidate that reaches 4.5:1 (the scheme's own colour first, then white, near-black and black),
+  // else the best of them.
+  const readableOn = (background: string, preferred: (string | undefined)[]) => {
+    const candidates = [...preferred, 'hsl(0 0% 100%)', 'hsl(0 0% 7%)', 'hsl(0 0% 0%)'].filter(Boolean) as string[];
+    return candidates.find((candidate) => contrast(candidate, background) >= TEXT_CONTRAST)
+      ?? candidates.reduce((best, next) => (contrast(next, background) > contrast(best, background) ? next : best));
+  };
   colors['accent-contrast'] = readableOn(colors['accent-solid'], [entry.colors.onaps3]);
+  colors['secondary-contrast'] = readableOn(colors['secondary-solid'], []);
+  colors['success-contrast'] = readableOn(colors['success-solid'], []);
+  colors['danger-contrast'] = readableOn(colors['danger-solid'], []);
   colors['accent-on-soft'] = readableOn(colors['accent-soft'], [colors['text-primary']]);
   colors['success-on-subtle'] = readableOn(colors['success-subtle'], [colors['text-primary']]);
   colors['danger-on-subtle'] = readableOn(colors['danger-subtle'], [colors['text-primary']]);
+  ADJUSTMENTS.set(source, adjustments);
   return { source, label: entry.label, mode: entry.isDark ? 'dark' : 'light', colors };
 }
 
