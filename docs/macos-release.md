@@ -76,7 +76,9 @@ The npm packages in `release-packages.json` get betas the same way: when a run n
 
 `publish-tag.yml` publishes only through the package's npm trusted publisher (OIDC) and has no npm token. npm can only attach a trusted publisher to a package that already exists, so a package that has never been on npm needs one manual step before its first live tag:
 
-1. A maintainer claims the name by publishing a `0.0.0` placeholder by hand with 2FA (`npm publish --access public` from a minimal `package.json` with that name and version). Don't hand-publish the real version: its live tag would then fail at `npm publish` because the version already exists, and `scripts/beta-builds.mjs` counts a package as released only once a live `<slug>-v<x.y.z>` tag exists.
+1. A maintainer claims the name with a `0.0.0` placeholder. In a new empty directory outside the repository, write a `package.json` containing only the package's `"name"` and `"version": "0.0.0"`, check that `npm pack --dry-run` lists only `package.json`, then run `npm publish --access public` with 2FA. Don't hand-publish the real version: its live tag would then fail at `npm publish` because the version already exists, and `scripts/beta-builds.mjs` counts a package as released only once a live `<slug>-v<x.y.z>` tag exists.
 2. On npmjs.com, add a GitHub Actions trusted publisher for the package: repository `21nCo/subset`, workflow `publish-tag.yml`, with **Allow npm publish** enabled (npm defaults new connections to staged publishing only).
 3. Within 2 days, push the live `<slug>-v<x.y.z>` tag. npm expires a trusted publisher that has not completed a successful publish within 2 days of being created; if that happens, delete and recreate it. The live release takes `latest` from the placeholder.
 4. Deprecate the placeholder: `npm deprecate <name>@0.0.0 "Name placeholder; install a released version"`.
+
+Until the live tag ships, don't push a beta tag for the package: `scripts/npm-beta-guard.mjs` treats a `latest` of `0.0.0` as no live release and refuses it.
