@@ -42,8 +42,9 @@
   .sm { width: 1.875rem; height: 1.875rem; }
   .lg { width: 3rem; height: 3rem; border-radius: var(--ui-radius-panel); }
   .primary { background: var(--ui-color-accent-solid); border-color: var(--ui-color-accent-solid); color: var(--ui-color-accent-contrast); }
-  /* Hover keeps the fill (and so the label's contrast) and adds a halo. */
-  .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); box-shadow: 0 0 0 3px var(--ui-color-accent-soft); }
+  /* Hover keeps the fill (and so the label's contrast) and adds a halo, never in place of the focus ring. */
+  .primary:not(:disabled):hover { background: var(--ui-color-accent-solid); }
+  .primary:not(:disabled):hover:not(:focus-visible) { box-shadow: 0 0 0 3px var(--ui-color-accent-soft); }
   .ghost { background: transparent; border-color: transparent; color: var(--ui-color-text-secondary); }
   .ghost:not(:disabled):hover { color: var(--ui-color-text-primary); }
 </style>
