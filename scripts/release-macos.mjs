@@ -7,8 +7,9 @@
 // CFBundleShortVersionString stays x.y.z. A beta build is signed and notarized like a live one. --dev <n> makes the
 // same kind of build named x.y.z-dev.<n>, the label test builds used before betas.
 //
-// The app is described by native/<app-id>/macos-release.json ({ project, scheme, app }). Signing uses the
-// "Developer ID Application" identity for the team in that file (or --team / APPLE_TEAM_ID) from the
+// The app is described by native/<app-id>/macos-release.json ({ project, scheme, app, bundleId, helpers }). The
+// archived and the signed app must carry the declared bundle ID and bundled commands (docs/macos-release.md).
+// Signing uses the "Developer ID Application" identity for the team in that file (or --team / APPLE_TEAM_ID) from the
 // keychain. Notarization credentials come from a notarytool keychain profile (--notary-profile or
 // NOTARY_PROFILE, set up once with `xcrun notarytool store-credentials`) or, in CI, from an App Store Connect
 // API key (APPLE_API_KEY_PATH, APPLE_API_KEY_ID, APPLE_API_ISSUER). Credentials are never printed.
@@ -23,7 +24,7 @@
 //                                         from the project
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -72,8 +73,37 @@ export function prereleaseProblems({ version, url, releaseUrl }) {
   return problems;
 }
 
+// The app's CFBundleIdentifier, in reverse-DNS form: two or more dot-separated parts of letters, digits and hyphens.
+const bundleIdPattern = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+// A helper's command is the tool ID `subset <command>` runs it as.
+const helperCommandPattern = /^[a-z0-9][a-z0-9-]*$/;
+// How a helper runs: `native` is an executable, `node` an ES module run with Node.js.
+export const HELPER_KINDS = Object.freeze(['native', 'node']);
+const helperKeys = new Set(['command', 'path', 'kind']);
+
+// One entry of "helpers": { command, path, kind }, where path is relative to the .app and inside its Contents/ folder.
+function helperProblems(helper, index) {
+  const label = `"helpers"[${index}]`;
+  if (!helper || typeof helper !== 'object' || Array.isArray(helper)) return [`${label} must be an object { command, path, kind }`];
+  const problems = Object.keys(helper).filter((key) => !helperKeys.has(key)).map((key) => `${label} has an unknown key "${key}"`);
+  if (typeof helper.command !== 'string' || !helperCommandPattern.test(helper.command)) problems.push(`${label} "command" must be a tool ID such as point-in-time`);
+  if (!HELPER_KINDS.includes(helper.kind)) problems.push(`${label} "kind" must be one of ${HELPER_KINDS.join(', ')}`);
+  if (!(isRepoRelativePath(helper.path) && helper.path.startsWith('Contents/'))) {
+    problems.push(`${label} "path" must be a relative path inside the app's Contents/ folder`);
+  } else if (helper.kind === 'node' && !helper.path.endsWith('.mjs')) {
+    problems.push(`${label} "path" of a node helper must be an .mjs ES module`);
+  }
+  return problems;
+}
+
 const manifestRules = [
   (m) => ['project', 'scheme', 'app'].filter((key) => typeof m[key] !== 'string' || m[key].length === 0).map((key) => `"${key}" must be a non-empty string`),
+  (m) => (typeof m.bundleId === 'string' && bundleIdPattern.test(m.bundleId) ? [] : ['"bundleId" must be the app\'s CFBundleIdentifier, such as dev.subset.breaks']),
+  (m) => {
+    if (m.helpers === undefined) return [];
+    if (!Array.isArray(m.helpers) || m.helpers.length === 0) return ['"helpers" must be a non-empty list of { command, path, kind }'];
+    return m.helpers.flatMap(helperProblems);
+  },
   (m) =>
     typeof m.project === 'string' && (!m.project.endsWith('.xcodeproj') || m.project.includes('..') || path.isAbsolute(m.project))
       ? ['"project" must be a .xcodeproj path inside the app directory']
@@ -88,8 +118,43 @@ const manifestRules = [
 ];
 
 export function validateManifest(manifest, appId) {
-  if (!manifest || typeof manifest !== 'object') return [`native/${appId}/macos-release.json must be an object`];
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return [`native/${appId}/macos-release.json must be an object`];
   return manifestRules.flatMap((rule) => rule(manifest));
+}
+
+// What scripts/check-workspaces.mjs checks across every native/<app-id>/macos-release.json ({ appId, manifest }
+// entries): each is valid, no two apps share a bundle ID, and each helper command is declared once across all apps and
+// is not one of `subset`'s own commands (reservedNames), since `subset <command>` runs it.
+export function macosReleaseManifestProblems(entries, reservedNames) {
+  const problems = [];
+  const owners = { bundleId: new Map(), command: new Map() };
+  const claim = (kind, value, appId) => {
+    const owner = owners[kind].get(value);
+    if (owner === undefined) owners[kind].set(value, appId);
+    else problems.push(`native/${appId}/macos-release.json: ${kind} ${JSON.stringify(value)} is already declared by native/${owner}/macos-release.json`);
+  };
+  for (const { appId, manifest } of entries) {
+    const file = `native/${appId}/macos-release.json`;
+    const own = validateManifest(manifest, appId);
+    problems.push(...own.map((problem) => (problem.startsWith(file) ? problem : `${file}: ${problem}`)));
+    if (own.length > 0) continue;
+    claim('bundleId', manifest.bundleId, appId);
+    for (const { command } of manifest.helpers ?? []) {
+      if (reservedNames.includes(command)) problems.push(`${file}: helper command ${JSON.stringify(command)} is a reserved subset command`);
+      claim('command', command, appId);
+    }
+  }
+  return problems;
+}
+
+// The { appId, manifest } entries for every <nativeDirectory>/<app-id>/macos-release.json, appId being the folder's
+// name. Filesystem paths, not URLs, so a folder named with "?" or "#" is still read rather than silently skipped.
+export function readMacosReleaseManifests(nativeDirectory) {
+  return readdirSync(nativeDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ appId: entry.name, file: path.join(nativeDirectory, entry.name, 'macos-release.json') }))
+    .filter(({ file }) => existsSync(file))
+    .map(({ appId, file }) => ({ appId, manifest: JSON.parse(readFileSync(file, 'utf8')) }));
 }
 
 // codesign lists every CodeDirectory flag, e.g. flags=0x12000(library-validation,runtime).
@@ -356,6 +421,7 @@ function archiveApp({ appId, manifest, team, version }, prerelease, workDir) {
     ...(prerelease === undefined ? [] : [`CURRENT_PROJECT_VERSION=${prerelease.build}`]),
   ]);
   checkBundleVersions(archivedApp(archivePath, manifest), version, prerelease);
+  checkAppMetadata(archivedApp(archivePath, manifest), appId, manifest);
   return archivePath;
 }
 
@@ -417,6 +483,48 @@ function exportSigned(archivePath, { manifest, team, version }, prerelease, work
 
 function plistValue(plist, key) {
   return execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist], { encoding: 'utf8' }).trim();
+}
+
+// The app must be what native/<app-id>/macos-release.json declares, because the catalog feed and `subset` read the
+// declaration instead of the app: its Info.plist's CFBundleIdentifier (read with plutil) is "bundleId", and each helper
+// is a file inside the app, executable by everyone when its kind is native. Returns the disagreements.
+export function appMetadataProblems(appPath, manifest, { plutil = '/usr/bin/plutil' } = {}) {
+  const problems = [];
+  const plist = path.join(appPath, 'Contents', 'Info.plist');
+  const read = spawnSync(plutil, ['-extract', 'CFBundleIdentifier', 'raw', '-expect', 'string', '-o', '-', plist], { encoding: 'utf8' });
+  if (read.error || read.status !== 0) {
+    problems.push(`could not read CFBundleIdentifier from Contents/Info.plist: ${(read.error?.message ?? read.stderr ?? '').trim()}`);
+  } else {
+    const bundleId = read.stdout.replace(/\n$/, '');
+    if (bundleId !== manifest.bundleId) problems.push(`CFBundleIdentifier is ${JSON.stringify(bundleId)}, but "bundleId" is ${JSON.stringify(manifest.bundleId)}`);
+  }
+  const realApp = realpathSync(appPath);
+  for (const helper of manifest.helpers ?? []) {
+    const label = `helper ${JSON.stringify(helper.command)} at ${helper.path}`;
+    let real;
+    try {
+      real = realpathSync(path.join(appPath, helper.path));
+    } catch {
+      problems.push(`${label} is missing from the app`);
+      continue;
+    }
+    if (!real.startsWith(`${realApp}${path.sep}`)) {
+      problems.push(`${label} resolves outside the app`);
+      continue;
+    }
+    const stat = statSync(real);
+    if (!stat.isFile()) problems.push(`${label} is not a file`);
+    else if (helper.kind === 'native' && (stat.mode & 0o111) !== 0o111) problems.push(`${label} is not executable (mode ${(stat.mode & 0o777).toString(8)})`);
+  }
+  return problems;
+}
+
+// Fails the release when the app disagrees with its manifest.
+export function checkAppMetadata(appPath, appId, manifest, options) {
+  const problems = appMetadataProblems(appPath, manifest, options);
+  if (problems.length > 0) throw new Error(`${path.basename(appPath)} does not match native/${appId}/macos-release.json: ${problems.join('; ')}`);
+  const helpers = (manifest.helpers ?? []).map(({ command, path: helperPath }) => `${command} (${helperPath})`);
+  console.log(`CFBundleIdentifier ${manifest.bundleId}${helpers.length > 0 ? `, helpers ${helpers.join(', ')}` : ''}`);
 }
 
 // The app must carry the release's version, and a beta build its build number.
@@ -487,6 +595,8 @@ function main() {
     archivePath = archiveApp(release, options.prerelease, workDir);
   }
   const { appPath, signature } = exportSigned(archivePath, release, options.prerelease, workDir);
+  // Checked on the signed app, before anything is submitted for notarization.
+  checkAppMetadata(appPath, options.appId, manifest);
 
   if (authArgs) {
     const submitZip = path.join(workDir, `${base}-submit.zip`);

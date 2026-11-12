@@ -1,1 +1,7 @@
-{ "project": "Clipboard.xcodeproj", "scheme": "ClipboardMac", "app": "Clipboard", "team": "SAZVPX4CAA" }
+{
+  "project": "Clipboard.xcodeproj",
+  "scheme": "ClipboardMac",
+  "app": "Clipboard",
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.clipboard.macos"
+}

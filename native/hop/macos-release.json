@@ -2,5 +2,6 @@
   "project": "Hop.xcodeproj",
   "scheme": "Hop",
   "app": "Hop",
-  "team": "SAZVPX4CAA"
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.hop"
 }

@@ -3,5 +3,6 @@
   "scheme": "Dictate",
   "app": "Dictate",
   "team": "SAZVPX4CAA",
-  "prepare": "scripts/setup-whispercpp.sh"
+  "prepare": "scripts/setup-whispercpp.sh",
+  "bundleId": "dev.subset.dictate"
 }

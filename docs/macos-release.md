@@ -7,15 +7,29 @@
 Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 
 ```json
-{ "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA" }
+{ "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA", "bundleId": "dev.subset.breaks" }
 ```
 
-`scheme` must build a macOS `.app`; `app` is its product name. Some apps need build inputs the repository doesn't hold:
+`scheme` must build a macOS `.app`; `app` is its product name and `bundleId` its `CFBundleIdentifier` (required). An app that bundles a command line tool declares it in `helpers`, so the catalog feed and `subset <command>` can find it without reading the Xcode project:
+
+```json
+"helpers": [{ "command": "system", "path": "Contents/Helpers/subset-system", "kind": "native" }]
+```
+
+- `command`: the tool ID `subset <command>` runs it as. It is lowercase letters, digits and hyphens, declared by one app only, and not one of `subset`'s own commands (`install`, `uninstall`, `update`, `list`, `help`, `version`).
+- `path`: the file, relative to the `.app` and inside its `Contents/` folder, with no `.` or `..` parts.
+- `kind`: `native` for an executable, or `node` for an ES module (`.mjs`) run with Node.js.
+
+Omit `helpers` when the app bundles no command. The current helpers are System's `system` (`Contents/Helpers/subset-system`), pointInTime's `point-in-time` (`Contents/Helpers/point-in-time`), and the Node.js CLIs Timer and Minutes embed: `timer` (`Contents/Resources/timer-cli/dist/cli.mjs`) and `minutes` (`Contents/Resources/minutes-cli/dist/cli.mjs`). `scripts/check-workspaces.mjs` (`npm run check`) checks the shape of every manifest; the release script checks the declarations against the app (see below).
+
+Some apps need build inputs the repository doesn't hold:
 
 - `"workspaces"`: npm workspaces to build first, in order (Minutes embeds the built `@subset.dev/minutes` CLI: `["@subset.dev/minutes-core", "@subset.dev/minutes"]`). Runs `npm ci` and `npm run build --workspace=<name>` for each.
 - `"prepare"`: a `.sh` path inside the app directory that fetches inputs (Dictate's checksum-pinned whisper.cpp XCFramework: `"scripts/setup-whispercpp.sh"`). Runs from the app directory.
 
 The script runs these steps, resolves any Swift packages, and archives the app with an ad-hoc signature (entitlements and hardened runtime applied, no signing identity), then re-signs the archive with Developer ID through `xcodebuild -exportArchive` and notarizes it. Locally that is one command. In CI, building and signing are separate jobs so no project, package, or npm code runs while credentials are present: the `build` job has no environment, secrets, or write token and runs `--archive-only --archive-out <file>`; the signing job runs `--from-archive <file> --version <x.y.z>`, which lists the archive's entries (only `<App>.xcarchive/...` is accepted), unpacks it, refuses symlinks that resolve outside it, checks the app's version and build number, and only re-signs, notarizes, and packages it. The signing job runs the repository's release script and Apple's tools, but no app, Swift package, or npm build code. The signing job also refuses an archive built from a different commit than the tag it signs.
+
+Both the archived app and the exported, signed app must match the manifest, or the release fails before anything is notarized: `plutil` reads `CFBundleIdentifier` from the app's `Info.plist` and it must equal `bundleId`, and each helper's `path` must be a file inside the app (a link may point only within it), executable by everyone when its `kind` is `native`. Releases made before these checks keep their assets unchanged.
 
 The release version is the target's `MARKETING_VERSION`. Targets that need a restricted entitlement (one that requires a provisioning profile under Developer ID) are not covered yet and fail at export.
 
