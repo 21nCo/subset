@@ -1,0 +1,39 @@
+packages/subset-dev/src/commands/list.mjs
+  s_0d85e5b70dc887::t_e1ee389c27d5d5 53-65
+packages/subset-dev/src/feed.mjs
+  s_eb94aa5e16f616::t_5b41b5ac57b2d9 116-120,138,142-144,153,163-164,169-174,181-182,184,186,193
+packages/subset-dev/src/macos/apps.mjs
+  s_0d85e5b70dc887::t_c8b50e2a9905bf 63-65,69-71
+packages/subset-dev/test/apps.test.mjs
+  s_0d85e5b70dc887::t_808c745d6b8d58 2,7,12-14,45,84-96,141
+packages/subset-dev/test/feed.test.mjs
+  s_0d85e5b70dc887::t_5d49fe920247e0 14,227-240,281-292
+packages/subset-dev/test/helpers.mjs
+  s_0d85e5b70dc887::t_dc83b49caa1931 41-43
+packages/subset-dev/test/list.test.mjs
+  s_0d85e5b70dc887::t_ad9ad030fce69c 6-7,12,51-55,65,97,108,138-160,291-308
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c047638788d2f625ff757dd16375fa94bf1d293d",
+  "prompts": {},
+  "sessions": {
+    "s_0d85e5b70dc887": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "37e3656b-fb3d-4769-b9a9-5d99c965fb6b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_eb94aa5e16f616": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3cf302e8-2c8b-40f8-bc7d-74e69e6eea0f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
