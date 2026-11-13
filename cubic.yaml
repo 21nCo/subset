@@ -1,33 +1,21 @@
 # yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
 # Hosted cubic review settings. cubic bills per reviewed line, so this skips
-# files whose review adds little. Code (including test code and test helpers),
-# agent instructions, prompts, skills, specs, contracts and docs that define
-# behaviour stay reviewed.
+# only machine-written files: changelogs, test snapshots, generated output and
+# lockfiles. All code, tests, fixtures, docs and READMEs stay reviewed.
 version: 1
 
 reviews:
   ignore:
     files:
-      # Prose documentation. The local review runs a docs-vs-code check (cubic
-      # CLI) before the PR opens and on every fix push.
       - '**/CHANGELOG.md'
-      - '**/CONTRIBUTING.md'
-      # Recorded or generated test data (hand-written contract cases and helper code stay reviewed)
-      - 'packages/timer/fixtures/**'
-      - 'scripts/fixtures/**'
-      - 'packages/bookmarks-core/test/fixtures/**/*.html'
-      - 'packages/bookmarks-core/test/fixtures/**/*.json'
-      - 'packages/bookmarks-core/test/fixtures/**/*.csv'
-      - 'packages/links/test/fixtures/**/*.html'
-      - 'packages/links/test/fixtures/**/*.json'
-      - 'packages/links/test/fixtures/**/*.csv'
-      # Test snapshots (snapshot folders holding reviewed contract JSON stay reviewed)
+      # Test snapshots
       - '**/*.snap'
-      # Generated output
+      # Generated output (the generators and their inputs stay reviewed)
       - '**/dist/**'
       - '**/generated/**'
       - '**/*.generated.*'
-      # Lockfiles. The local review checks new dependency advisories with osv-scanner.
+      # Lockfiles. The loops' local review reports dependency advisories a
+      # lockfile change adds (osv-scanner) before the PR opens and on every fix push.
       - 'pnpm-lock.yaml'
       - '**/pnpm-lock.yaml'
       - 'package-lock.json'
@@ -36,8 +24,17 @@ reviews:
       - '**/yarn.lock'
       - 'bun.lock'
       - '**/bun.lock'
+      - 'bun.lockb'
+      - '**/bun.lockb'
       - 'Cargo.lock'
       - '**/Cargo.lock'
+      - 'composer.lock'
+      - '**/composer.lock'
       - '**/Package.resolved'
-      - '.github/**/package-lock.json'
       - '.github/**/pnpm-lock.yaml'
+      - '.github/**/package-lock.json'
+      - '.github/**/yarn.lock'
+      - '.github/**/bun.lock'
+      - '.github/**/bun.lockb'
+      - '.github/**/Cargo.lock'
+      - '.github/**/composer.lock'
