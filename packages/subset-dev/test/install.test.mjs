@@ -13,7 +13,7 @@ import { receiptFile } from '../src/macos/apps.mjs';
 import { INSTALL_TOOLS } from '../src/macos/install.mjs';
 import { compareVersions } from '../src/macos/verify.mjs';
 import { makeApp } from './helpers.mjs';
-import { appFiles, makeImage, stubTools, stubToolsSkip } from './install-stubs.mjs';
+import { appFiles, attachedImages, makeImage, makeImageWithModes, stubTools, stubToolsSkip } from './install-stubs.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const preload = new URL('./install-preload.mjs', import.meta.url).href;
@@ -97,12 +97,16 @@ async function install(c, args, { fetch, platform = 'darwin', signals = new Even
 const steps = (c) => (existsSync(c.log) ? readFileSync(c.log, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []);
 const receipt = (c) => receiptFile(c.home, 'dev.subset.breaks');
 
-// Nothing was installed: the destination holds only what it held before and there is no receipt. The private folder
-// is gone, which install.mjs does only once every volume mounted in it is detached (the stand-in hdiutil removes a
-// volume only when it is detached).
+// No image downloaded into the case's temporary folder is still attached to the stand-in hdiutil.
+const assertDetached = (c) => assert.deepEqual(stillAttached(c), [], 'the image is detached');
+const stillAttached = (c) => (tools ? attachedImages(path.dirname(tools.hdiutil)).filter((image) => image.startsWith(`${c.tmp}${path.sep}`)) : []);
+
+// Nothing was installed: the destination holds only what it held before and there is no receipt. The image is
+// detached and the private folder is gone.
 function assertNothingInstalled(c, dir = c.system, before = []) {
   assert.deepEqual(readdirSync(dir).sort(), before, `${dir} is unchanged`);
   assert.equal(existsSync(receipt(c)), false, 'no receipt');
+  assertDetached(c);
   assert.deepEqual(readdirSync(c.tmp), [], 'the private folder is removed');
 }
 
@@ -147,10 +151,13 @@ test('installs the live app in the /Applications stand-in with its receipt', { s
   assert.deepEqual(written, { schema: 'subset.receipt@1', channel: 'live', version: '0.1.0', sha256: sha256(image), installedAt: '2026-11-13T12:00:00Z', path: '/Applications/Breaks.app' });
   assert.deepEqual(validateReceipt(written), []);
   assert.deepEqual(readdirSync(c.tmp), []);
-  // The tools ran in order, on the staged copy, with the image attached read-only and hidden in the private folder.
+  // The tools ran in order, on the staged copy, with the image attached read-only and hidden in the private folder,
+  // and the image was detached by its device, then checked to be gone.
   const log = steps(c);
-  assert.deepEqual(log.map((entry) => entry.step), ['hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'sw_vers', 'hdiutil-detach']);
+  assert.deepEqual(log.map((entry) => entry.step), ['hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'sw_vers', 'hdiutil-detach', 'hdiutil-info']);
   assert.match(log[0].args[5], new RegExp(`^${c.tmp}/subset-install-[^/]+/mnt$`));
+  assert.match(log[6].args[1], /^\/dev\/disk\d+$/);
+  assertDetached(c);
   const staged = log[2].args[3];
   assert.match(path.basename(staged), /^\.Breaks\.app\.subset-install-[0-9a-f]{12}$/);
   assert.equal(path.dirname(staged), c.system);
@@ -224,7 +231,7 @@ const refusals = [
   ['an image with no app', { image: makeImage({ 'README.txt': 'hi' }) }, {}, /the image step failed: the image holds 0 apps at its root, not exactly one \(Breaks\.app\)/],
   ['an image with two apps', { image: makeImage({ ...appFiles('Breaks.app'), ...appFiles('Other.app') }) }, {}, /the image step failed: the image holds 2 apps/],
   ['an app with another name', { image: makeImage(appFiles('Breaks 2.app')) }, {}, /the image step failed: the image holds "Breaks 2\.app", not Breaks\.app/],
-  ['an image with two volumes', { image: makeImage(appFiles('Breaks.app'), appFiles('Breaks.app')) }, {}, /the image step failed: the image mounted 2 volumes, not one/, 2],
+  ['an image with two volumes', { image: makeImage(appFiles('Breaks.app'), appFiles('Breaks.app')) }, {}, /the image step failed: the image mounted 2 volumes, not one/],
   ['an unsigned app', { image: breaksImage({ signature: null }) }, {}, /the signature check failed: the code signature is not valid \(codesign: .*not signed at all\)/],
   ['a broken signature', { image: breaksImage({ signature: { valid: false, team: 'SAZVPX4CAA', notarized: true } }) }, {}, /the signature check failed/],
   ['an ad-hoc signed app', { image: breaksImage({ signature: { valid: true, team: null, notarized: false } }) }, {}, /the team check failed: it is not signed by the Subset team SAZVPX4CAA \(TeamIdentifier: not set\)/],
@@ -235,7 +242,7 @@ const refusals = [
   ['a newer macOS than this Mac', { image: breaksImage({ minimumSystem: '16.0' }) }, {}, /the macOS version check failed: it needs macOS 16\.0 or later, and this Mac runs 15\.1/]
 ];
 
-for (const [name, image, fetchOptions, message, volumes = 1] of refusals) {
+for (const [name, image, fetchOptions, message, detaches = 1] of refusals) {
   test(`refuses ${name}`, { skip }, async () => {
     const c = setup();
     const bytes = image.image ?? breaksImage();
@@ -247,7 +254,8 @@ for (const [name, image, fetchOptions, message, volumes = 1] of refusals) {
     assert.match(result.stderr, message);
     assertNothingInstalled(c);
     const log = steps(c).map((entry) => entry.step);
-    if (log.includes('hdiutil-attach')) assert.equal(log.filter((step) => step === 'hdiutil-detach').length, volumes, 'each mounted volume is detached');
+    assert.doesNotMatch(result.stderr, /warning/);
+    if (log.includes('hdiutil-attach')) assert.equal(log.filter((step) => step === 'hdiutil-detach').length, detaches, 'the attached image is detached once');
   });
 }
 
@@ -313,6 +321,30 @@ test('a receipt that cannot be written leaves no app', { skip }, async () => {
   assert.deepEqual(readdirSync(c.tmp), []);
 });
 
+// ditto keeps the image's permissions: a refused app whose folders are read-only is still removed.
+test('a refused app with read-only folders is removed', { skip: skip || (process.getuid?.() === 0 && 'root ignores permissions') }, async () => {
+  const c = setup();
+  const files = { ...appFiles('Breaks.app', { signature: { valid: true, team: 'ABCDE12345', notarized: true } }), 'Breaks.app/Contents/Resources/en.lproj/x.strings': 'x' };
+  const image = makeImageWithModes(files, { 'Breaks.app': 0o555, 'Breaks.app/Contents': 0o555, 'Breaks.app/Contents/Resources': 0o555, 'Breaks.app/Contents/Resources/en.lproj': 0o555 });
+  feed(c, { live: { image } });
+  const result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /the team check failed/);
+  assert.doesNotMatch(result.stderr, /warning/);
+  assertNothingInstalled(c);
+});
+
+test('installing next to a copy in the other folder says that the receipt now describes the new copy', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage();
+  feed(c, { live: { image } });
+  makeApp(c.user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
+  const result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /subset: note: Breaks 0\.1\.0 is also installed in ~\/Applications; the receipt now describes the copy in \/Applications\.\n/);
+  assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
+});
+
 test('a signal before the rename stops the install and leaves nothing (in process)', { skip }, async () => {
   const c = setup();
   const image = breaksImage();
@@ -330,12 +362,13 @@ test('a signal before the rename stops the install and leaves nothing (in proces
 });
 
 // Runs the real command in its own process with the stand-in tools (install-preload.mjs).
-function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.system]) {
+// With `group`, it leads its own process group, as a command started at a terminal does.
+function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.system], { group = false } = {}) {
   const imageFile = path.join(c.base, `image-${Math.random().toString(16).slice(2)}.dmg`);
   writeFileSync(imageFile, image);
   const map = Object.fromEntries(Object.entries(INSTALL_TOOLS).map(([key, file]) => [file, tools[key]]));
   const env = { ...process.env, ...c.env, HOME: c.home, TMPDIR: c.tmp, STUB_LOG: c.log, STUB_TOOL_MAP: JSON.stringify(map), FAKE_IMAGE: imageFile, XDG_CACHE_HOME: '', ...extraEnv };
-  const child = spawn(process.execPath, ['--import', preload, cli, 'install', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--import', preload, cli, 'install', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], detached: group });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => (stdout += chunk));
@@ -360,6 +393,51 @@ for (const boundary of boundaries) {
       assertNothingInstalled(c, c.system, ['Other.app']);
     });
   }
+}
+
+// Ctrl-C at a terminal signals the whole foreground process group. The tools run in their own group, so only subset
+// gets it: each stand-in signals the group and then does its work, which it would not live to do if it were in it.
+for (const boundary of boundaries) {
+  test(`a SIGINT to the process group at ${boundary} leaves the destination unchanged and no receipt`, { skip }, async () => {
+    const c = setup();
+    const image = breaksImage();
+    feed(c, { live: { image } });
+    const env = { STUB_SIGNAL_AT: boundary, STUB_SIGNAL: 'SIGINT', STUB_SIGNAL_GROUP: '1', STUB_LINGER_MS: '50' };
+    const result = await spawnInstall(c, image, env, ['breaks'], { group: true });
+    assert.equal(result.status, 130, result.stderr);
+    assert.match(result.stderr, /was not installed: interrupted by SIGINT\./);
+    assert.doesNotMatch(result.stderr, /warning/);
+    assertNothingInstalled(c);
+  });
+}
+
+test('a SIGINT to the process group after the rename, while the image is detached, keeps the app and its receipt', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage();
+  feed(c, { live: { image } });
+  const env = { STUB_SIGNAL_AT: 'hdiutil-detach', STUB_SIGNAL: 'SIGINT', STUB_SIGNAL_GROUP: '1', STUB_LINGER_MS: '50' };
+  const result = await spawnInstall(c, image, env, ['breaks'], { group: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `Installed Breaks 0.1.0 in ${path.join(c.system, 'Breaks.app')}\n`);
+  assert.doesNotMatch(result.stderr, /warning/);
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
+  assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
+  assertDetached(c);
+  assert.deepEqual(readdirSync(c.tmp), [], 'the private folder is removed');
+});
+
+// A tool that takes a while to stop: it keeps working after the signal (ditto copying, hdiutil mounting the image).
+// The cleanup waits for it to exit, so what it did afterwards is cleaned up too.
+for (const boundary of ['hdiutil-attach', 'ditto']) {
+  test(`a tool still working at ${boundary} after SIGTERM is waited for before the cleanup`, { skip }, async () => {
+    const c = setup();
+    const image = breaksImage();
+    feed(c, { live: { image } });
+    const result = await spawnInstall(c, image, { STUB_SIGNAL_AT: boundary, STUB_LINGER_MS: '700' }, ['breaks']);
+    assert.equal(result.status, 143, result.stderr);
+    assert.doesNotMatch(result.stderr, /warning/);
+    assertNothingInstalled(c);
+  });
 }
 
 test('two installs of the same app into one --dir at once: exactly one succeeds', { skip }, async () => {

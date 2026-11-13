@@ -6,9 +6,13 @@
 //   5. rename it to <appName>.app (never over an existing one) and write the receipt, then detach the image and remove
 //      the private folder.
 // Any failed step, and a SIGINT, SIGTERM or SIGHUP before step 5 (the caller aborts `signal`), removes the staged copy
-// and writes no receipt. Step 5 is synchronous, so no signal handler runs between the rename and the receipt.
+// and writes no receipt. Step 5 is synchronous, so no signal handler runs between the rename and the receipt. A tool
+// that is running when the install is aborted is stopped, and the cleanup starts only once it has exited (runTool).
+// The cleanup itself is never aborted: it detaches the image by its device, found both in hdiutil attach's output and
+// in hdiutil info (an attach stopped part-way prints nothing), and removes the private folder only when the image is
+// no longer attached.
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -23,8 +27,13 @@ const MAX_REDIRECTS = 5;
 const STALL_MS = 60_000;
 const COPY_TIMEOUT_MS = 10 * 60 * 1000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const DETACH_ATTEMPTS = 3;
+const DETACH_RETRY_MS = 1000;
 
-/** A step refused the app or failed: `check` names it (download, checksum, image, copy, verify, install, receipt). */
+/**
+ * A step refused the app or failed: `check` names it (destination, download, checksum, image, copy, verify, install,
+ * receipt).
+ */
 export class InstallError extends Error {
   constructor(check, message) {
     super(message);
@@ -118,39 +127,81 @@ function findApp(mountRoot, appName) {
   return source;
 }
 
-// Detaches whatever is mounted in `mountRoot` (by `hdiutil attach -mountrandom`), forcing it when a plain detach fails.
-// Returns true when nothing is left there.
-async function detachAll(mountRoot, hdiutil) {
-  let entries;
-  try {
-    entries = readdirSync(mountRoot);
-  } catch (error) {
-    return error.code === 'ENOENT';
+// The whole-disk devices (/dev/diskN) in hdiutil's output: attach's table, or one image's section of `hdiutil info`.
+const wholeDisks = (text) => [...text.matchAll(/^(\/dev\/disk\d+)\s/gm)].map((match) => match[1]);
+
+// The devices `hdiutil info` lists for the image file named by any of `imagePaths` (the path it was attached with and
+// its real path), or undefined when hdiutil info fails.
+async function devicesOf(imagePaths, hdiutil) {
+  const info = await runTool(hdiutil, ['info']).catch(() => undefined);
+  if (info?.code !== 0) return undefined;
+  const devices = [];
+  for (const section of info.stdout.split(/^=+$/m)) {
+    const named = [...section.matchAll(/^image-(?:path|alias)\s*:\s*(.*)$/gm)].map((match) => match[1].trim());
+    if (named.some((name) => imagePaths.has(name))) devices.push(...wholeDisks(section));
   }
-  let clean = true;
-  for (const entry of entries) {
-    const mountPoint = path.join(mountRoot, entry);
-    const plain = await runTool(hdiutil, ['detach', mountPoint, '-quiet']).catch(() => ({ code: 1 }));
-    if (plain.code === 0) continue;
-    const forced = await runTool(hdiutil, ['detach', mountPoint, '-force', '-quiet']).catch(() => ({ code: 1 }));
-    // A folder -mountrandom made but nothing was mounted on (an interrupted attach) cannot be detached: remove it.
-    if (forced.code !== 0) {
-      try {
-        rmdirSync(mountPoint);
-      } catch {
-        clean = false;
-      }
+  return devices;
+}
+
+// Detaches the image file named by `imagePaths` wherever it is attached, by device: first the devices hdiutil attach
+// reported, then whatever hdiutil info still lists for it, plainly and then forced, up to DETACH_ATTEMPTS times.
+// Returns true when hdiutil info lists none of its devices any more.
+async function detachImage(imagePaths, attached, hdiutil) {
+  let devices = attached;
+  for (let attempt = 0; ; attempt += 1) {
+    for (const device of new Set(devices)) {
+      const plain = await runTool(hdiutil, ['detach', device, '-quiet']).catch(() => ({ code: 1 }));
+      if (plain.code !== 0) await runTool(hdiutil, ['detach', device, '-force', '-quiet']).catch(() => {});
     }
+    devices = await devicesOf(imagePaths, hdiutil);
+    if (devices?.length === 0) return true;
+    if (attempt + 1 >= DETACH_ATTEMPTS) return false;
+    await new Promise((resolve) => setTimeout(resolve, DETACH_RETRY_MS));
+    devices ??= [];
   }
-  return clean;
+}
+
+// Removes the private folder once nothing is attached from it: the mount folders hdiutil made (each must be empty, so
+// nothing still mounted is touched), then the rest. Returns why it could not, or undefined.
+function removeWork(work, mountRoot) {
+  try {
+    const entries = exists(mountRoot) ? readdirSync(mountRoot) : [];
+    for (const entry of entries) rmdirSync(path.join(mountRoot, entry));
+    rmSync(work, { recursive: true, force: true });
+    return undefined;
+  } catch (error) {
+    return error.code ?? error.message;
+  }
+}
+
+// Removes the installer's staged copy. ditto keeps the image's permissions, so a folder in it can be read-only, and
+// removing what is in a folder needs write permission on it: each folder (never a symbolic link) is first made
+// writable by its owner. Throws when it cannot be removed.
+function removeStaged(staged) {
+  const pending = [staged];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (!stat.isDirectory()) continue;
+    if ((stat.mode & 0o700) !== 0o700) chmodSync(dir, (stat.mode & 0o7777) | 0o700);
+    for (const name of readdirSync(dir)) pending.push(path.join(dir, name));
+  }
+  rmSync(staged, { recursive: true, force: true });
 }
 
 /**
  * Downloads, verifies and installs `app` (a feed app) from `release` (its live or beta channel) into the folder `dir`
  * as <appName>.app. `receipt` is { file, document } to write with the rename, or null. `signal` aborts the install
- * with its reason (an InterruptedError) before the rename. `log` gets progress lines and `warn` what could not be
- * cleaned up. Resolves { path }; rejects with an InstallError, a VerificationError (verify.mjs) or the abort reason,
- * leaving no staged copy and no receipt behind.
+ * with its reason (an InterruptedError) before the rename; once the app is renamed into place, an abort changes nothing
+ * and the install resolves. `log` gets progress lines and `warn` what could not be cleaned up. Resolves { path };
+ * rejects with an InstallError, a VerificationError (verify.mjs) or the abort reason, leaving no staged copy and no
+ * receipt behind.
  */
 export async function installApp({ app, release, beta, dir, receipt, signal, fetch = globalThis.fetch, tools = INSTALL_TOOLS, log = () => {}, warn = () => {} }) {
   const checkpoint = () => {
@@ -161,6 +212,9 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
   const alreadyThere = () => new InstallError('install', `${target} already exists; use subset update to change its version`);
   let work;
   let mountRoot;
+  let image;
+  let imagePaths;
+  let attached = [];
   let stagedCreated = false;
   let installed = false;
   let step = 'download';
@@ -169,7 +223,9 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     work = mkdtempSync(path.join(tmpdir(), 'subset-install-'));
     mountRoot = path.join(work, 'mnt');
     mkdirSync(mountRoot, { mode: 0o700 });
-    const image = path.join(work, 'image.dmg');
+    image = path.join(work, 'image.dmg');
+    // hdiutil info names an image by the path it was attached with, and by its real path (/private/var/... for /var/...).
+    imagePaths = new Set([image, path.join(realpathSync(work), 'image.dmg')]);
 
     log(`Downloading ${app.name} ${release.version} from ${release.url}`);
     await downloadImage(release.url, image, release.sha256, { fetch, signal });
@@ -177,6 +233,7 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
 
     step = 'image';
     const attach = await runTool(tools.hdiutil, ['attach', '-readonly', '-nobrowse', '-noautoopen', '-mountrandom', mountRoot, image], { signal });
+    attached = wholeDisks(attach.stdout);
     checkpoint();
     if (attach.code !== 0) throw new InstallError('image', `hdiutil could not attach the image (${attach.stderr.trim().split('\n').at(-1) || `exit ${attach.code}`})`);
     const source = findApp(mountRoot, app.appName);
@@ -189,8 +246,8 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     checkpoint();
     if (copy.code !== 0) throw new InstallError('copy', `ditto could not copy ${app.appName}.app into ${dir} (${copy.stderr.trim().split('\n').at(-1) || `exit ${copy.code}`})`);
     // ditto keeps the staging folder's 0700; the installed app gets the image's permissions, never group- or
-    // world-writable.
-    chmodSync(staged, lstatSync(source).mode & 0o755);
+    // world-writable, once it has passed verification (a read-only copy would be harder to remove).
+    const mode = lstatSync(source).mode & 0o755;
 
     step = 'verify';
     log(`Verifying ${app.appName}.app`);
@@ -200,6 +257,7 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     step = 'install';
     checkpoint();
     if (exists(target)) throw alreadyThere();
+    chmodSync(staged, mode);
     let receiptTemporary;
     if (receipt) {
       try {
@@ -244,17 +302,21 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     if (error instanceof InstallError || error instanceof VerificationError || error === signal.reason) throw error;
     throw new InstallError(step, error.code ? `${error.code}: ${error.message}` : String(error?.message ?? error));
   } finally {
+    // A signal from here on changes nothing: the caller's handlers stay in place, and the tools below are not aborted.
     if (stagedCreated && !installed) {
       try {
-        rmSync(staged, { recursive: true, force: true });
+        removeStaged(staged);
       } catch (error) {
         warn(`the staged copy ${staged} could not be removed (${error.code ?? error.message}); remove it by hand`);
       }
     }
     if (work !== undefined) {
-      const detached = await detachAll(mountRoot, tools.hdiutil);
-      if (detached) rmSync(work, { recursive: true, force: true });
-      else warn(`the disk image could not be detached; it stays mounted in ${mountRoot}`);
+      const detached = imagePaths === undefined || (await detachImage(imagePaths, attached, tools.hdiutil));
+      if (!detached) warn(`the disk image ${image} could not be detached; it stays attached, with the folder ${work}`);
+      else {
+        const failed = removeWork(work, mountRoot);
+        if (failed) warn(`the folder ${work} could not be removed (${failed}); remove it by hand`);
+      }
     }
   }
 }

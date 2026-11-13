@@ -7,7 +7,8 @@
 //   version          its CFBundleShortVersionString is the channel's version (and, for a beta, CFBundleVersion its build)
 //   macOS version    its LSMinimumSystemVersion is not above the running macOS
 // Signature, team and notarization come from the tools, never from parsing the binary.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import process from 'node:process';
 import { readInfoPlist } from './apps.mjs';
 
 export const TEAM_ID = 'SAZVPX4CAA';
@@ -20,6 +21,7 @@ export const VERIFY_TOOLS = Object.freeze({
 });
 const TOOL_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const KILL_AFTER_MS = 5000;
 
 /** A check refused the app: `check` names it (signature, team, notarization, bundle ID, version, macOS version). */
 export class VerificationError extends Error {
@@ -30,18 +32,58 @@ export class VerificationError extends Error {
 }
 
 /**
- * Runs a tool without a shell and resolves { code, signal, stdout, stderr } whatever its exit status. Rejects only
- * when it cannot be started, or when `signal` (an AbortSignal) aborts it.
+ * Runs a tool without a shell and resolves { code, signal, stdout, stderr } whatever its exit status (code null when
+ * it was stopped). Rejects only when it cannot be started, or when `signal` (an AbortSignal) aborts it, and then only
+ * once the tool has exited.
+ *
+ * The tool runs in its own process group, so a Ctrl-C at the terminal (a signal to the whole foreground group) reaches
+ * only this process, which decides what to stop: on abort, or after `timeout` ms, it sends SIGTERM to the tool's group
+ * and SIGKILL KILL_AFTER_MS later, and waits for the tool to exit, so no cleanup races a tool still writing files. A
+ * tool that writes more than MAX_OUTPUT_BYTES is stopped the same way, and its stderr ends with why.
  */
 export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
-    const child = execFile(file, args, { encoding: 'utf8', timeout, maxBuffer: MAX_OUTPUT_BYTES, signal }, (error, stdout, stderr) => {
-      if (signal?.aborted) return reject(signal.reason ?? error);
-      if (error && typeof error.code !== 'number' && error.signal == null) return reject(error);
-      resolve({ code: error ? (error.code ?? null) : 0, signal: error?.signal ?? null, stdout: String(stdout), stderr: String(stderr) });
-    });
     // Nothing is typed into a tool (hdiutil would otherwise wait for an answer to a licence prompt).
-    child.stdin?.end();
+    const child = spawn(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const output = { stdout: '', stderr: '' };
+    let stopping;
+    let killer;
+    const kill = (name) => {
+      try {
+        process.kill(-child.pid, name);
+      } catch {
+        child.kill(name);
+      }
+    };
+    const stop = (reason) => {
+      if (stopping || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+      stopping = reason;
+      kill('SIGTERM');
+      killer = setTimeout(() => kill('SIGKILL'), KILL_AFTER_MS);
+    };
+    const onAbort = () => stop('abort');
+    const timer = setTimeout(() => stop(`it did not finish in ${timeout / 1000} seconds`), timeout);
+    for (const name of ['stdout', 'stderr']) {
+      child[name].setEncoding('utf8');
+      child[name].on('data', (chunk) => {
+        output[name] += chunk;
+        if (output[name].length > MAX_OUTPUT_BYTES) stop(`it wrote more than ${MAX_OUTPUT_BYTES} bytes`);
+      });
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const settle = (error, code, exitSignal) => {
+      clearTimeout(timer);
+      clearTimeout(killer);
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) return reject(signal.reason);
+      if (error) return reject(error);
+      // A tool stopped for taking too long or writing too much failed, and says why as its last line.
+      const stderr = stopping ? `${output.stderr}\nstopped: ${stopping}` : output.stderr;
+      resolve({ code: stopping ? null : code, signal: exitSignal, stdout: output.stdout, stderr });
+    };
+    child.once('error', (error) => settle(error));
+    child.once('close', (code, exitSignal) => settle(undefined, code, exitSignal));
   });
 }
 

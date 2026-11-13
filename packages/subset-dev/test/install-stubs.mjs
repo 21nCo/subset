@@ -1,12 +1,17 @@
 // Stand-ins for the macOS tools `subset install` asks (hdiutil, ditto, codesign, spctl, sw_vers), so its tests run on
-// Linux. A stand-in disk image is JSON: { volumes: [{ "<path in the volume>": "<file contents>" }] }. A stand-in app's
+// Linux. A stand-in disk image is JSON: { volumes: [{ "<path in the volume>": "<file contents>" }], modes?: { "<path in
+// each volume>": <mode> } }. The stand-in hdiutil attaches an image as one device (/dev/disk<n>, a slice per volume),
+// recorded in the folder `attached` beside the tools, which `hdiutil info` lists and `hdiutil detach <device>`
+// removes; attachedImages() reads it. A stand-in app's
 // signature is the file Contents/_CodeSignature/stub.json inside the bundle ({ valid, team, notarized }; no file means
 // unsigned), so codesign and spctl judge the copy they are given, as the real tools do. The stand-ins check that they
 // get exactly the arguments subset install passes to the real tools, and log each call as a JSON line to $STUB_LOG.
 // For the interruption and concurrency tests: STUB_SIGNAL_AT=<tool step> makes that step send STUB_SIGNAL (default
-// SIGTERM) to the process that ran it, and sw_vers waits until STUB_BARRIER_COUNT processes have reached it when
-// STUB_BARRIER_DIR is set.
-import { chmodSync, writeFileSync } from 'node:fs';
+// SIGTERM) to the process that ran it, or with STUB_SIGNAL_GROUP=1 to that process's group (as Ctrl-C at a terminal
+// does; the process must lead its group). With STUB_LINGER_MS the step signals before doing its work, then ignores
+// SIGTERM and does its work only after that many milliseconds, as a tool slow to stop would. sw_vers waits until
+// STUB_BARRIER_COUNT processes have reached it when STUB_BARRIER_DIR is set.
+import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { stubPlutil } from './helpers.mjs';
 
@@ -18,31 +23,70 @@ const args = process.argv.slice(3);
 const same = (expected) => args.length === expected.length && expected.every((value, index) => value === undefined || value === args[index]);
 const usage = () => { console.error('stub ' + tool + ': unexpected arguments ' + JSON.stringify(args)); process.exit(64); };
 const log = (step) => { if (process.env.STUB_LOG) fs.appendFileSync(process.env.STUB_LOG, JSON.stringify({ step, args }) + '\n'); };
-const hook = (step) => { if (process.env.STUB_SIGNAL_AT === step) process.kill(process.ppid, process.env.STUB_SIGNAL || 'SIGTERM'); };
-const signature = (bundle) => { try { return JSON.parse(fs.readFileSync(path.join(bundle, 'Contents', '_CodeSignature', 'stub.json'), 'utf8')); } catch { return undefined; } };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const linger = Number(process.env.STUB_LINGER_MS || 0);
+const hook = (step) => {
+  if (process.env.STUB_SIGNAL_AT !== step) return;
+  process.kill(process.env.STUB_SIGNAL_GROUP ? -process.ppid : process.ppid, process.env.STUB_SIGNAL || 'SIGTERM');
+  if (linger) {
+    process.on('SIGTERM', () => {});
+    sleep(linger);
+  }
+};
+// Steps that change files signal before their work when lingering, so the work happens after the signal.
+const before = (step) => { if (linger) hook(step); };
+const after = (step) => { if (!linger) hook(step); };
+const signature = (bundle) => { try { return JSON.parse(fs.readFileSync(path.join(bundle, 'Contents', '_CodeSignature', 'stub.json'), 'utf8')); } catch { return undefined; } };
+const registry = path.join(path.dirname(process.argv[1]), 'attached');
+const writable = (dir) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) { fs.chmodSync(path.join(dir, entry.name), 0o755); writable(path.join(dir, entry.name)); } };
 if (tool === 'hdiutil' && args[0] === 'attach') {
   if (!same(['attach', '-readonly', '-nobrowse', '-noautoopen', '-mountrandom', undefined, undefined])) usage();
   log('hdiutil-attach');
   let image;
   try { image = JSON.parse(fs.readFileSync(args[6], 'utf8')); } catch { console.error('hdiutil: attach failed - image not recognized'); process.exit(1); }
+  before('hdiutil-attach');
+  const device = '/dev/disk' + process.pid + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  const mounts = [];
   for (const files of image.volumes) {
     const volume = fs.mkdtempSync(path.join(args[5], 'dmg.'));
+    mounts.push(volume);
     for (const [name, text] of Object.entries(files)) {
       fs.mkdirSync(path.dirname(path.join(volume, name)), { recursive: true });
       fs.writeFileSync(path.join(volume, name), text);
     }
+    for (const [name, mode] of Object.entries(image.modes ?? {}).sort(([a], [b]) => b.length - a.length)) fs.chmodSync(path.join(volume, name), mode);
   }
-  hook('hdiutil-attach');
+  fs.mkdirSync(registry, { recursive: true });
+  fs.writeFileSync(path.join(registry, path.basename(device)), JSON.stringify({ image: args[6], device, mounts }));
+  console.log(device + '\tGUID_partition_scheme\t\n' + mounts.map((mount, index) => device + 's' + (index + 1) + '\tApple_HFS\t' + mount).join('\n'));
+  after('hdiutil-attach');
+} else if (tool === 'hdiutil' && args[0] === 'info') {
+  if (!same(['info'])) usage();
+  log('hdiutil-info');
+  let out = 'framework       : stub\n';
+  for (const name of fs.existsSync(registry) ? fs.readdirSync(registry) : []) {
+    const entry = JSON.parse(fs.readFileSync(path.join(registry, name), 'utf8'));
+    out += '================================================\nimage-path      : ' + entry.image + '\n' + entry.device + '\tGUID_partition_scheme\t\n' + entry.mounts.map((mount, index) => entry.device + 's' + (index + 1) + '\tApple_HFS\t' + mount + '\n').join('');
+  }
+  process.stdout.write(out);
 } else if (tool === 'hdiutil' && args[0] === 'detach') {
   if (!same(['detach', undefined, '-quiet']) && !same(['detach', undefined, '-force', '-quiet'])) usage();
   log('hdiutil-detach');
-  fs.rmSync(args[1], { recursive: true, force: true });
+  before('hdiutil-detach');
+  const file = path.join(registry, path.basename(args[1]));
+  if (!/^\/dev\/disk\d+$/.test(args[1]) || !fs.existsSync(file)) { console.error('hdiutil: detach failed - No such file or directory'); process.exit(1); }
+  for (const mount of JSON.parse(fs.readFileSync(file, 'utf8')).mounts) { writable(mount); fs.rmSync(mount, { recursive: true, force: true }); }
+  fs.rmSync(file);
+  after('hdiutil-detach');
 } else if (tool === 'ditto') {
   if (!same([undefined, undefined]) || !fs.statSync(args[1]).isDirectory()) usage();
   log('ditto');
+  before('ditto');
   fs.cpSync(args[0], args[1], { recursive: true, verbatimSymlinks: true });
-  hook('ditto');
+  // Like ditto, the copy's folders get the source's permissions (deepest first, so a read-only folder is still filled).
+  const modes = (from, to) => { for (const entry of fs.readdirSync(from, { withFileTypes: true })) if (entry.isDirectory()) { modes(path.join(from, entry.name), path.join(to, entry.name)); fs.chmodSync(path.join(to, entry.name), fs.statSync(path.join(from, entry.name)).mode & 0o7777); } };
+  modes(args[0], args[1]);
+  after('ditto');
 } else if (tool === 'codesign' && args[0] === '--verify') {
   if (!same(['--verify', '--deep', '--strict', undefined])) usage();
   log('codesign-verify');
@@ -129,3 +173,12 @@ export function appFiles(name, { bundleId = 'dev.subset.breaks', version = '0.1.
 
 /** A stand-in disk image (bytes) with the given volumes, each a { path: contents } map. */
 export const makeImage = (...volumes) => Buffer.from(JSON.stringify({ volumes }));
+
+/** A stand-in disk image with one volume whose paths in `modes` ({ path: mode }) get that mode. */
+export const makeImageWithModes = (files, modes) => Buffer.from(JSON.stringify({ volumes: [files], modes }));
+
+/** The image files the stand-in hdiutil in `toolsDir` still has attached. */
+export function attachedImages(toolsDir) {
+  const registry = path.join(toolsDir, 'attached');
+  return existsSync(registry) ? readdirSync(registry).map((name) => JSON.parse(readFileSync(path.join(registry, name), 'utf8')).image) : [];
+}

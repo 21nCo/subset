@@ -100,3 +100,5 @@ jobs:
           test "$(ls -A "$root/apps")" = "Breaks.app"
           codesign --verify --deep --strict --verbose=2 "$root/apps/Breaks.app"
           spctl --assess --type execute --verbose=2 "$root/apps/Breaks.app"
+          # The downloaded image is detached.
+          if hdiutil info | grep -F "/subset-install-"; then echo "the downloaded image is still attached" >&2; exit 1; fi

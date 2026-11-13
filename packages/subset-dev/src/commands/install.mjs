@@ -175,6 +175,9 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
       warn: (line) => stderr.write(`subset: warning: ${line}\n`)
     });
     stdout.write(`Installed ${label} in ${installed.path}\n`);
+    // There is one receipt per bundle ID (SET-227), so it now describes this copy, not one in the other folder.
+    const other = receipt ? copies.find((copy) => copy.folder !== where.folder.label) : undefined;
+    if (other) stderr.write(`subset: note: ${app.name}${other.version ? ` ${other.version}` : ''} is also installed in ${other.folder}; the receipt now describes the copy in ${where.folder.label}.\n`);
     return 0;
   } catch (error) {
     if (error instanceof InterruptedError) {
