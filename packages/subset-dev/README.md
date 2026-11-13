@@ -32,14 +32,75 @@ Besides the tools, `subset` has its own commands. Their names are reserved: no t
 
 | Command | Does |
 | --- | --- |
-| `subset list [--beta] [--json] [--refresh]` | Lists the Subset tools and Mac apps, installed and available (not available yet) |
+| `subset list [--beta] [--json] [--refresh]` | Lists the Subset tools and Mac apps, installed and available ([below](#subset-list)) |
 | `subset install <app> [--beta] [--user]` | Installs a Subset Mac app after checking its checksum, signature and notarization (not available yet) |
 | `subset update [<app>...] [--beta] [--quit]` | Updates the installed Subset Mac apps (not available yet) |
 | `subset uninstall <app>` | Moves a Subset Mac app to the Trash (not available yet) |
 | `subset help [<command>]` | Shows the help, or a command's usage (also `subset <command> --help`) |
 | `subset version` | Shows the subset.dev version |
 
-In this version, `list`, `install`, `update` and `uninstall` only print `subset <command> is not available yet.` and exit with code 2; later versions add them.
+In this version, `install`, `update` and `uninstall` only print `subset <command> is not available yet.` and exit with code 2; later versions add them.
+
+## subset list
+
+`subset list` shows every Mac app and tool in the Subset catalog feed, what is installed and what is available:
+
+```console
+$ subset list --beta
+APP     INSTALLED                    LIVE   BETA
+breaks  0.1.0 (live, /Applications)  0.1.0  0.1.1-beta.4
+timer   -                            -      0.1.0-beta.2
+
+TOOL   LIVE   BETA
+usage  0.2.0  0.2.1-beta.1
+```
+
+- `--beta` adds the BETA column (a Mac app's beta is shown as `<version>-beta.<build>`, a tool's as its `beta` dist-tag).
+- `--json` prints the `subset.list@1` document below instead of the table.
+- `--refresh` fetches the catalog even when the cached copy is fresh, and never falls back to the cached copy.
+
+It exits with code 0, with 1 when the catalog cannot be used, and with 2 for an option it does not know.
+
+### Installed apps (macOS)
+
+For each app in the feed, `subset list` looks for `<appName>.app` directly inside `/Applications` and `~/Applications` (not in subfolders, and not through a symbolic link), reads its `Contents/Info.plist` with `/usr/bin/plutil -convert json -o -`, and counts it only if its `CFBundleIdentifier` is the feed's `bundleId`; an app with the same name and another bundle ID is not a Subset app. Its version is `CFBundleShortVersionString` and its build `CFBundleVersion`. An app found in both folders is listed twice. Apps installed anywhere else are not detected.
+
+When `~/Library/Application Support/Subset/receipts/<bundleId>.json` is a valid `subset.receipt@1` receipt for that copy (the same path and version, and for a beta the same build), INSTALLED shows its channel: `0.1.0 (live, /Applications)` or `0.1.1-beta.4 (beta, ~/Applications)`. Receipts are advisory: a missing, invalid or mismatched receipt only means no channel is shown.
+
+On Linux and Windows, the apps are listed with INSTALLED `unsupported` (`"installed": null` in JSON), followed by the tools.
+
+### The catalog feed and its cache
+
+The feed is `https://subset.21n.dev/catalog/v1.json` ([`subset.catalog@1`](../catalog/README.md#catalog-feed-subsetcatalog1)). `SUBSET_CATALOG_URL` replaces it with another `https:` URL, or a `file:` URL (for tests and the manager app); any other URL, or one with a user name or password, is refused. The launcher refuses redirects, stops reading after 256 KiB, and validates the feed by the reader rules (size, the closed schema, unique IDs) with a copy of `catalog.schema.json` in `src/schemas` (its tests check that the copy is unchanged and agrees with the schema's Ajv validation). An invalid feed is an error: none of it is used, and it does not replace the cached copy.
+
+A valid feed is cached in `~/Library/Caches/Subset/catalog.json` (Linux: `$XDG_CACHE_HOME/subset` or `~/.cache/subset`; Windows: `%LOCALAPPDATA%\Subset\Cache`) with the URL and time it was fetched:
+
+- younger than 5 minutes, it is used without asking the network (unless `--refresh`);
+- otherwise the feed is fetched again; if that fails (no network, a timeout after 20 seconds, an HTTP error), a cached copy younger than 7 days is used with a warning on stderr, and an older one is an error.
+
+### JSON: `subset.list@1`
+
+```json
+{
+  "schema": "subset.list@1",
+  "catalog": { "url": "https://subset.21n.dev/catalog/v1.json", "generatedAt": "2026-11-12T00:00:00Z", "fetchedAt": "2026-11-13T12:00:00.000Z", "cached": false },
+  "platform": "darwin",
+  "appDetection": "supported",
+  "apps": [
+    {
+      "id": "breaks", "name": "Breaks", "appName": "Breaks", "bundleId": "dev.subset.breaks",
+      "installed": [{ "path": "/Applications/Breaks.app", "folder": "/Applications", "version": "0.1.0", "build": "1", "channel": "live" }],
+      "live": { "version": "0.1.0" },
+      "beta": { "version": "0.1.1", "build": 4, "label": "0.1.1-beta.4" }
+    }
+  ],
+  "tools": [{ "id": "usage", "package": "@subset.dev/usage", "bin": "subset-usage", "live": "0.2.0", "beta": "0.2.1-beta.1" }]
+}
+```
+
+Every key is always present. `platform` is Node.js's `process.platform`. `appDetection` is `supported` on macOS and `unsupported` elsewhere, where every `installed` is `null`; on macOS `installed` lists the copies found (`[]` for none), with `folder` `/Applications` or `~/Applications`, `version` and `build` from `Info.plist` (`null` when missing) and `channel` `live`, `beta` or `null` (no matching receipt). `live` and `beta` are `null` when the feed has no such channel; the document always has both, whatever `--beta` says. A tool's `live` and `beta` are its `latest` and `beta` dist-tags, or `null`. `cached` is true when the cached copy was used, and `fetchedAt` is when that copy was fetched.
+
+`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, searched instead of `/Applications` and `~/Applications` (receipts still name the real folders).
 
 ## How it works
 
@@ -67,4 +128,4 @@ Add the published package and its bin to `src/tools.mjs`. `npm run check` fails 
 
 ## Superfunctions packages evaluated
 
-None apply: the launcher is a dispatcher with no auth, storage, MCP or UI.
+None apply: the launcher is a dispatcher with no auth, storage, MCP or UI. `subset list` reads one static JSON feed with Node.js's `fetch` and keeps one cache file; it validates the feed with its own small validator for the keywords the catalog schemas use, so the launcher keeps no dependencies.

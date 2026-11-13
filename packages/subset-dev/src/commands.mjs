@@ -1,12 +1,11 @@
 // The commands of `subset` other than its tools: `subset <verb> [arguments...]`. Their names are reserved, so no tool
 // can take one (test/cli.test.mjs). A verb marked `pending` is announced but not available in this version: it prints
-// that it is not available yet and exits 2 (SET-229 to SET-231 add them). cli.mjs runs `help` and `version`.
+// that it is not available yet and exits 2 (SET-230 and SET-231 add them). cli.mjs runs the others.
 export const VERBS = Object.freeze({
   list: Object.freeze({
-    pending: true,
     usage: 'subset list [--beta] [--json] [--refresh]',
     summary: 'List the Subset tools and Mac apps, installed and available',
-    details: 'Shows each Subset Mac app with its installed and live versions, and each tool with its live version.\n--beta adds the beta versions, --json prints JSON and --refresh skips the cached catalog.'
+    details: 'Shows each Subset Mac app with its installed and live versions, and each tool with its live version.\n--beta adds the beta versions, --json prints JSON and --refresh skips the cached catalog.\nInstalled apps are found on macOS only, in /Applications and ~/Applications.'
   }),
   install: Object.freeze({
     pending: true,
@@ -57,6 +56,7 @@ export function verbHelp(name) {
  *   { action: 'usage', verb }                   a verb's usage (`subset help <verb>`, `subset <verb> --help`)
  *   { action: 'tool-help', tool }               where a tool's help is (`subset help <tool>`)
  *   { action: 'unavailable', verb }             a verb this version does not have yet (exit 2)
+ *   { action: 'command', verb, args }           run the verb (`subset list --json`) with `args`
  *   { action: 'tool', argument, args }          run the tool `argument` (`usage`, `usage@beta`) with `args`
  *   { action: 'error', message }                an unknown command (exit 2)
  * `isTool(name)` says whether `name` is a tool.
@@ -78,5 +78,6 @@ export function route(argv, { isTool }) {
   const options = end === -1 ? rest : rest.slice(0, end);
   if (options.includes('-h') || options.includes('--help')) return { action: 'usage', verb: first };
   if (first === 'version') return { action: 'version' };
-  return { action: 'unavailable', verb: first };
+  if (VERBS[first].pending) return { action: 'unavailable', verb: first };
+  return { action: 'command', verb: first, args: rest };
 }
