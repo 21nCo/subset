@@ -14,7 +14,7 @@ cache-control: max-age=300
 
 | Trigger | What it does |
 | --- | --- |
-| Push to `dev` or `main` touching `packages/catalog/**`, `native/*/macos-release.json`, `release-packages.json`, the generator, `apps/catalog-feed/**` or the workflow | Builds and deploys |
+| Push to `dev` or `main` touching `packages/catalog/**`, `native/*/macos-release.json`, `release-packages.json`, the generator or its release helper `scripts/release-macos.mjs`, a package's `package.json` (`packages/*/package.json`: a release target's name and bin decide whether it is listed as a tool), `apps/catalog-feed/**` or the workflow | Builds and deploys |
 | `release` `published`, `edited` or `deleted` (beta channels come from GitHub pre-releases) | Builds and deploys |
 | A successful **Release macOS app** run (`workflow_run`): its beta pre-releases are created with the workflow's token, which fires no `release` event | Builds and deploys |
 | Daily at 05:17 UTC (tools' versions come from npm dist-tags, which change without a commit here) | Builds and deploys |
@@ -31,9 +31,9 @@ gh workflow run catalog-feed.yml --ref <branch> -f dry_run=true
 ## Jobs and credentials
 
 - **generate** has no environment and no secret, and only the run's read-only token (`contents: read`), which the generator sends to `api.github.com` so the releases list is not rate limited on a shared runner address. It runs `npm ci`, builds `@subset.dev/catalog`, runs the generator, checks the written file with `apps/catalog-feed/check-feed.mjs` (size, schema, uniqueness: the reader rules), runs `wrangler deploy --dry-run`, and hands the feed on as an artifact with its SHA-256 and commit. A feed that fails any check fails this job, so nothing is deployed and the hosted feed stays as it was.
-- **deploy** needs `generate`, is skipped for dry runs, and runs in the `catalog-feed` GitHub environment, which holds `CLOUDFLARE_API_TOKEN`. It checks out the commit the feed was built from, checks the downloaded feed against `generate`'s SHA-256, installs only wrangler and its dependencies from the lockfile with install scripts off (no repository build or install code runs next to the token), and runs `wrangler deploy`. The account ID is pinned in `wrangler.jsonc` (`c801efc2879825babdb9b2534199c4dd`, 21n-dev), so the token cannot deploy the feed anywhere else.
+- **deploy** needs `generate`, is skipped for dry runs, and runs in the `catalog-feed` GitHub environment, which holds `CLOUDFLARE_API_TOKEN`. It checks out `dev` by name, never a ref taken from the event or from `generate`'s outputs, and stops without deploying unless that is the commit `generate` built (if `dev` moved in between, re-run the whole run to build its new head). It then checks the downloaded feed against `generate`'s SHA-256, installs only the `@subset.dev/catalog-feed` workspace's packages (wrangler, and `yaml` for its tests) from the lockfile with install scripts off (no repository build or install code runs next to the token), and runs `wrangler deploy`. The account ID is pinned in `wrangler.jsonc` (`c801efc2879825babdb9b2534199c4dd`, 21n-dev), so the token cannot deploy the feed anywhere else.
 
-`apps/catalog-feed/test/catalog-feed.test.mjs` (in `npm run check`) holds this contract: no secret, environment or write permission in `generate`; the one step with the token is the deploy in `deploy`, after the checksum check and the scriptless install; the dry-run conditions; the Worker's account, route and headers; and `check-feed.mjs` refusing every invalid feed fixture.
+`apps/catalog-feed/test/catalog-feed.test.mjs` (in `npm run check`) holds this contract: no secret, environment or write permission in `generate`; every checkout either names `dev` or, in a dry run only, builds the run's own commit; the one step with the token is the deploy in `deploy`, after the commit check, the checksum check and the scriptless install; the path filters cover every file the generator reads; the dry-run conditions; the Worker's account, route and headers; and `check-feed.mjs` refusing every invalid feed fixture.
 
 ## The Worker
 
@@ -41,6 +41,7 @@ gh workflow run catalog-feed.yml --ref <branch> -f dry_run=true
 
 ```sh
 npm run build --workspace=@subset.dev/catalog
+mkdir -p apps/catalog-feed/public/catalog
 node scripts/catalog-feed.mjs --out apps/catalog-feed/public/catalog/v1.json
 cd apps/catalog-feed && npx wrangler dev
 ```
@@ -58,4 +59,4 @@ Until then a deploy fails at `wrangler deploy` and the dry runs still pass. The 
 
 ## Rollback
 
-`wrangler rollback` in `apps/catalog-feed` (with a token) restores the Worker's previous version, and with it the previous feed. Re-running only the `deploy` job of an earlier run redeploys that run's feed while its artifact is kept (7 days); re-running the whole run builds `dev`'s head again. To withdraw a bad entry for good, fix its source (catalog, release or dist-tag) and dispatch the workflow on `dev`; the next scheduled run would otherwise restore it.
+`wrangler rollback` in `apps/catalog-feed` (with a token) restores the Worker's previous version, and with it the previous feed. Re-running only the `deploy` job of an earlier run redeploys that run's feed only while `dev` is still at the commit it was built from (and its artifact is kept, 7 days); re-running the whole run builds `dev`'s head again. Before a rollback, disable the **Catalog feed** workflow and let any running deploy finish or cancel it, so no deploy publishes the bad feed again; re-enable it once the source is fixed. To withdraw a bad entry for good, fix its source (catalog, release or dist-tag) and dispatch the workflow on `dev`; the next scheduled run would otherwise restore it.

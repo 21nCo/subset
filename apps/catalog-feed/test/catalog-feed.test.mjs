@@ -26,6 +26,9 @@ const stepIndex = (job, predicate, label) => {
 };
 const runs = (fragment) => (step) => typeof step.run === 'string' && step.run.includes(fragment);
 const uses = (action) => (step) => typeof step.uses === 'string' && step.uses.startsWith(`${action}@`);
+// GitHub's path filter globs: `**` crosses directories, `*` does not.
+const globMatches = (glob, file) =>
+  new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*\*|\*/g, (star) => (star === '**' ? '.*' : '[^/]*'))}$`).test(file);
 
 test('runs on catalog changes to dev and main, releases, macOS release runs, a daily schedule, by hand, and as a dry run for pull requests', () => {
   const on = workflow.on;
@@ -42,7 +45,22 @@ test('runs on catalog changes to dev and main, releases, macOS release runs, a d
   assert.match(on.schedule[0].cron, /^\d+ \d+ \* \* \*$/, 'once a day');
   assert.equal(on.workflow_dispatch.inputs.dry_run.type, 'boolean');
   assert.deepEqual(on.pull_request.paths, on.push.paths);
+  assert.equal(globMatches('packages/catalog/**', 'packages/catalog/feed/catalog.schema.json'), true);
+  assert.equal(globMatches('packages/*/package.json', 'packages/a/b/package.json'), false);
   assert.equal(on.pull_request_target, undefined, 'no pull request run gets the base repository\'s secrets');
+});
+
+test('a change to anything the generator reads starts a run', () => {
+  const generator = readFileSync(path.join(repoRoot, 'scripts/catalog-feed.mjs'), 'utf8');
+  const localImports = [...generator.matchAll(/from '(\.\.?\/[^']+)'/g)].map(([, specifier]) => path.posix.join('scripts', specifier));
+  assert.ok(localImports.includes('scripts/release-macos.mjs'));
+  // The generator reads each release target's package.json: its name and bin decide whether it is listed as a tool.
+  const targets = JSON.parse(readFileSync(path.join(repoRoot, 'release-packages.json'), 'utf8')).map((target) => `${target.path}/package.json`);
+  assert.ok(targets.length > 0);
+  const inputs = ['scripts/catalog-feed.mjs', ...localImports, ...targets, 'release-packages.json', 'native/breaks/macos-release.json', 'packages/catalog/src/index.ts', 'apps/catalog-feed/wrangler.jsonc'];
+  for (const paths of [workflow.on.push.paths, workflow.on.pull_request.paths]) {
+    for (const file of inputs) assert.ok(paths.some((glob) => globMatches(glob, file)), `${file} is in the path filters`);
+  }
 });
 
 test('the generate job has no secrets, environment or write access', () => {
@@ -72,9 +90,12 @@ test('only the deploy job gets the Cloudflare token, after generate and never in
 
 test('the deploy job deploys exactly the feed generate validated, installing no build code', () => {
   const steps = deploy.steps;
-  const checkout = steps[stepIndex(deploy, uses('actions/checkout'), 'checkout')];
-  assert.equal(checkout.with.ref, '${{ needs.generate.outputs.commit }}');
-  assert.equal(checkout.with['persist-credentials'], false);
+  const checkoutIndex = stepIndex(deploy, uses('actions/checkout'), 'checkout');
+  assert.equal(steps.filter(uses('actions/checkout')).length, 1);
+  assert.equal(steps[checkoutIndex].with.ref, 'dev', 'the token\'s job checks out dev by name');
+  assert.equal(steps[checkoutIndex].with['persist-credentials'], false);
+  const commit = stepIndex(deploy, runs('git rev-parse HEAD'), 'commit check');
+  assert.equal(steps[commit].env.EXPECTED_COMMIT, '${{ needs.generate.outputs.commit }}');
   const download = stepIndex(deploy, uses('actions/download-artifact'), 'download');
   assert.equal(`${steps[download].with.path}/v1.json`, FEED_PATH);
   const verify = stepIndex(deploy, runs('sha256sum --check'), 'sha256 check');
@@ -84,6 +105,7 @@ test('the deploy job deploys exactly the feed generate validated, installing no 
   assert.match(steps[install].run, /--ignore-scripts/);
   assert.match(steps[install].run, /--include-workspace-root=false/);
   const release = stepIndex(deploy, (step) => /secrets\./.test(text(step)), 'deploy');
+  assert.ok(checkoutIndex < commit && commit < install, 'the commit is checked before anything is installed');
   assert.ok(download < verify && verify < release && install < release, 'the checks come before the deploy');
   assert.equal(steps.slice(0, release).some((step) => /npm run|catalog-feed\.mjs/.test(text(step))), false);
 });
@@ -159,13 +181,56 @@ test('only a run that can deploy joins the deploy group; the rest never wait for
 
 test('deploys build dev; a dry run builds its own commit', () => {
   const dryRun = "(github.event_name == 'pull_request' || inputs.dry_run)";
-  const checkout = generate.steps.find(uses('actions/checkout'));
-  assert.equal(checkout.with.ref, `\${{ ${dryRun} && github.sha || 'dev' }}`);
   assert.equal(workflow['run-name'], `Catalog feed\${{ ${dryRun} && ' (dry run)' || '' }}`);
-  const [, ref] = inside(checkout.with.ref);
-  assert.equal(evaluate(ref, { event: 'push', ref: 'refs/heads/main' }), 'dev');
-  assert.equal(evaluate(ref, { event: 'workflow_dispatch', ref: 'refs/heads/x', dryRun: true }), 'abc');
-  assert.equal(evaluate(ref, { event: 'pull_request' }), 'abc');
+  const checkouts = generate.steps.filter(uses('actions/checkout'));
+  assert.equal(checkouts.length, 2);
+  const cases = [
+    [{ event: 'push', ref: 'refs/heads/main' }, 'dev'],
+    [{ event: 'release', ref: 'refs/tags/v1' }, 'dev'],
+    [{ event: 'schedule' }, 'dev'],
+    [{ event: 'workflow_run', conclusion: 'success' }, 'dev'],
+    [{ event: 'workflow_dispatch', ref: 'refs/heads/main' }, 'dev'],
+    [{ event: 'workflow_dispatch', ref: 'refs/heads/x', dryRun: true }, undefined],
+    [{ event: 'pull_request', ref: 'refs/pull/9/merge' }, undefined],
+  ];
+  for (const [run, ref] of cases) {
+    const chosen = checkouts.filter((step) => evaluate(step.if, run));
+    assert.equal(chosen.length, 1, `one checkout for ${JSON.stringify(run)}`);
+    // No ref: actions/checkout builds the commit the run was started on.
+    assert.equal(chosen[0].with.ref, ref, JSON.stringify(run));
+  }
+});
+
+test('no checkout takes its ref from an event or a job output', () => {
+  const checkouts = Object.values(workflow.jobs).flatMap((job) => job.steps.filter(uses('actions/checkout')));
+  assert.equal(checkouts.length, 3);
+  for (const step of checkouts) {
+    assert.ok(step.with.ref === undefined || step.with.ref === 'dev', `checkout ref ${step.with.ref}`);
+    assert.equal(step.with['persist-credentials'], false);
+  }
+  // The checkout without a ref runs only in a dry run, which never reaches the deploy job.
+  const unnamed = generate.steps.find((step) => uses('actions/checkout')(step) && step.with.ref === undefined);
+  assert.equal(unnamed.if, "github.event_name == 'pull_request' || inputs.dry_run");
+});
+
+test('the deploy job refuses a checkout that is not the commit generate built', () => {
+  const check = deploy.steps.find(runs('git rev-parse HEAD'));
+  const dir = mkdtempSync(path.join(tmpdir(), 'catalog-feed-commit-'));
+  try {
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: dir, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('commit', '-q', '--allow-empty', '-m', 'built');
+    const built = git('rev-parse', 'HEAD');
+    const runCheck = (expected) => spawnSync('bash', ['-e', '-c', check.run], { cwd: dir, encoding: 'utf8', env: { ...process.env, EXPECTED_COMMIT: expected } });
+    assert.equal(runCheck(built).status, 0, 'the same commit deploys');
+    git('commit', '-q', '--allow-empty', '-m', 'dev moved');
+    const moved = runCheck(built);
+    assert.equal(moved.status, 1, 'dev moved after generate');
+    assert.match(moved.stderr, /not deploying/);
+    assert.equal(runCheck('').status, 1, 'no commit from generate');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the Worker serves the feed from the 21n-dev account at subset.21n.dev with a 5-minute cache', () => {
