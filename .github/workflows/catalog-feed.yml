@@ -14,7 +14,7 @@ run-name: Catalog feed${{ (github.event_name == 'pull_request' || inputs.dry_run
 # read-only GitHub token: it installs, builds and runs the generator, validates the feed, and hands the file on as
 # an artifact with its SHA-256 and commit. `deploy` runs in the `catalog-feed` environment, which holds
 # CLOUDFLARE_API_TOKEN; it checks out dev by name (never a ref taken from an event or a job output), refuses to deploy
-# unless dev still has the feed's inputs and the Worker files `generate` built from, installs only the catalog-feed workspace's packages (no install
+# unless dev still has the feed's inputs, the Worker files and the lockfile `generate` built from, installs only the catalog-feed workspace's packages (no install
 # scripts), checks the artifact against that SHA-256 and deploys it. A feed that fails validation fails `generate`, so
 # `deploy` never runs.
 on:
@@ -25,12 +25,15 @@ on:
       - 'native/*/macos-release.json'
       - 'release-packages.json'
       # The generator and what it reads besides the catalog (its release helper and the release targets' package.json,
-      # whose name and bin decide which tools are listed), the Worker and this workflow.
+      # whose name and bin decide which tools are listed), the Worker, this workflow, and the root package.json and
+      # lockfile, which decide the wrangler the deploy job installs.
       - 'scripts/catalog-feed.mjs'
       - 'scripts/release-macos.mjs'
       - 'packages/*/package.json'
       - 'apps/catalog-feed/**'
       - '.github/workflows/catalog-feed.yml'
+      - 'package.json'
+      - 'package-lock.json'
   # A dry run for each pull request that touches the feed; the same paths as push.
   pull_request:
     paths:
@@ -42,6 +45,8 @@ on:
       - 'packages/*/package.json'
       - 'apps/catalog-feed/**'
       - '.github/workflows/catalog-feed.yml'
+      - 'package.json'
+      - 'package-lock.json'
   # Beta channels come from GitHub pre-releases. A release published, edited or deleted by a person fires `release`;
   # one created with a workflow's token (release-macos.yml's beta pre-releases) fires no event, so a finished
   # macOS release run starts this workflow too.
@@ -174,8 +179,9 @@ jobs:
           persist-credentials: false
 
       # Deploys only if dev still matches the commit generate built in every path that starts this workflow (the feed's
-      # inputs, the Worker and this file). Other pushes to dev in between change neither the feed nor the Worker, and
-      # start no run, so they must not stop this one. A push that changes one of these paths started its own run,
+      # inputs, the Worker, this file, and the root package.json and lockfile, so the wrangler installed below is the one
+      # generate's dry run built with). Other pushes to dev in between change none of these, and start no run, so they
+      # must not stop this one. A push that changes one of these paths started its own run,
       # queued in the deploy group, which builds and deploys it; this run stops.
       - name: Check the commit
         env:
@@ -190,6 +196,8 @@ jobs:
             'packages/*/package.json'
             'apps/catalog-feed/**'
             '.github/workflows/catalog-feed.yml'
+            'package.json'
+            'package-lock.json'
           )
           actual="$(git rev-parse HEAD)"
           if ! [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$EXPECTED_COMMIT" HEAD; then
@@ -197,11 +205,11 @@ jobs:
             exit 1
           fi
           if ! git diff --quiet "$EXPECTED_COMMIT" HEAD -- "${inputs[@]/#/:(glob)}"; then
-            echo "dev moved from $EXPECTED_COMMIT to $actual and changed the feed's inputs or the Worker; not deploying. The run for that change deploys it." >&2
+            echo "dev moved from $EXPECTED_COMMIT to $actual and changed the feed's inputs, the Worker or the lockfile; not deploying. The run for that change deploys it." >&2
             git diff --name-only "$EXPECTED_COMMIT" HEAD -- "${inputs[@]/#/:(glob)}" >&2
             exit 1
           fi
-          echo "Deploying the feed built from $EXPECTED_COMMIT with the Worker files at $actual (the same)."
+          echo "Deploying the feed built from $EXPECTED_COMMIT with the Worker files and lockfile at $actual (the same)."
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

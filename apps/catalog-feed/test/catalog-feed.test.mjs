@@ -57,7 +57,8 @@ test('a change to anything the generator reads starts a run', () => {
   // The generator reads each release target's package.json: its name and bin decide whether it is listed as a tool.
   const targets = JSON.parse(readFileSync(path.join(repoRoot, 'release-packages.json'), 'utf8')).map((target) => `${target.path}/package.json`);
   assert.ok(targets.length > 0);
-  const inputs = ['scripts/catalog-feed.mjs', ...localImports, ...targets, 'release-packages.json', 'native/breaks/macos-release.json', 'packages/catalog/src/index.ts', 'apps/catalog-feed/wrangler.jsonc'];
+  // The root package.json and lockfile decide the wrangler generate builds the Worker with and the deploy job installs.
+  const inputs = ['scripts/catalog-feed.mjs', ...localImports, ...targets, 'release-packages.json', 'native/breaks/macos-release.json', 'packages/catalog/src/index.ts', 'apps/catalog-feed/wrangler.jsonc', 'package.json', 'package-lock.json'];
   for (const paths of [workflow.on.push.paths, workflow.on.pull_request.paths]) {
     for (const file of inputs) assert.ok(paths.some((glob) => globMatches(glob, file)), `${file} is in the path filters`);
   }
@@ -107,8 +108,10 @@ test('the deploy job deploys exactly the feed generate validated, installing no 
   const release = stepIndex(deploy, (step) => /secrets\./.test(text(step)), 'deploy');
   assert.ok(checkoutIndex < commit && commit < install, 'the commit is checked before anything is installed');
   assert.ok(download < verify && verify < release && install < release, 'the checks come before the deploy');
-  // The commit check names scripts/catalog-feed.mjs as a path to compare; no step runs it or an npm script.
-  assert.equal(steps.slice(0, release).some((step) => /npm run|node\s+\S*catalog-feed\.mjs/.test(step.run ?? '')), false);
+  // No step runs the generator or an npm script; the commit check only names the generator as a path to compare.
+  const beforeDeploy = steps.slice(0, release).filter((_, index) => index !== commit);
+  assert.equal(beforeDeploy.some((step) => /npm run|catalog-feed\.mjs/.test(text(step))), false);
+  assert.doesNotMatch(steps[commit].run, /\b(npm|npx|node)\b/, 'the commit check runs only git');
 });
 
 test('the generate job validates the feed and builds the Worker before handing the feed on', () => {
@@ -232,16 +235,25 @@ test('the deploy job deploys while dev keeps the inputs generate built from, and
     };
     const runCheck = (expected) => spawnSync('bash', ['-e', '-c', check.run], { cwd: dir, encoding: 'utf8', env: { ...process.env, EXPECTED_COMMIT: expected } });
     git('init', '-q', '-b', 'dev');
-    for (const file of ['apps/catalog-feed/wrangler.jsonc', 'packages/catalog/src/index.ts', 'packages/timer/package.json', 'packages/timer/src/x.ts', 'package-lock.json']) commit(file, 'built');
+    for (const file of ['apps/catalog-feed/wrangler.jsonc', 'packages/catalog/src/index.ts', 'packages/timer/package.json', 'packages/timer/src/x.ts', 'package.json', 'package-lock.json']) commit(file, 'built');
     const built = git('rev-parse', 'HEAD');
     assert.equal(runCheck(built).status, 0, 'dev has not moved');
     // Another loop's pushes, which start no run of this workflow.
     commit('packages/timer/src/x.ts', 'other loop');
     commit('packages/timer/src/y.ts', 'other loop');
-    commit('package-lock.json', 'other loop');
+    commit('packages/timer/README.md', 'other loop');
     const unrelated = runCheck(built);
     assert.equal(unrelated.status, 0, `dev moved outside the feed's paths: ${unrelated.stderr}`);
-    for (const [file, label] of [['apps/catalog-feed/wrangler.jsonc', 'the Worker'], ['packages/catalog/src/index.ts', 'the catalog'], ['packages/timer/package.json', 'a release target']]) {
+    // The lockfile and root package.json decide the wrangler the deploy job installs: generate's dry run built with
+    // the ones it checked out, so a change to either is refused too, and its own run builds and deploys it.
+    const changes = [
+      ['apps/catalog-feed/wrangler.jsonc', 'the Worker'],
+      ['packages/catalog/src/index.ts', 'the catalog'],
+      ['packages/timer/package.json', 'a release target'],
+      ['package-lock.json', 'the lockfile'],
+      ['package.json', 'the root package.json'],
+    ];
+    for (const [file, label] of changes) {
       git('reset', '-q', '--hard', built);
       commit(file, 'changed');
       const moved = runCheck(built);
