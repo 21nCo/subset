@@ -59,7 +59,7 @@ usage  0.2.0  0.2.1-beta.1
 - `--json` prints the `subset.list@1` document below instead of the table.
 - `--refresh` fetches the catalog even when the cached copy is fresh, and never falls back to the cached copy.
 
-It exits with code 0, with 1 when the catalog cannot be used, and with 2 for an option it does not know.
+It exits with code 0, with 1 when the catalog cannot be used (or `SUBSET_APPLICATIONS_DIRS` is not two absolute folders), and with 2 for an option it does not know or any other argument. A cache that cannot be written or read is not an error: the catalog is listed and fetched again next time.
 
 ### Installed apps (macOS)
 
@@ -67,7 +67,7 @@ For each app in the feed, `subset list` looks for `<appName>.app` directly insid
 
 When `~/Library/Application Support/Subset/receipts/<bundleId>.json` is a valid `subset.receipt@1` receipt for that copy (the same path and version, and for a beta the same build), INSTALLED shows its channel: `0.1.0 (live, /Applications)` or `0.1.1-beta.4 (beta, ~/Applications)`. Receipts are advisory: a missing, invalid or mismatched receipt only means no channel is shown.
 
-On Linux and Windows, the apps are listed with INSTALLED `unsupported` (`"installed": null` in JSON), followed by the tools.
+On Linux and Windows, the apps are listed with INSTALLED `unsupported` (`"installed": null` in JSON), followed by the tools and the line `Mac apps can be installed only on macOS.`
 
 ### The catalog feed and its cache
 

@@ -2,7 +2,7 @@
 // rules (at most 256 KiB as received, the closed schema, unique IDs), and the copy cached for 5 minutes. An invalid
 // feed is refused whole, never partly used, and does not replace the cached copy.
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -91,10 +91,15 @@ export function cacheFile({ platform, env, home }) {
   return path.posix.join(xdg, 'subset', 'catalog.json');
 }
 
-/** Reads at most `limit + 1` bytes of a file, so an oversized one is known to be too large without reading it all. */
+/**
+ * Reads at most `limit + 1` bytes of a regular file, so an oversized one is known to be too large without reading it
+ * all. Anything else (a folder, a named pipe, a device) throws instead of being read, and is opened without waiting
+ * for a writer.
+ */
 export function readBounded(file, limit) {
-  const fd = openSync(file, 'r');
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
+    if (!fstatSync(fd).isFile()) throw Object.assign(new Error(`${file} is not a file`), { code: 'ENOTFILE' });
     const buffer = Buffer.alloc(limit + 1);
     let size = 0;
     while (size < buffer.length) {
@@ -168,8 +173,9 @@ function readCache(file, url, now) {
   return feed ? { feed, fetchedAt } : undefined;
 }
 
-// Replaces the cached copy atomically (a uniquely named temporary file renamed over it). A cache that cannot be written
-// is not an error: the next run fetches again.
+// Replaces the cached copy atomically (a uniquely named temporary file renamed over it). The cache is best-effort: when
+// its folder cannot be made or written (not a folder, no permission, a full disk) nothing is thrown, the temporary file
+// is removed if it can be, and the next run fetches again.
 function writeCache(file, url, bytes, now) {
   const temporary = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   try {
@@ -178,7 +184,11 @@ function writeCache(file, url, bytes, now) {
     writeFileSync(temporary, JSON.stringify(entry), { mode: 0o600 });
     renameSync(temporary, file);
   } catch {
-    rmSync(temporary, { force: true });
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The temporary file cannot be removed either (its folder is not a folder or not writable): leave it.
+    }
   }
 }
 

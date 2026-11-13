@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -215,6 +215,50 @@ test('the command uses a stale cache with a warning on stderr when the feed cann
   assert.equal(old.status, 1);
   assert.equal(old.stdout, '');
   assert.match(old.stderr, /the cached copy is 8 days old, more than 7 days\.\n$/);
+});
+
+test('lists a valid catalog and exits 0 when the cache cannot be written or read', async () => {
+  const expected = 'APP     INSTALLED  LIVE\nbreaks  -          0.1.0\n';
+  const cases = {
+    // ~/Library/Caches/Subset is a file, so its catalog.json can be neither made nor removed (ENOTDIR).
+    'cache folder is a file': (home) => {
+      mkdirSync(path.join(home, 'Library', 'Caches'), { recursive: true });
+      writeFileSync(path.join(home, 'Library', 'Caches', 'Subset'), 'not a folder');
+    },
+    // No permission to write (EACCES; root ignores it, and the cache is then simply written).
+    'cache folder is not writable': (home) => {
+      const folder = path.join(home, 'Library', 'Caches', 'Subset');
+      mkdirSync(folder, { recursive: true });
+      chmodSync(folder, 0o500);
+    },
+    // catalog.json is a non-empty folder, which the cached copy cannot be renamed over.
+    'cache file is a folder': (home) => mkdirSync(path.join(home, 'Library', 'Caches', 'Subset', 'catalog.json', 'x'), { recursive: true })
+  };
+  if (process.platform !== 'win32') {
+    // A named pipe with no writer: reading it would wait forever.
+    cases['cache file is a named pipe'] = (home) => {
+      const folder = path.join(home, 'Library', 'Caches', 'Subset');
+      mkdirSync(folder, { recursive: true });
+      assert.equal(spawnSync('mkfifo', [path.join(folder, 'catalog.json')]).status, 0);
+    };
+  }
+  for (const [name, prepare] of Object.entries(cases)) {
+    const { home, dirs } = setup();
+    prepare(home);
+    try {
+      const env = { SUBSET_CATALOG_URL: fixtureUrl('catalog-valid-live-only.json'), SUBSET_APPLICATIONS_DIRS: dirs };
+      const result = await list([], { env, home });
+      assert.deepEqual(result, { code: 0, stdout: expected, stderr: '' }, name);
+    } finally {
+      chmodSync(path.join(home, 'Library', 'Caches'), 0o700);
+      const folder = path.join(home, 'Library', 'Caches', 'Subset');
+      try {
+        chmodSync(folder, 0o700);
+      } catch {
+        // Not a folder in this case.
+      }
+    }
+  }
 });
 
 test('refuses an http: catalog URL and a bad SUBSET_APPLICATIONS_DIRS with exit code 1, and an unknown option with 2', async () => {
