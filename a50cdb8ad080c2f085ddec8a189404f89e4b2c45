@@ -1,0 +1,18 @@
+native/mgraph/README.md
+  h_a39f9495f9ec1d 5,41-42,51
+native/mgraph/Sources/CaptureCore/CaptureCollector.swift
+  h_a39f9495f9ec1d 50-61,210,213-214,218-223,225-239,259-299
+native/mgraph/Tests/CaptureCoreTests/CaptureCoreTests.swift
+  h_a39f9495f9ec1d 31,36,44-64,74,78,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a50cdb8ad080c2f085ddec8a189404f89e4b2c45",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+packages/usage/test/review-round.test.mjs
+  s_e41552db7a7823::t_bef67da2fc02c3 207-208
+packages/usage/src/index.ts
+  s_e41552db7a7823::t_bef67da2fc02c3 219-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ae3c9d870d4de0583d9a6dcb0ff72ea5b369703",
+  "prompts": {},
+  "sessions": {
+    "s_e41552db7a7823": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf55d8d-6176-4456-a8a3-555947c35bfe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
