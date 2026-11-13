@@ -2,9 +2,10 @@
 // subset <tool>[@<version>] [arguments...] or subset <command> [arguments...]: the subset.dev package's command.
 // `npx subset.dev usage status` does what `npx @subset.dev/usage status` does: npm fetches the tool (the launcher
 // depends on none of them), and the launcher then loads the tool's bin module into this same process. The commands
-// (install, list and the others in commands.mjs) are the launcher's own.
+// (list, install and the others in commands.mjs) are the launcher's own; commands/list.mjs runs `subset list`.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { findToolBin } from './bin.mjs';
@@ -113,6 +114,13 @@ switch (command.action) {
     console.error(`subset: ${command.message}`);
     process.exitCode = 2;
     break;
+  case 'command': {
+    // list is the only verb route() runs in this version. Loaded only here, so running a tool never reads the catalog
+    // schemas.
+    const { runList } = await import('./commands/list.mjs');
+    process.exitCode = await runList(command.args, { env: process.env, platform: process.platform, home: homedir(), stdout: process.stdout, stderr: process.stderr });
+    break;
+  }
   default: {
     const tool = resolveTool(command.argument);
     if (tool.error) {

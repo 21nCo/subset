@@ -60,3 +60,28 @@ jobs:
         run: >-
           xcodebuild -project native/breaks/Breaks.xcodeproj -scheme BreaksMac -destination 'platform=macOS'
           CODE_SIGNING_ALLOWED=NO test
+
+  # SET-229: the subset.dev launcher's tests on macOS, where `subset list` detects installed apps with the real
+  # /usr/bin/plutil (the workspace job runs the same tests on Linux with a plutil stand-in). The tests serve the
+  # catalog fixtures from file: URLs and use temporary folders for the Applications folders, so nothing is fetched or
+  # installed. No secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
+  subset-dev-macos:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      # The tests compare the launcher's feed validation with the generator's Ajv validation, so they need the
+      # workspace's dependencies; no install script is needed for that.
+      - run: npm ci --ignore-scripts
+      # The real-plutil tests run only where it exists; fail rather than skip them here.
+      - run: test -x /usr/bin/plutil
+      - run: npm test --workspace=subset.dev
