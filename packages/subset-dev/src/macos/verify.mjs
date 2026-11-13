@@ -129,7 +129,7 @@ export async function verifyApp(bundle, expected, { tools = VERIFY_TOOLS, signal
     throw new VerificationError('notarization', `Gatekeeper does not accept it as a notarized Developer ID app (spctl: ${source ? `source=${source}` : lastLine(assessment.stderr)})`);
   }
 
-  const info = await readInfoPlist(bundle, tools.plutil);
+  const info = await readInfoPlist(bundle, tools.plutil, { run: runTool, signal });
   if (info === undefined) throw new VerificationError('bundle ID', 'its Contents/Info.plist cannot be read');
   if (info.CFBundleIdentifier !== expected.bundleId) {
     throw new VerificationError('bundle ID', `its bundle ID is ${JSON.stringify(info.CFBundleIdentifier ?? null)}, not ${expected.bundleId}`);

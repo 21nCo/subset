@@ -377,8 +377,8 @@ function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.syst
 }
 
 // Every point between two steps where a signal can arrive before the rename: during the download (between its chunks),
-// and while each tool runs.
-const boundaries = ['download', 'hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'sw_vers'];
+// and while each tool runs, including plutil reading the staged copy's Info.plist.
+const boundaries = ['download', 'hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'plutil', 'sw_vers'];
 for (const boundary of boundaries) {
   for (const signal of boundary === 'ditto' ? ['SIGTERM', 'SIGINT', 'SIGHUP'] : ['SIGTERM']) {
     test(`${signal} at ${boundary} leaves the destination unchanged and no receipt`, { skip }, async () => {

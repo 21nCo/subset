@@ -44,7 +44,9 @@ export const stubPlutilSkip = process.platform === 'win32' && 'the plutil stand-
 /**
  * Writes an executable plutil stand-in into `dir` and returns its path. Like `plutil -convert json -o - <file>`, it
  * prints the <key>/<string> pairs of an XML plist's top-level dict as JSON, and fails on anything else or other
- * arguments.
+ * arguments. For the install interruption tests (install-stubs.mjs), STUB_SIGNAL_AT=plutil makes it signal its parent
+ * (or, with STUB_SIGNAL_GROUP=1, its parent's group) while it reads a staged copy's Info.plist, and with STUB_LINGER_MS
+ * ignore SIGTERM and answer only that many milliseconds later.
  */
 export function stubPlutil(dir) {
   const file = path.join(dir, 'plutil');
@@ -54,6 +56,14 @@ export function stubPlutil(dir) {
 const { readFileSync } = require('node:fs');
 const args = process.argv.slice(2);
 if (args.length !== 5 || args.slice(0, 4).join(' ') !== '-convert json -o -') { console.error('stub plutil: unexpected arguments'); process.exit(64); }
+if (process.env.STUB_SIGNAL_AT === 'plutil' && args[4].includes('.subset-install-')) {
+  process.kill(process.env.STUB_SIGNAL_GROUP ? -process.ppid : process.ppid, process.env.STUB_SIGNAL || 'SIGTERM');
+  const linger = Number(process.env.STUB_LINGER_MS || 0);
+  if (linger) {
+    process.on('SIGTERM', () => {});
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, linger);
+  }
+}
 let text;
 try { text = readFileSync(args[4], 'utf8'); } catch (error) { console.error(error.message); process.exit(1); }
 const dict = /<plist[^>]*>\\s*<dict>([\\s\\S]*)<\\/dict>\\s*<\\/plist>/.exec(text);

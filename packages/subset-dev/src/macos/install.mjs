@@ -298,6 +298,8 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     }
     return { path: target };
   } catch (error) {
+    // Whatever check saw a tool stopped by the abort, an abort before the app is in place is the interruption.
+    if (signal.aborted && !installed) throw signal.reason;
     // An unexpected error (a folder that cannot be made or read) still names the step it stopped.
     if (error instanceof InstallError || error instanceof VerificationError || error === signal.reason) throw error;
     throw new InstallError(step, error.code ? `${error.code}: ${error.message}` : String(error?.message ?? error));
