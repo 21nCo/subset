@@ -236,6 +236,19 @@ test('refuses a fresh cache that is not UTF-8, and fetches again', async () => {
   const loaded = await load({ now: NOW + MINUTE });
   assert.equal(loaded.cached, false);
   assert.equal(loaded.feed.apps.length, 0);
+  // Valid UTF-8 JSON, but the cached feed (its body string) holds a lone surrogate: the escape \ud800 in the cache
+  // file, inside the summary. Encoded, it would become U+FFFD.
+  writeFileSync(feedFile, fixture('catalog-valid-live-only.json'));
+  await load({ now: NOW + 2 * MINUTE, refresh: true });
+  const text = readFileSync(cache, 'utf8');
+  writeFileSync(cache, text.replace('Take well-timed', '\\ud800Take well-timed'));
+  const { body } = JSON.parse(readFileSync(cache, 'utf8'));
+  assert.equal(body.isWellFormed(), false);
+  assert.equal(JSON.parse(body).apps[0].summary.charCodeAt(0), 0xd800);
+  writeFileSync(feedFile, fixture('catalog-valid-tools-only.json'));
+  const again = await load({ now: NOW + 3 * MINUTE });
+  assert.equal(again.cached, false);
+  assert.equal(again.feed.apps.length, 0);
 });
 
 // A stand-in fetch answering with `body` (bytes, sent in chunks) and `status`, recording its requests.

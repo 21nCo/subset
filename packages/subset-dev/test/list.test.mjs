@@ -60,6 +60,8 @@ test('takes --beta, --json and --refresh, and nothing else', () => {
   assert.match(parseListArgs(['--all']).error, /does not take the option "--all"/);
   assert.match(parseListArgs(['breaks']).error, /does not take the argument "breaks"/);
   assert.match(parseListArgs(['--', 'x']).error, /does not take the option "--"/);
+  // An argument is quoted with its control characters and line separators escaped.
+  assert.equal(parseListArgs(['--x\u001b[2J\nforged\u2028']).error, 'subset list does not take the option "--x\\x1b[2J\\x0aforged\\u2028". Usage: subset list [--beta] [--json] [--refresh]');
 });
 
 test('lists installed apps, live versions and tools; --beta adds the beta column', { skip: stubPlutilSkip }, async () => {

@@ -172,14 +172,16 @@ function networkReason(error) {
 }
 
 // The cached feed for `url`: { feed, fetchedAt } or undefined when there is none, it is for another URL, or it is
-// unreadable, not UTF-8, invalid or dated in the future (it is then simply not used). Never throws: the cache is
-// best-effort.
+// unreadable, not UTF-8 (or its feed not well-formed Unicode), invalid or dated in the future (it is then simply not
+// used). Never throws: the cache is best-effort.
 function readCache(file, url, now) {
   try {
     const bytes = readBounded(file, MAX_CACHE_BYTES);
     if (bytes.byteLength > MAX_CACHE_BYTES) return undefined;
     const entry = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
     if (entry?.schema !== CACHE_SCHEMA || entry.url !== url.href || typeof entry.body !== 'string' || typeof entry.fetchedAt !== 'string') return undefined;
+    // A lone surrogate (a \ud800 escape) would become U+FFFD when encoded, so the feed would not be the one fetched.
+    if (!entry.body.isWellFormed()) return undefined;
     const fetchedAt = Date.parse(entry.fetchedAt);
     if (!Number.isFinite(fetchedAt) || fetchedAt > now) return undefined;
     const { feed } = parseFeed(Buffer.from(entry.body, 'utf8'));

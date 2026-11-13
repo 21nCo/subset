@@ -12,7 +12,7 @@ export function parseListArgs(args) {
   const options = { beta: false, json: false, refresh: false };
   for (const arg of args) {
     if (!Object.hasOwn(OPTIONS, arg)) {
-      const what = arg.startsWith('-') ? `option "${arg}"` : `argument "${arg}"`;
+      const what = arg.startsWith('-') ? `option "${printable(arg)}"` : `argument "${printable(arg)}"`;
       return { error: `subset list does not take the ${what}. Usage: subset list [--beta] [--json] [--refresh]` };
     }
     options[OPTIONS[arg]] = true;
