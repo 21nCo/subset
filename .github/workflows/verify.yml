@@ -63,8 +63,9 @@ jobs:
 
   # SET-229: the subset.dev launcher's tests on macOS, where `subset list` detects installed apps with the real
   # /usr/bin/plutil (the workspace job runs the same tests on Linux with a plutil stand-in). The tests serve the
-  # catalog fixtures from file: URLs and use temporary folders for the Applications folders, so nothing is fetched or
-  # installed. No secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
+  # catalog fixtures from file: URLs and use temporary folders for the Applications folders. SET-230: the tests also
+  # refuse an ad-hoc signed app with the real hdiutil, codesign and spctl, and the last step installs the real Breaks
+  # 0.1.0 into a temporary folder. No secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
   subset-dev-macos:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
     runs-on: macos-26
@@ -82,6 +83,20 @@ jobs:
       # The tests compare the launcher's feed validation with the generator's Ajv validation, so they need the
       # workspace's dependencies; no install script is needed for that.
       - run: npm ci --ignore-scripts
-      # The real-plutil tests run only where it exists; fail rather than skip them here.
-      - run: test -x /usr/bin/plutil
+      # The real-tool tests run only where the tools exist; fail rather than skip them here.
+      - run: test -x /usr/bin/plutil && test -x /usr/bin/hdiutil && test -x /usr/bin/codesign && test -x /usr/sbin/spctl && test -x /usr/bin/ditto
       - run: npm test --workspace=subset.dev
+      # SET-230: installs the immutable Breaks 0.1.0 release asset (the fixture feed's live channel and SHA-256) with
+      # the real hdiutil, codesign and spctl into a temporary folder, the one download these checks make, and checks
+      # the installed app again. Empty stand-ins for the Applications folders keep the runner's own apps out of it.
+      - name: subset install breaks with the real tools
+        env:
+          SUBSET_CATALOG_URL: file://${{ github.workspace }}/packages/catalog/feed/fixtures/catalog-valid-live-only.json
+        run: |
+          root="$RUNNER_TEMP/subset-install"
+          mkdir -p "$root/apps" "$root/home" "$root/Applications" "$root/user-Applications"
+          HOME="$root/home" SUBSET_APPLICATIONS_DIRS="$root/Applications:$root/user-Applications" \
+            node packages/subset-dev/src/cli.mjs install breaks --dir "$root/apps"
+          test "$(ls -A "$root/apps")" = "Breaks.app"
+          codesign --verify --deep --strict --verbose=2 "$root/apps/Breaks.app"
+          spctl --assess --type execute --verbose=2 "$root/apps/Breaks.app"

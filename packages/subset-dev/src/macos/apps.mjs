@@ -60,10 +60,12 @@ function channelOf(receipt, logicalPath, copy) {
   return receipt.channel;
 }
 
-// The Info.plist of an app bundle as JSON, or undefined when the bundle, its Contents folder or its Info.plist is not a
-// plain directory, directory and file (a symbolic link at any of them could name a plist outside the bundle), or plutil
-// cannot read it.
-async function readInfoPlist(bundle, plutil) {
+/**
+ * The Info.plist of an app bundle as JSON, or undefined when the bundle, its Contents folder or its Info.plist is not a
+ * plain directory, directory and file (a symbolic link at any of them could name a plist outside the bundle), or plutil
+ * cannot read it. `subset install` reads the staged copy's with it too (verify.mjs).
+ */
+export async function readInfoPlist(bundle, plutil) {
   try {
     if (!(await lstat(bundle)).isDirectory()) return undefined;
     const contents = path.join(bundle, 'Contents');

@@ -133,8 +133,9 @@ test('fails with exit code 2 and starts nothing for an unknown tool', () => {
   assert.deepEqual(npmCalls(), []);
 });
 
-// The management commands this version does not have yet; `subset list` is test/list.test.mjs's.
-const MANAGEMENT_VERBS = ['install', 'uninstall', 'update'];
+// The management commands this version does not have yet; `subset list` is test/list.test.mjs's and `subset install`
+// test/install.test.mjs's.
+const MANAGEMENT_VERBS = ['uninstall', 'update'];
 
 test('reserves the command names: no tool takes one, and resolving one as a tool is refused', () => {
   assert.deepEqual([...RESERVED_NAMES].sort(), ['help', 'install', 'list', 'uninstall', 'update', 'version']);
@@ -170,7 +171,7 @@ test("prints a command's usage for subset help <command> and subset <command> --
       assert.equal(result.stdout.includes('Not available yet'), MANAGEMENT_VERBS.includes(verb), args.join(' '));
     }
   }
-  assert.ok(subset(['help', 'install']).stdout.startsWith('Usage: subset install <app> [--beta] [--user]\n'));
+  assert.ok(subset(['help', 'install']).stdout.startsWith('Usage: subset install <app> [--beta] [--user] [--dir <folder>]\n'));
   assert.deepEqual(npmCalls(), []);
 });
 
@@ -192,7 +193,8 @@ test('routes arguments to help, version, a command or a tool', () => {
   assert.deepEqual(route(['version', 'x'], { isTool }), { action: 'version' });
   assert.deepEqual(route(['list', '--json'], { isTool }), { action: 'command', verb: 'list', args: ['--json'] });
   assert.deepEqual(route(['list', '--', '--help'], { isTool }), { action: 'command', verb: 'list', args: ['--', '--help'] });
-  assert.deepEqual(route(['install', 'breaks'], { isTool }), { action: 'unavailable', verb: 'install' });
+  assert.deepEqual(route(['install', 'breaks'], { isTool }), { action: 'command', verb: 'install', args: ['breaks'] });
+  assert.deepEqual(route(['update', 'breaks'], { isTool }), { action: 'unavailable', verb: 'update' });
   // A tool's arguments, --help included, go to the tool.
   assert.deepEqual(route(['usage', 'list', '--help'], { isTool }), { action: 'tool', argument: 'usage', args: ['list', '--help'] });
   assert.deepEqual(route(['install@beta'], { isTool }), { action: 'tool', argument: 'install@beta', args: [] });
