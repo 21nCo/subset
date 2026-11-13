@@ -1,0 +1,23 @@
+packages/subset-dev/README.md
+  s_1fcab45e1901c1::t_c5c009b07148d9 62,70
+packages/subset-dev/src/feed.mjs
+  s_1fcab45e1901c1::t_7b2e266bd90c85 5,94-98,100,102,176-178,187-191
+packages/subset-dev/test/list.test.mjs
+  s_1fcab45e1901c1::t_5905c4e1ecab4f 3,220-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f5f3499223e74062d5bd1e5542aab8aebe5b8ed1",
+  "prompts": {},
+  "sessions": {
+    "s_1fcab45e1901c1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_1fcab45e1901c1",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
