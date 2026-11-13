@@ -1,0 +1,8 @@
+{
+  "schema": "subset.receipt@1",
+  "channel": "live",
+  "version": "0.1.0",
+  "sha256": "5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e",
+  "installedAt": "2026-11-12T09:30:00Z",
+  "path": "/Applications/../tmp/Breaks.app"
+}
