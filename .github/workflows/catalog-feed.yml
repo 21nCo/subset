@@ -14,7 +14,7 @@ run-name: Catalog feed${{ (github.event_name == 'pull_request' || inputs.dry_run
 # read-only GitHub token: it installs, builds and runs the generator, validates the feed, and hands the file on as
 # an artifact with its SHA-256 and commit. `deploy` runs in the `catalog-feed` environment, which holds
 # CLOUDFLARE_API_TOKEN; it checks out dev by name (never a ref taken from an event or a job output), refuses to deploy
-# unless that is the commit `generate` built, installs only the catalog-feed workspace's packages (no install
+# unless dev still has the feed's inputs and the Worker files `generate` built from, installs only the catalog-feed workspace's packages (no install
 # scripts), checks the artifact against that SHA-256 and deploys it. A feed that fails validation fails `generate`, so
 # `deploy` never runs.
 on:
@@ -170,19 +170,38 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: dev
+          fetch-depth: 0
           persist-credentials: false
 
-      # The Worker is deployed from the commit the feed was built from, or not at all: if dev moved after generate
-      # checked it out, re-run the whole run to build the new head.
+      # Deploys only if dev still matches the commit generate built in every path that starts this workflow (the feed's
+      # inputs, the Worker and this file). Other pushes to dev in between change neither the feed nor the Worker, and
+      # start no run, so they must not stop this one. A push that changes one of these paths started its own run,
+      # queued in the deploy group, which builds and deploys it; this run stops.
       - name: Check the commit
         env:
           EXPECTED_COMMIT: ${{ needs.generate.outputs.commit }}
         run: |
+          inputs=(
+            'packages/catalog/**'
+            'native/*/macos-release.json'
+            'release-packages.json'
+            'scripts/catalog-feed.mjs'
+            'scripts/release-macos.mjs'
+            'packages/*/package.json'
+            'apps/catalog-feed/**'
+            '.github/workflows/catalog-feed.yml'
+          )
           actual="$(git rev-parse HEAD)"
-          if [ -z "$EXPECTED_COMMIT" ] || [ "$actual" != "$EXPECTED_COMMIT" ]; then
-            echo "dev is at $actual but the feed was built from '$EXPECTED_COMMIT'; not deploying." >&2
+          if ! [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$EXPECTED_COMMIT" HEAD; then
+            echo "The feed was built from '$EXPECTED_COMMIT', which is not in dev's history at $actual; not deploying." >&2
             exit 1
           fi
+          if ! git diff --quiet "$EXPECTED_COMMIT" HEAD -- "${inputs[@]/#/:(glob)}"; then
+            echo "dev moved from $EXPECTED_COMMIT to $actual and changed the feed's inputs or the Worker; not deploying. The run for that change deploys it." >&2
+            git diff --name-only "$EXPECTED_COMMIT" HEAD -- "${inputs[@]/#/:(glob)}" >&2
+            exit 1
+          fi
+          echo "Deploying the feed built from $EXPECTED_COMMIT with the Worker files at $actual (the same)."
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

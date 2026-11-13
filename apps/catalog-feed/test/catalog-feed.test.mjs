@@ -3,7 +3,7 @@
 // generate, a dry run never deploys, and an invalid feed stops the run.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -107,7 +107,8 @@ test('the deploy job deploys exactly the feed generate validated, installing no 
   const release = stepIndex(deploy, (step) => /secrets\./.test(text(step)), 'deploy');
   assert.ok(checkoutIndex < commit && commit < install, 'the commit is checked before anything is installed');
   assert.ok(download < verify && verify < release && install < release, 'the checks come before the deploy');
-  assert.equal(steps.slice(0, release).some((step) => /npm run|catalog-feed\.mjs/.test(text(step))), false);
+  // The commit check names scripts/catalog-feed.mjs as a path to compare; no step runs it or an npm script.
+  assert.equal(steps.slice(0, release).some((step) => /npm run|node\s+\S*catalog-feed\.mjs/.test(step.run ?? '')), false);
 });
 
 test('the generate job validates the feed and builds the Worker before handing the feed on', () => {
@@ -213,21 +214,48 @@ test('no checkout takes its ref from an event or a job output', () => {
   assert.equal(unnamed.if, "github.event_name == 'pull_request' || inputs.dry_run");
 });
 
-test('the deploy job refuses a checkout that is not the commit generate built', () => {
+test('the deploy job deploys while dev keeps the inputs generate built from, and refuses once they change', () => {
   const check = deploy.steps.find(runs('git rev-parse HEAD'));
+  const checkout = deploy.steps.find(uses('actions/checkout'));
+  assert.equal(checkout.with['fetch-depth'], 0, 'the history between the built commit and dev is there');
+  // The paths it compares are the ones that start a run, so a change it refuses always has its own run.
+  const listed = [...check.run.split('inputs=(')[1].split(')')[0].matchAll(/'([^']+)'/g)].map(([, glob]) => glob);
+  assert.deepEqual(listed, workflow.on.push.paths);
   const dir = mkdtempSync(path.join(tmpdir(), 'catalog-feed-commit-'));
   try {
     const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: dir, encoding: 'utf8' }).trim();
-    git('init', '-q');
-    git('commit', '-q', '--allow-empty', '-m', 'built');
-    const built = git('rev-parse', 'HEAD');
+    const commit = (file, content) => {
+      mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      writeFileSync(path.join(dir, file), content);
+      git('add', '-A');
+      git('commit', '-q', '-m', file);
+    };
     const runCheck = (expected) => spawnSync('bash', ['-e', '-c', check.run], { cwd: dir, encoding: 'utf8', env: { ...process.env, EXPECTED_COMMIT: expected } });
-    assert.equal(runCheck(built).status, 0, 'the same commit deploys');
-    git('commit', '-q', '--allow-empty', '-m', 'dev moved');
-    const moved = runCheck(built);
-    assert.equal(moved.status, 1, 'dev moved after generate');
-    assert.match(moved.stderr, /not deploying/);
-    assert.equal(runCheck('').status, 1, 'no commit from generate');
+    git('init', '-q', '-b', 'dev');
+    for (const file of ['apps/catalog-feed/wrangler.jsonc', 'packages/catalog/src/index.ts', 'packages/timer/package.json', 'packages/timer/src/x.ts', 'package-lock.json']) commit(file, 'built');
+    const built = git('rev-parse', 'HEAD');
+    assert.equal(runCheck(built).status, 0, 'dev has not moved');
+    // Another loop's pushes, which start no run of this workflow.
+    commit('packages/timer/src/x.ts', 'other loop');
+    commit('packages/timer/src/y.ts', 'other loop');
+    commit('package-lock.json', 'other loop');
+    const unrelated = runCheck(built);
+    assert.equal(unrelated.status, 0, `dev moved outside the feed's paths: ${unrelated.stderr}`);
+    for (const [file, label] of [['apps/catalog-feed/wrangler.jsonc', 'the Worker'], ['packages/catalog/src/index.ts', 'the catalog'], ['packages/timer/package.json', 'a release target']]) {
+      git('reset', '-q', '--hard', built);
+      commit(file, 'changed');
+      const moved = runCheck(built);
+      assert.equal(moved.status, 1, `dev changed ${label}`);
+      assert.match(moved.stderr, /not deploying/);
+      assert.match(moved.stderr, new RegExp(file.replaceAll('.', '\\.')));
+    }
+    // Built from a commit dev no longer has (a rewritten dev), from nothing, or from something that is not a commit ID.
+    git('reset', '-q', '--hard', built);
+    git('checkout', '-q', '--orphan', 'other');
+    commit('README.md', 'rewritten');
+    const rewritten = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'dev');
+    for (const expected of [rewritten, '', 'HEAD', `--${built}`]) assert.equal(runCheck(expected).status, 1, `built from '${expected}'`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
