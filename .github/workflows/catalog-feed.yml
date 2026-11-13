@@ -1,0 +1,177 @@
+name: Catalog feed
+run-name: Catalog feed${{ (github.event_name == 'pull_request' || inputs.dry_run) && ' (dry run)' || '' }}
+
+# Keeps the hosted subset.catalog@1 feed (docs/catalog-feed.md) current: builds it with scripts/catalog-feed.mjs and
+# deploys it as the static asset catalog/v1.json of the subset-catalog-feed Worker (apps/catalog-feed) on the 21n-dev
+# Cloudflare account, served at https://subset.21n.dev/catalog/v1.json.
+#
+# The deployed feed is always built from dev's head, whatever started the run, so a push to main or a release event
+# never deploys an older catalog than dev's. A dry run (a pull request that touches the feed, or workflow_dispatch
+# with dry_run) builds the commit it was started on, validates the feed and builds the Worker with
+# `wrangler deploy --dry-run`, and deploys nothing.
+#
+# Two jobs keep repository code away from the Cloudflare token. `generate` has no environment or secrets and only a
+# read-only GitHub token: it installs, builds and runs the generator, validates the feed, and hands the file on as
+# an artifact with its SHA-256. `deploy` runs in the `catalog-feed` environment, which holds CLOUDFLARE_API_TOKEN; it
+# installs only wrangler (no install scripts), checks the artifact against that SHA-256 and deploys it. A feed that
+# fails validation fails `generate`, so `deploy` never runs.
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'packages/catalog/**'
+      - 'native/*/macos-release.json'
+      - 'release-packages.json'
+      # The generator, the Worker and this workflow: a change to how the feed is built or served republishes it.
+      - 'scripts/catalog-feed.mjs'
+      - 'apps/catalog-feed/**'
+      - '.github/workflows/catalog-feed.yml'
+  # A dry run for each pull request that touches the feed; the same paths as push.
+  pull_request:
+    paths:
+      - 'packages/catalog/**'
+      - 'native/*/macos-release.json'
+      - 'release-packages.json'
+      - 'scripts/catalog-feed.mjs'
+      - 'apps/catalog-feed/**'
+      - '.github/workflows/catalog-feed.yml'
+  # Beta channels come from GitHub pre-releases. A release published, edited or deleted by a person fires `release`;
+  # one created with a workflow's token (release-macos.yml's beta pre-releases) fires no event, so a finished
+  # macOS release run starts this workflow too.
+  release:
+    types: [published, edited, deleted]
+  workflow_run:
+    workflows: ['Release macOS app']
+    types: [completed]
+  # Tools' versions come from npm dist-tags, which change without a commit here.
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and validate the feed and the Worker without deploying'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Deploys run one at a time, and GitHub replaces a pending run with a newer one, so the last deploy is the newest
+# build of dev. Each dry run has its own group and never waits for or replaces a deploy.
+concurrency:
+  group: catalog-feed-${{ (github.event_name == 'pull_request' || inputs.dry_run) && format('dry-run-{0}', github.run_id) || 'deploy' }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    # A failed release run published nothing.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.feed.outputs.commit }}
+      sha256: ${{ steps.feed.outputs.sha256 }}
+    steps:
+      # Only dev and main deploy from workflow_dispatch; other branches can make dry runs.
+      - name: Check the request
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run && github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main'
+        run: |
+          echo "Only dev or main can deploy the feed; start a dry run to check $GITHUB_REF." >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ (github.event_name == 'pull_request' || inputs.dry_run) && github.sha || 'dev' }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build --workspace=@subset.dev/catalog
+
+      - name: Build the feed
+        id: feed
+        env:
+          # The run's own read-only token (contents: read), not a stored secret: an anonymous releases-list request
+          # from a shared runner address is easily rate limited. The generator sends it only to api.github.com.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          feed=apps/catalog-feed/public/catalog/v1.json
+          mkdir -p "$(dirname "$feed")"
+          node scripts/catalog-feed.mjs --out "$feed"
+          summary="$(node apps/catalog-feed/check-feed.mjs "$feed")"
+          echo "$summary"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$feed" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "Built from $(git rev-parse HEAD): $summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the Worker without deploying
+        working-directory: apps/catalog-feed
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx --no-install wrangler deploy --dry-run
+
+      - name: Hand the feed to the deploy job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: catalog-feed
+          path: apps/catalog-feed/public/catalog/v1.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  deploy:
+    needs: generate
+    if: github.event_name != 'pull_request' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: catalog-feed
+      url: https://subset.21n.dev/catalog/v1.json
+    permissions:
+      contents: read
+    steps:
+      # The commit the feed was built from, for its Worker configuration and headers.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.generate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Download the feed
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: catalog-feed
+          path: apps/catalog-feed/public/catalog
+
+      # Deploys exactly the bytes `generate` validated.
+      - name: Check the feed
+        env:
+          EXPECTED_SHA256: ${{ needs.generate.outputs.sha256 }}
+        run: echo "$EXPECTED_SHA256  apps/catalog-feed/public/catalog/v1.json" | sha256sum --check --strict
+
+      # Only wrangler and its dependencies, from the lockfile, with no install scripts: the token's job runs no
+      # repository build or package install code. An assets-only Worker needs no bundler.
+      - name: Install wrangler
+        run: npm ci --workspace=@subset.dev/catalog-feed --include-workspace-root=false --ignore-scripts --no-audit --no-fund
+
+      - name: Deploy
+        working-directory: apps/catalog-feed
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx --no-install wrangler deploy
