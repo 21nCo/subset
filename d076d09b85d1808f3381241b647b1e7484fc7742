@@ -1,0 +1,93 @@
+packages/mgraph-contracts/scripts/write-schemas.mjs
+  s_e41552db7a7823::t_fcc7e800abbe76 1-6
+packages/mgraph-store/tsconfig.json
+  s_e41552db7a7823::t_fcc7e800abbe76 1-13
+packages/mgraph-contracts/src/index.ts
+  s_e41552db7a7823::t_fcc7e800abbe76 1-387
+README.md
+  s_e41552db7a7823::t_fcc7e800abbe76 40
+  s_e41552db7a7823::t_64cf3a0c4d80e1 59
+packages/mgraph-contracts/test/contracts.test.mjs
+  s_e41552db7a7823::t_fcc7e800abbe76 1-296
+native/mgraph/test_integration_preflight.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-131
+native/mgraph/fixture_windows.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-203
+packages/mgraph-store/test/store.test.mjs
+  s_e41552db7a7823::t_fcc7e800abbe76 1-1209
+native/mgraph/bundle_process.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-330
+scripts/check-workspaces.mjs
+  s_e41552db7a7823::t_fcc7e800abbe76 65-66
+native/mgraph/test_capture_boundaries.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-290
+native/mgraph/Sources/MGraphCapture/main.swift
+  s_e41552db7a7823::t_fcc7e800abbe76 1-214
+package.json
+  s_e41552db7a7823::t_fcc7e800abbe76 7-8
+  s_e41552db7a7823::t_64cf3a0c4d80e1 11-13
+packages/mgraph-store/package.json
+  s_e41552db7a7823::t_fcc7e800abbe76 1-29
+native/mgraph/Info.plist
+  s_e41552db7a7823::t_fcc7e800abbe76 1-16
+docs/architecture.md
+  s_e41552db7a7823::t_fcc7e800abbe76 9,12,26
+native/mgraph/Package.swift
+  s_e41552db7a7823::t_fcc7e800abbe76 1-13
+native/mgraph/Tests/CaptureCoreTests/CaptureCoreTests.swift
+  s_e41552db7a7823::t_fcc7e800abbe76 1-298
+packages/mgraph-contracts/README.md
+  s_e41552db7a7823::t_fcc7e800abbe76 1-51
+native/mgraph/check-lifetime.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-176
+native/mgraph/desktop_session.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-102
+packages/mgraph-store/README.md
+  s_e41552db7a7823::t_fcc7e800abbe76 1-52
+native/mgraph/fixture-matrix.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-202
+native/mgraph/test_bundle_process.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-381
+native/mgraph/build-app.sh
+  s_e41552db7a7823::t_fcc7e800abbe76 1-31
+packages/mgraph-store/src/index.ts
+  s_e41552db7a7823::t_fcc7e800abbe76 1-952
+native/mgraph/test_lifetime.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-274
+native/mgraph/test_menu_check.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-235
+native/mgraph/check-menu.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-155
+native/mgraph/check-native.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-111
+native/mgraph/README.md
+  s_e41552db7a7823::t_fcc7e800abbe76 1-117
+native/mgraph/Sources/CaptureCore/CaptureCollector.swift
+  s_e41552db7a7823::t_fcc7e800abbe76 1-569
+native/mgraph/.gitignore
+  s_e41552db7a7823::t_fcc7e800abbe76 1-3
+native/mgraph/test_desktop_session.py
+  s_e41552db7a7823::t_fcc7e800abbe76 1-92
+packages/mgraph-contracts/package.json
+  s_e41552db7a7823::t_fcc7e800abbe76 1-28
+packages/mgraph-contracts/tsconfig.json
+  s_e41552db7a7823::t_fcc7e800abbe76 1-13
+package-lock.json
+  s_e41552db7a7823::t_c801d437ad0264 15,430-437,774-776,795-829,955-978,1049-1055,1474-1483,2041-2049,2066-2093
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d076d09b85d1808f3381241b647b1e7484fc7742",
+  "prompts": {},
+  "sessions": {
+    "s_e41552db7a7823": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ccf55d8d-6176-4456-a8a3-555947c35bfe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

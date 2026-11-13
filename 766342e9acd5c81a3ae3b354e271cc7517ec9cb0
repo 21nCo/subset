@@ -1,0 +1,30 @@
+native/mgraph/README.md
+  h_a39f9495f9ec1d 5,13,22,39-40,48,51,53
+native/mgraph/Sources/CaptureCore/CaptureCollector.swift
+  h_a39f9495f9ec1d 5,13,41-138,154,157-190,195,197-199,202-204,206-209,214-220,223,227-228,231,241,247-248,252,259
+native/mgraph/Sources/MGraphCapture/main.swift
+  h_a39f9495f9ec1d 13-19,43-44,53-54,68,74-88,91-94
+native/mgraph/Tests/CaptureCoreTests/CaptureCoreTests.swift
+  h_a39f9495f9ec1d 1,4-14,26-63
+native/mgraph/bundle_process.py
+  h_a39f9495f9ec1d 1-103
+native/mgraph/check-menu.py
+  h_a39f9495f9ec1d 9-10,19,21-25,35-49,53-70
+native/mgraph/check-native.py
+  h_a39f9495f9ec1d 11,28-30,35-36,50-54
+native/mgraph/fixture-matrix.py
+  h_a39f9495f9ec1d 6,11-12,25-31,43,49-52,55,58-69,71-111
+native/mgraph/test_bundle_process.py
+  h_a39f9495f9ec1d 1-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "766342e9acd5c81a3ae3b354e271cc7517ec9cb0",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
