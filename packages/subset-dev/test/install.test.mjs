@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -67,7 +67,7 @@ function fakeFetch(images, { status = 200, redirect } = {}) {
 }
 
 // Runs `subset install` in this process with the stand-in tools; returns { code, stdout, stderr }.
-async function install(c, args, { fetch, platform = 'darwin', signals = new EventEmitter(), toolSet = tools } = {}) {
+async function install(c, args, { fetch, platform = 'darwin', signals = new EventEmitter(), toolSet = tools, clock = () => NOW } = {}) {
   let stdout = '';
   let stderr = '';
   const previous = { TMPDIR: process.env.TMPDIR, STUB_LOG: process.env.STUB_LOG };
@@ -79,6 +79,7 @@ async function install(c, args, { fetch, platform = 'darwin', signals = new Even
       platform,
       home: c.home,
       now: NOW,
+      clock,
       fetch,
       tools: toolSet,
       signals,
@@ -140,28 +141,39 @@ test('installs the live app in the /Applications stand-in with its receipt', { s
   const image = breaksImage();
   feed(c, { live: { image }, beta: { image } });
   const fetch = fakeFetch({ [LIVE_URL]: image });
-  const result = await install(c, ['breaks'], { fetch });
+  // installedAt is when the receipt is written, after every check, not when the command started.
+  const stamped = [];
+  const clock = () => {
+    stamped.push(steps(c).map((entry) => entry.step));
+    return NOW + 5000;
+  };
+  const result = await install(c, ['breaks'], { fetch, clock });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout, `Installed Breaks 0.1.0 in ${path.join(c.system, 'Breaks.app')}\n`);
   assert.deepEqual(fetch.calls, [LIVE_URL]);
+  assert.equal(stamped.length, 1);
+  assert.equal(stamped[0].at(-1), 'sw_vers', 'stamped after the last check');
   assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
   // The image's permissions, not the staging folder's 0700.
   assert.equal(statSync(path.join(c.system, 'Breaks.app')).mode & 0o777, 0o755 & ~process.umask());
   const written = JSON.parse(readFileSync(receipt(c), 'utf8'));
-  assert.deepEqual(written, { schema: 'subset.receipt@1', channel: 'live', version: '0.1.0', sha256: sha256(image), installedAt: '2026-11-13T12:00:00Z', path: '/Applications/Breaks.app' });
+  assert.deepEqual(written, { schema: 'subset.receipt@1', channel: 'live', version: '0.1.0', sha256: sha256(image), installedAt: '2026-11-13T12:00:05Z', path: '/Applications/Breaks.app' });
   assert.deepEqual(validateReceipt(written), []);
   assert.deepEqual(readdirSync(c.tmp), []);
-  // The tools ran in order, on the staged copy, with the image attached read-only and hidden in the private folder,
-  // and the image was detached by its device, then checked to be gone.
+  // The tools ran in order, on the staged copy, with the image attached read-only and hidden in the private folder;
+  // the copy's flags and ACLs were cleared without following links, and the image was detached by its device, then
+  // checked to be gone.
   const log = steps(c);
-  assert.deepEqual(log.map((entry) => entry.step), ['hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'sw_vers', 'hdiutil-detach', 'hdiutil-info']);
+  assert.deepEqual(log.map((entry) => entry.step), ['hdiutil-attach', 'ditto', 'find-chflags', 'find-chmod', 'codesign-verify', 'codesign-display', 'spctl', 'sw_vers', 'hdiutil-detach', 'hdiutil-info']);
   assert.match(log[0].args[5], new RegExp(`^${c.tmp}/subset-install-[^/]+/mnt$`));
-  assert.match(log[6].args[1], /^\/dev\/disk\d+$/);
+  assert.match(log[8].args[1], /^\/dev\/disk\d+$/);
   assertDetached(c);
-  const staged = log[2].args[3];
+  const staged = log[4].args[3];
   assert.match(path.basename(staged), /^\.Breaks\.app\.subset-install-[0-9a-f]{12}$/);
   assert.equal(path.dirname(staged), c.system);
   assert.equal(log[1].args[1], staged);
+  assert.deepEqual(log[2].args, ['-P', staged, '-exec', '/usr/bin/chflags', '-h', 'nouchg,nouappnd', '{}', '+']);
+  assert.deepEqual(log[3].args, ['-P', staged, '-exec', '/bin/chmod', '-h', '-N', '{}', '+']);
 });
 
 test('installs a beta, checking its build, with a beta receipt', { skip }, async () => {
@@ -377,8 +389,8 @@ function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.syst
 }
 
 // Every point between two steps where a signal can arrive before the rename: during the download (between its chunks),
-// and while each tool runs, including plutil reading the staged copy's Info.plist.
-const boundaries = ['download', 'hdiutil-attach', 'ditto', 'codesign-verify', 'codesign-display', 'spctl', 'plutil', 'sw_vers'];
+// and while each tool runs, including find clearing the copy's flags and ACLs and plutil reading its Info.plist.
+const boundaries = ['download', 'hdiutil-attach', 'ditto', 'find-chflags', 'find-chmod', 'codesign-verify', 'codesign-display', 'spctl', 'plutil', 'sw_vers'];
 for (const boundary of boundaries) {
   for (const signal of boundary === 'ditto' ? ['SIGTERM', 'SIGINT', 'SIGHUP'] : ['SIGTERM']) {
     test(`${signal} at ${boundary} leaves the destination unchanged and no receipt`, { skip }, async () => {
@@ -490,3 +502,100 @@ test('with the real tools, refuses an ad-hoc signed app at the team check', { sk
   assert.deepEqual(readdirSync(c.tmp), []);
   assert.equal(execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8' }).includes(c.tmp), false, 'the image is detached');
 });
+
+// ACLs and user file flags, with the real macOS tools: ditto copies them from the image, and a deny-delete ACL or an
+// immutable (uchg) or append-only (uappnd) flag would keep a refused copy from being removed.
+const macOnly = (process.platform !== 'darwin' && 'needs macOS') || (process.getuid?.() === 0 && 'root ignores ACLs');
+const protections = (file) => execFileSync('/bin/ls', ['-ledO', file], { encoding: 'utf8' });
+// Clears the flags and ACLs the test set under `dir`, without following links, so the test folders can be removed.
+const unprotect = (dir) => {
+  for (const change of [['/usr/bin/chflags', '-h', 'nouchg,nouappnd'], ['/bin/chmod', '-h', '-N']]) {
+    spawnSync('/usr/bin/find', ['-P', dir, '-exec', ...change, '{}', '+'], { stdio: 'ignore' });
+  }
+};
+
+// A read-write disk image with one volume, which `fill(volume)` fills while it is attached; returns its bytes.
+function protectedImage(c, fill) {
+  const dmg = path.join(c.base, `protected-${(count += 1)}.dmg`);
+  const mount = path.join(c.base, `fill-${count}`);
+  mkdirSync(mount);
+  execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-size', '8m', '-fs', 'HFS+', '-volname', 'Breaks', dmg]);
+  execFileSync('/usr/bin/hdiutil', ['attach', '-quiet', '-nobrowse', '-noautoopen', '-mountpoint', mount, dmg]);
+  try {
+    fill(mount);
+  } finally {
+    execFileSync('/usr/bin/hdiutil', ['detach', '-quiet', mount]);
+  }
+  return readFileSync(dmg);
+}
+
+// Outside files the image's app links to, each with a deny-delete ACL and the immutable flag.
+function outsideTargets(c) {
+  const dir = path.join(c.base, 'outside');
+  mkdirSync(dir);
+  const file = path.join(dir, 'target.txt');
+  writeFileSync(file, 'outside');
+  execFileSync('/bin/chmod', ['+a', 'everyone deny delete', file]);
+  execFileSync('/usr/bin/chflags', ['uchg', file]);
+  execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', dir]);
+  return { dir, file, before: [protections(file), protections(dir)] };
+}
+
+for (const [name, files, expected] of [
+  // ditto copies the bundle; its copy is cleared and then refused at the signature check (it is unsigned).
+  [
+    'a folder with a deny delete_child ACL, uchg and uappnd files and protected links',
+    (contents, outside) => {
+      mkdirSync(path.join(contents, 'Locked', 'Deeper'), { recursive: true });
+      writeFileSync(path.join(contents, 'Locked', 'immutable'), 'x');
+      writeFileSync(path.join(contents, 'Locked', 'Deeper', 'append-only'), 'x');
+      symlinkSync(outside.file, path.join(contents, 'Locked', 'to-file'));
+      symlinkSync(outside.dir, path.join(contents, 'to-folder'));
+      execFileSync('/usr/bin/chflags', ['uchg', path.join(contents, 'Locked', 'immutable')]);
+      execFileSync('/usr/bin/chflags', ['uappnd', path.join(contents, 'Locked', 'Deeper', 'append-only')]);
+      execFileSync('/usr/bin/chflags', ['-h', 'uchg', path.join(contents, 'Locked', 'to-file')]);
+      execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'Locked', 'Deeper')]);
+      execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'Locked')]);
+    },
+    /the signature check failed/
+  ],
+  // ditto stops at a file with a deny delete ACL, after copying the protected folder before it: the partial copy is
+  // what the cleanup removes.
+  [
+    'a deny delete file that stops ditto part-way',
+    (contents) => {
+      mkdirSync(path.join(contents, 'A-locked'));
+      writeFileSync(path.join(contents, 'A-locked', 'immutable'), 'x');
+      writeFileSync(path.join(contents, 'Z-denied'), 'x');
+      execFileSync('/usr/bin/chflags', ['uchg', path.join(contents, 'A-locked', 'immutable')]);
+      execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'A-locked')]);
+      execFileSync('/bin/chmod', ['+a', 'everyone deny delete', path.join(contents, 'Z-denied')]);
+    },
+    /the (copy step|signature check) failed/
+  ]
+]) {
+  test(`with the real tools, a refused app with ${name} is removed, and what it links to is untouched`, { skip: macOnly }, async () => {
+    const c = setup();
+    try {
+      const outside = outsideTargets(c);
+      const image = protectedImage(c, (volume) => {
+        const contents = path.join(volume, 'Breaks.app', 'Contents');
+        mkdirSync(contents, { recursive: true });
+        writeFileSync(path.join(contents, 'Info.plist'), '<plist version="1.0"><dict/></plist>\n');
+        files(contents, outside);
+      });
+      feed(c, { live: { image } });
+      const result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), toolSet: INSTALL_TOOLS });
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, expected);
+      assert.doesNotMatch(result.stderr, /warning/);
+      assert.deepEqual(readdirSync(c.system), [], 'no staged copy is left');
+      assert.equal(existsSync(receipt(c)), false);
+      assert.deepEqual(readdirSync(c.tmp), []);
+      assert.deepEqual([protections(outside.file), protections(outside.dir)], outside.before, 'the link targets keep their flags and ACLs');
+      assert.match(outside.before[0], /uchg[\s\S]*deny delete/);
+    } finally {
+      unprotect(c.base);
+    }
+  });
+}

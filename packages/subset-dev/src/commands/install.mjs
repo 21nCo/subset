@@ -87,20 +87,21 @@ function downgrade(copies, release, beta) {
   return undefined;
 }
 
-// The subset.receipt@1 receipt for the install, or null when the destination is not /Applications or ~/Applications
-// (or a path the receipt schema cannot hold, such as a home folder outside /Users).
-function receiptFor({ app, release, beta, folder, home, now }) {
+// The subset.receipt@1 receipt for the install, { file, document() }, or null when the destination is not
+// /Applications or ~/Applications (or a path the receipt schema cannot hold, such as a home folder outside /Users).
+// document() stamps installedAt with `clock()` when it is called, just before the app is renamed into place.
+function receiptFor({ app, release, beta, folder, home, now, clock }) {
   if (folder === null) return null;
-  const document = {
+  const document = (at) => ({
     schema: 'subset.receipt@1',
     channel: beta ? 'beta' : 'live',
     version: release.version,
     ...(beta ? { build: release.build } : {}),
     sha256: release.sha256,
-    installedAt: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    installedAt: new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     path: path.posix.join(folder.path, `${app.appName}.app`)
-  };
-  return validateReceipt(document).length === 0 ? { file: receiptFile(home, app.bundleId), document } : null;
+  });
+  return validateReceipt(document(now)).length === 0 ? { file: receiptFile(home, app.bundleId), document: () => document(clock()) } : null;
 }
 
 const failure = (error) => {
@@ -112,9 +113,10 @@ const failure = (error) => {
 /**
  * Runs `subset install <args>`, writing to `stdout` and `stderr`, and returns the exit code: 0 when the app is
  * installed, 1 when it is not, 2 for a usage error, or 128 + the signal number when a signal stopped it. `signals`
- * is where SIGINT, SIGTERM and SIGHUP are caught while the app is being installed (the process).
+ * is where SIGINT, SIGTERM and SIGHUP are caught while the app is being installed (the process). `now` is when the
+ * command started (for the catalog cache) and `clock()` the time the receipt's installedAt records.
  */
-export async function runInstall(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), tools = INSTALL_TOOLS, signals = process }) {
+export async function runInstall(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), clock = Date.now, tools = INSTALL_TOOLS, signals = process }) {
   const options = parseInstallArgs(args);
   if (options.error) {
     stderr.write(`subset: ${options.error}\n`);
@@ -161,7 +163,7 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
   const handlers = Object.keys(SIGNALS).map((signal) => [signal, () => stop(signal)]);
   for (const [signal, handler] of handlers) signals.on(signal, handler);
   try {
-    const receipt = receiptFor({ app, release, beta: options.beta, folder: where.folder, home, now });
+    const receipt = receiptFor({ app, release, beta: options.beta, folder: where.folder, home, now, clock });
     const installed = await installApp({
       app,
       release,

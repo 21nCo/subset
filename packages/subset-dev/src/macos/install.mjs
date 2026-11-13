@@ -1,16 +1,18 @@
 // Installs one Subset Mac app from the catalog feed, only after proving it is ours (SET-230):
 //   1. download the channel's DMG over HTTPS into a new private folder (mkdtemp, mode 0700) and check its SHA-256;
 //   2. attach it read-only and hidden, and require exactly one .app at the image root, named <appName>.app;
-//   3. copy it with ditto to a hidden staging name in the destination folder;
+//   3. copy it with ditto to a hidden staging name in the destination folder, and clear the ACLs and user file flags
+//      (uchg, uappnd) ditto copied from the image, so that nothing in the copy is protected against removal;
 //   4. verify the staged copy (verify.mjs);
 //   5. rename it to <appName>.app (never over an existing one) and write the receipt, then detach the image and remove
 //      the private folder.
 // Any failed step, and a SIGINT, SIGTERM or SIGHUP before step 5 (the caller aborts `signal`), removes the staged copy
 // and writes no receipt. Step 5 is synchronous, so no signal handler runs between the rename and the receipt. A tool
 // that is running when the install is aborted is stopped, and the cleanup starts only once it has exited (runTool).
-// The cleanup itself is never aborted: it detaches the image by its device, found both in hdiutil attach's output and
-// in hdiutil info (an attach stopped part-way prints nothing), and removes the private folder only when the image is
-// no longer attached.
+// The cleanup itself is never aborted: it clears the staged copy's ACLs and user flags again (a copy stopped part-way
+// was not cleared yet), makes its folders writable and removes it; it detaches the image by its device, found both in
+// hdiutil attach's output and in hdiutil info (an attach stopped part-way prints nothing), and removes the private
+// folder only when the image is no longer attached.
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -21,7 +23,14 @@ import { runTool, VerificationError, VERIFY_TOOLS, verifyApp } from './verify.mj
 
 /** Every download URL starts with this (catalog decision); the feed schema enforces it too. */
 export const DOWNLOAD_PREFIX = 'https://github.com/21nCo/subset/releases/download/';
-export const INSTALL_TOOLS = Object.freeze({ ...VERIFY_TOOLS, hdiutil: '/usr/bin/hdiutil', ditto: '/usr/bin/ditto' });
+export const INSTALL_TOOLS = Object.freeze({
+  ...VERIFY_TOOLS,
+  hdiutil: '/usr/bin/hdiutil',
+  ditto: '/usr/bin/ditto',
+  find: '/usr/bin/find',
+  chflags: '/usr/bin/chflags',
+  chmod: '/bin/chmod'
+});
 export const MAX_IMAGE_BYTES = 1024 ** 3;
 const MAX_REDIRECTS = 5;
 const STALL_MS = 60_000;
@@ -29,6 +38,8 @@ const COPY_TIMEOUT_MS = 10 * 60 * 1000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const DETACH_ATTEMPTS = 3;
 const DETACH_RETRY_MS = 1000;
+const CLEANUP_TOOL_TIMEOUT_MS = 60_000;
+const REMOVE_PASSES = 3;
 
 /**
  * A step refused the app or failed: `check` names it (destination, download, checksum, image, copy, verify, install,
@@ -174,32 +185,64 @@ function removeWork(work, mountRoot) {
   }
 }
 
-// Removes the installer's staged copy. ditto keeps the image's permissions, so a folder in it can be read-only, and
-// removing what is in a folder needs write permission on it: each folder (never a symbolic link) is first made
-// writable by its owner. Throws when it cannot be removed.
-function removeStaged(staged) {
-  const pending = [staged];
+// Clears the user file flags that block removal (uchg, uappnd) and then the ACLs (a deny delete or delete_child entry)
+// of everything in `tree`, which ditto copies from the image. find -P walks the tree without following symbolic links,
+// and chflags -h and chmod -h change a symbolic link itself, never what it points to (chmod -R -N would clear the ACL
+// of a file a link points to). Resolves the first failure as "<tool>: <last line>", or undefined.
+async function clearProtections(tree, tools, options) {
+  for (const [tool, change] of [
+    [tools.chflags, ['-h', 'nouchg,nouappnd']],
+    [tools.chmod, ['-h', '-N']]
+  ]) {
+    const run = await runTool(tools.find, ['-P', tree, '-exec', tool, ...change, '{}', '+'], options);
+    if (run.code !== 0) return `${path.basename(tool)}: ${run.stderr.trim().split('\n').at(-1) || `exit ${run.code}`}`;
+  }
+  return undefined;
+}
+
+// Makes each folder in `tree` (never a symbolic link) writable and searchable by its owner, as far as it can: ditto
+// keeps the image's permissions, so a folder can be read-only, and removing what is in a folder needs write
+// permission on it.
+function makeFoldersWritable(tree) {
+  const pending = [tree];
   while (pending.length > 0) {
     const dir = pending.pop();
-    let stat;
     try {
-      stat = lstatSync(dir);
-    } catch (error) {
-      if (error.code === 'ENOENT') continue;
-      throw error;
+      const stat = lstatSync(dir);
+      if (!stat.isDirectory()) continue;
+      if ((stat.mode & 0o700) !== 0o700) chmodSync(dir, (stat.mode & 0o7777) | 0o700);
+      for (const name of readdirSync(dir)) pending.push(path.join(dir, name));
+    } catch {
+      // A folder still protected is reached on the next pass, once its flags and ACL are cleared.
     }
-    if (!stat.isDirectory()) continue;
-    if ((stat.mode & 0o700) !== 0o700) chmodSync(dir, (stat.mode & 0o7777) | 0o700);
-    for (const name of readdirSync(dir)) pending.push(path.join(dir, name));
   }
-  rmSync(staged, { recursive: true, force: true });
+}
+
+// Removes the installer's staged copy, whatever ditto copied from the image: user flags and ACLs are cleared and
+// folders made writable, then the copy is removed, in up to REMOVE_PASSES passes (a folder that could not be listed
+// in one pass can be in the next). Not aborted. Throws the last failure when it cannot be removed.
+async function removeStaged(staged, tools) {
+  let failure;
+  for (let pass = 0; pass < REMOVE_PASSES; pass += 1) {
+    if (!exists(staged)) return;
+    await clearProtections(staged, tools, { timeout: CLEANUP_TOOL_TIMEOUT_MS }).catch(() => {});
+    makeFoldersWritable(staged);
+    try {
+      rmSync(staged, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
 }
 
 /**
  * Downloads, verifies and installs `app` (a feed app) from `release` (its live or beta channel) into the folder `dir`
- * as <appName>.app. `receipt` is { file, document } to write with the rename, or null. `signal` aborts the install
- * with its reason (an InterruptedError) before the rename; once the app is renamed into place, an abort changes nothing
- * and the install resolves. `log` gets progress lines and `warn` what could not be cleaned up. Resolves { path };
+ * as <appName>.app. `receipt` is { file, document } to write with the rename, or null; document() makes the receipt
+ * at that moment, so its installedAt is when the app is installed. `signal` aborts the install with its reason (an
+ * InterruptedError) before the rename; once the app is renamed into place, an abort changes nothing and the install
+ * resolves. `log` gets progress lines and `warn` what could not be cleaned up. Resolves { path };
  * rejects with an InstallError, a VerificationError (verify.mjs) or the abort reason, leaving no staged copy and no
  * receipt behind.
  */
@@ -245,6 +288,10 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     const copy = await runTool(tools.ditto, [source, staged], { signal, timeout: COPY_TIMEOUT_MS });
     checkpoint();
     if (copy.code !== 0) throw new InstallError('copy', `ditto could not copy ${app.appName}.app into ${dir} (${copy.stderr.trim().split('\n').at(-1) || `exit ${copy.code}`})`);
+    // The installed app carries no deny-delete ACL or immutable flag from the image, so it can be updated and removed.
+    const protectedBy = await clearProtections(staged, tools, { signal });
+    checkpoint();
+    if (protectedBy) throw new InstallError('copy', `the ACLs and file flags of the copy in ${dir} cannot be cleared (${protectedBy})`);
     // ditto keeps the staging folder's 0700; the installed app gets the image's permissions, never group- or
     // world-writable, once it has passed verification (a read-only copy would be harder to remove).
     const mode = lstatSync(source).mode & 0o755;
@@ -263,7 +310,7 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
       try {
         mkdirSync(path.dirname(receipt.file), { recursive: true });
         receiptTemporary = `${receipt.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-        writeFileSync(receiptTemporary, `${JSON.stringify(receipt.document, null, 2)}\n`, { mode: 0o644, flag: 'wx' });
+        writeFileSync(receiptTemporary, `${JSON.stringify(receipt.document(), null, 2)}\n`, { mode: 0o644, flag: 'wx' });
       } catch (error) {
         if (receiptTemporary) rmSync(receiptTemporary, { force: true });
         throw new InstallError('receipt', `the receipt ${receipt.file} cannot be written (${error.code ?? error.message})`);
@@ -307,7 +354,7 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     // A signal from here on changes nothing: the caller's handlers stay in place, and the tools below are not aborted.
     if (stagedCreated && !installed) {
       try {
-        removeStaged(staged);
+        await removeStaged(staged, tools);
       } catch (error) {
         warn(`the staged copy ${staged} could not be removed (${error.code ?? error.message}); remove it by hand`);
       }

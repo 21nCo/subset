@@ -1,5 +1,5 @@
-// Stand-ins for the macOS tools `subset install` asks (hdiutil, ditto, codesign, spctl, sw_vers), so its tests run on
-// Linux. A stand-in disk image is JSON: { volumes: [{ "<path in the volume>": "<file contents>" }], modes?: { "<path in
+// Stand-ins for the macOS tools `subset install` asks (hdiutil, ditto, find, codesign, spctl, sw_vers), so its tests
+// run on Linux. find runs the real find (with the real chflags and chmod) on macOS and does nothing on Linux. A stand-in disk image is JSON: { volumes: [{ "<path in the volume>": "<file contents>" }], modes?: { "<path in
 // each volume>": <mode> } }. The stand-in hdiutil attaches an image as one device (/dev/disk<n>, a slice per volume),
 // recorded in the folder `attached` beside the tools, which `hdiutil info` lists and `hdiutil detach <device>`
 // removes; attachedImages() reads it. A stand-in app's
@@ -119,6 +119,17 @@ if (tool === 'hdiutil' && args[0] === 'attach') {
     while (fs.readdirSync(barrier).length < Number(process.env.STUB_BARRIER_COUNT) && Date.now() < until) sleep(20);
   }
   console.log(process.env.STUB_MACOS_VERSION || '15.1');
+} else if (tool === 'find') {
+  // find -P <copy> -exec <chflags or chmod> -h <change> {} +: run by the real find on macOS (changing the real flags and
+  // ACLs of the copy), and nothing to clear on Linux.
+  if (!same(['-P', undefined, '-exec', undefined, '-h', undefined, '{}', '+']) || !['nouchg,nouappnd', '-N'].includes(args[5])) usage();
+  const step = 'find-' + path.basename(args[3]);
+  log(step);
+  hook(step);
+  if (process.platform === 'darwin') {
+    const run = require('node:child_process').spawnSync('/usr/bin/find', args, { stdio: 'inherit' });
+    process.exit(run.status ?? 1);
+  }
 } else usage();
 `;
 
@@ -141,7 +152,10 @@ export function stubTools(dir) {
     codesign: tool('codesign', 'codesign'),
     spctl: tool('spctl', 'spctl'),
     swVers: tool('sw_vers', 'sw_vers'),
-    plutil: stubPlutil(dir)
+    plutil: stubPlutil(dir),
+    find: tool('find', 'find'),
+    chflags: '/usr/bin/chflags',
+    chmod: '/bin/chmod'
   };
 }
 
