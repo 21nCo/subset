@@ -22,6 +22,18 @@ const readSchema = (name) => JSON.parse(readFileSync(new URL(`./schemas/${name}.
 const validateCatalog = compileSchema(readSchema('catalog'));
 export const validateReceipt = compileSchema(readSchema('receipt'));
 
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+/**
+ * Text as it is safe to print, whatever its source (an installed app's Info.plist, a refused feed): each control
+ * character (C0, DEL, C1) and line or paragraph separator becomes a visible \xNN or \uNNNN, so it can neither send a
+ * terminal escape sequence nor start another line.
+ */
+export const printable = (text) =>
+  text.replace(UNPRINTABLE, (character) => {
+    const code = character.charCodeAt(0);
+    return code < 0x100 ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16)}`;
+  });
+
 /** The catalog could not be fetched (no network, a timeout, an HTTP error, a missing file): a cached copy may do. */
 export class CatalogUnavailableError extends Error {}
 /** The catalog was fetched but is refused by the reader rules: never used, and no cached copy stands in for it. */
@@ -72,7 +84,7 @@ export function catalogUrl(env) {
   try {
     url = new URL(text);
   } catch {
-    throw new CatalogInvalidError(`SUBSET_CATALOG_URL is not a URL: ${text}`);
+    throw new CatalogInvalidError(`SUBSET_CATALOG_URL is not a URL: ${printable(text)}`);
   }
   const allowed = overridden ? ['https:', 'file:'] : ['https:'];
   if (!allowed.includes(url.protocol)) throw new CatalogInvalidError(`SUBSET_CATALOG_URL must be an https: or file: URL, not ${url.protocol}`);
@@ -221,7 +233,7 @@ export async function loadCatalog({ env, platform, home, refresh = false, now = 
     bytes = await download(url, fetchImpl);
   } catch (error) {
     if (!(error instanceof CatalogUnavailableError)) throw error;
-    const reason = `could not fetch the catalog from ${url.href} (${error.message})`;
+    const reason = `could not fetch the catalog from ${url.href} (${printable(error.message)})`;
     if (cached && now - cached.fetchedAt < STALE_LIMIT_MS) {
       const warning = `${reason}; using the copy cached ${age(now - cached.fetchedAt)} ago.`;
       return { feed: cached.feed, url: url.href, fetchedAt: cached.fetchedAt, cached: true, warning };
@@ -230,7 +242,8 @@ export async function loadCatalog({ env, platform, home, refresh = false, now = 
     throw new CatalogUnavailableError(`${reason}${refresh ? '' : ', and there is no cached copy'}.`);
   }
   const { feed, problems } = parseFeed(bytes);
-  if (problems) throw new CatalogInvalidError(`the catalog at ${url.href} is not a valid ${CATALOG_SCHEMA} feed, so it is not used:\n  ${problems.join('\n  ')}`);
+  // A problem can quote the refused feed (a property name, a JSON parse snippet), so each is made printable.
+  if (problems) throw new CatalogInvalidError(`the catalog at ${url.href} is not a valid ${CATALOG_SCHEMA} feed, so it is not used:\n  ${problems.map(printable).join('\n  ')}`);
   writeCache(file, url, bytes, now);
   return { feed, url: url.href, fetchedAt: now, cached: false };
 }

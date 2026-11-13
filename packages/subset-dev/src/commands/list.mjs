@@ -2,7 +2,7 @@
 // (Mac apps, on macOS only) and the live version of each, plus the beta with --beta. --json prints the subset.list@1
 // document described in the README, which always has both channels.
 import { ApplicationsFoldersError, applicationsFolders, detectApps, PLUTIL } from '../macos/apps.mjs';
-import { CatalogInvalidError, CatalogUnavailableError, loadCatalog } from '../feed.mjs';
+import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
 
 export const LIST_SCHEMA = 'subset.list@1';
 const OPTIONS = { '--beta': 'beta', '--json': 'json', '--refresh': 'refresh' };
@@ -50,17 +50,8 @@ function installedText(copy) {
   return `${version} (${copy.channel ? `${copy.channel}, ` : ''}${copy.folder})`;
 }
 
-// Text as it is safe to print in a table cell, whatever its source (an installed app's Info.plist is not validated):
-// each control character (C0, DEL, C1) and line or paragraph separator becomes a visible \xNN or \uNNNN, so it can
-// neither send a terminal escape sequence nor start another row. --json keeps the values as they are.
-const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
-export const printable = (text) =>
-  text.replace(UNPRINTABLE, (character) => {
-    const code = character.charCodeAt(0);
-    return code < 0x100 ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16)}`;
-  });
-
-// Rows as left-aligned columns two spaces apart, without trailing spaces. Every cell is made printable.
+// Rows as left-aligned columns two spaces apart, without trailing spaces. Every cell is made printable (an installed
+// app's Info.plist is not validated); --json keeps the values as they are.
 function table(unsafeRows) {
   const rows = unsafeRows.map((row) => row.map(printable));
   const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));

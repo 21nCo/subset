@@ -158,6 +158,26 @@ test('prints control characters and line separators of an installed app\'s versi
   }
 });
 
+test('prints control characters of a refused feed (a property name, a JSON snippet) as visible escapes on stderr', async () => {
+  const valid = JSON.parse(readFileSync(new URL('catalog-valid-live-only.json', fixturesDir), 'utf8'));
+  const { home, dirs } = setup();
+  const feedFile = path.join(home, 'forged.json');
+  const env = { SUBSET_CATALOG_URL: pathToFileURL(feedFile).href, SUBSET_APPLICATIONS_DIRS: dirs };
+  for (const [body, shown] of [
+    [JSON.stringify({ ...valid, '\u001b]8;;https://x.test\u0007\u001b[2J\nsubset: forged\u2028': 1 }), '/\\x1b]8;;https:~1~1x.test\\x07\\x1b[2J\\x0asubset: forged\\u2028: is not allowed'],
+    // V8 quotes the source of a short feed it cannot parse.
+    ['{"schema":\u001b[2J\u0085}', '"{"schema":\\x1b[2J\\x85}" is not valid JSON']
+  ]) {
+    writeFileSync(feedFile, body);
+    const result = await list([], { env, home });
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.includes(shown), result.stderr);
+    assert.doesNotMatch(result.stderr, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/);
+    assert.match(result.stderr, /^subset: the catalog at file:.* is not a valid subset\.catalog@1 feed, so it is not used:\n {2}[^\n]+\n$/);
+  }
+});
+
 test('on Linux and Windows, lists the apps with their installation unsupported, and the tools', async () => {
   // Windows is only rendered here: its cache path would not be a path on the test's own platform.
   const catalog = { url: 'https://x.test/', fetchedAt: NOW, cached: false, feed: JSON.parse(readFileSync(new URL('catalog-valid-live-only.json', fixturesDir), 'utf8')) };

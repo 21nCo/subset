@@ -59,6 +59,8 @@ usage  0.2.0  0.2.1-beta.1
 - `--json` prints the `subset.list@1` document below instead of the table.
 - `--refresh` fetches the catalog even when the cached copy is fresh, and never falls back to the cached copy.
 
+In the table, and in the messages on stderr, a control character or a line or paragraph separator in a value (for example in an installed app's `Info.plist` version, or a property name in a refused feed) is shown as a `\xNN` or `\uNNNN` escape, so it cannot change the terminal or add a line; `--json` keeps the values as they are.
+
 It exits with code 0, with 1 when the catalog cannot be used (or `SUBSET_APPLICATIONS_DIRS` is not two absolute folders), and with 2 for an option it does not know or any other argument. A cache that cannot be written or read is not an error: the catalog is listed and fetched again next time.
 
 ### Installed apps (macOS)
