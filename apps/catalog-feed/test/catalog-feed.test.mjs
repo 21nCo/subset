@@ -106,17 +106,66 @@ test('the generate job validates the feed and builds the Worker before handing t
   assert.ok(build < dryRun && dryRun < upload);
 });
 
-test('deploys build dev; a dry run builds its own commit and waits for no deploy', () => {
+// Evaluates the subset of GitHub's expression syntax the workflow's run conditions and concurrency group use:
+// context properties, string literals, ==, !=, !, &&, || and format(). GitHub compares strings case-insensitively;
+// the cases below differ by more than case.
+const evaluate = (expression, { event, ref = 'refs/heads/dev', conclusion, dryRun }) => {
+  const js = expression
+    .replace(/\s+/g, ' ')
+    .replace(/'[^']*'|==|!=/g, (token) => (token === '==' ? '===' : token === '!=' ? '!==' : token));
+  assert.doesNotMatch(js.replace(/'[^']*'/g, "''"), /[^\w\s.'()!=&|,]/, `unexpected syntax in ${expression}`);
+  const github = { event_name: event, ref, run_id: '42', sha: 'abc', event: { workflow_run: { conclusion } } };
+  const inputs = event === 'workflow_dispatch' ? { dry_run: dryRun ?? false } : {};
+  const format = (pattern, ...args) => pattern.replace(/\{(\d+)\}/g, (_, index) => String(args[Number(index)]));
+  return new Function('github', 'inputs', 'format', `return (${js});`)(github, inputs, format);
+};
+const inside = (template) => {
+  const match = /^([^$]*)\$\{\{(.*)\}\}$/s.exec(template);
+  assert.ok(match, `one expression in ${template}`);
+  return [match[1], match[2]];
+};
+
+test('only a run that can deploy joins the deploy group; the rest never wait for or replace a pending deploy', () => {
+  const [prefix, groupExpression] = inside(workflow.concurrency.group);
+  assert.equal(workflow.concurrency['cancel-in-progress'], false, 'a running deploy is never cancelled');
+  assert.equal(generate.concurrency, undefined, 'the group is workflow-wide, so an older generate never deploys last');
+  assert.equal(deploy.concurrency, undefined);
+  const guard = generate.steps[0];
+  assert.match(guard.run, /exit 1/);
+  const cases = [
+    { event: 'push', ref: 'refs/heads/dev' },
+    { event: 'push', ref: 'refs/heads/main' },
+    { event: 'release', ref: 'refs/tags/v1' },
+    { event: 'schedule' },
+    { event: 'workflow_run', conclusion: 'success' },
+    { event: 'workflow_run', conclusion: 'failure' },
+    { event: 'workflow_run', conclusion: 'cancelled' },
+    { event: 'workflow_dispatch', ref: 'refs/heads/dev' },
+    { event: 'workflow_dispatch', ref: 'refs/heads/main' },
+    { event: 'workflow_dispatch', ref: 'refs/heads/linear/set-228' },
+    { event: 'workflow_dispatch', ref: 'refs/heads/dev', dryRun: true },
+    { event: 'workflow_dispatch', ref: 'refs/heads/linear/set-228', dryRun: true },
+    { event: 'pull_request', ref: 'refs/pull/9/merge' },
+  ];
+  let deploying = 0;
+  for (const run of cases) {
+    const canDeploy = Boolean(evaluate(generate.if, run) && !evaluate(guard.if, run) && evaluate(deploy.if, run));
+    const group = prefix + evaluate(groupExpression, run);
+    assert.equal(group, canDeploy ? 'catalog-feed-deploy' : 'catalog-feed-run-42', JSON.stringify(run));
+    if (canDeploy) deploying += 1;
+  }
+  assert.equal(deploying, 7, 'push to dev and main, release, schedule, a successful release run and dispatch on dev and main');
+});
+
+test('deploys build dev; a dry run builds its own commit', () => {
   const dryRun = "(github.event_name == 'pull_request' || inputs.dry_run)";
   const checkout = generate.steps.find(uses('actions/checkout'));
   assert.equal(checkout.with.ref, `\${{ ${dryRun} && github.sha || 'dev' }}`);
-  assert.equal(workflow.concurrency.group, `catalog-feed-\${{ ${dryRun} && format('dry-run-{0}', github.run_id) || 'deploy' }}`);
   assert.equal(workflow['run-name'], `Catalog feed\${{ ${dryRun} && ' (dry run)' || '' }}`);
-  assert.equal(workflow.concurrency['cancel-in-progress'], false, 'a running deploy is never cancelled');
-  const guard = generate.steps[0];
-  assert.match(guard.if, /workflow_dispatch/);
-  assert.match(guard.if, /!inputs\.dry_run/);
-  assert.match(guard.run, /exit 1/);
+  const [, ref] = inside(checkout.with.ref);
+  assert.equal(evaluate(ref, { event: 'push', ref: 'refs/heads/main' }), 'dev');
+  assert.equal(evaluate(ref, { event: 'workflow_dispatch', ref: 'refs/heads/x', dryRun: true }), 'abc');
+  assert.equal(evaluate(ref, { event: 'pull_request' }), 'abc');
 });
 
 test('the Worker serves the feed from the 21n-dev account at subset.21n.dev with a 5-minute cache', () => {

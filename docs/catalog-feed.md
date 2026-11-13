@@ -22,7 +22,7 @@ cache-control: max-age=300
 | `workflow_dispatch` with `dry_run` | Dry run of the branch it was started on |
 | Pull request touching the paths above | Dry run of the pull request |
 
-Every deploy builds `dev`'s head, whatever started the run: `main` and release tags trail `dev`, and building them would deploy an older catalog than the last `dev` deploy. Deploys run one at a time; GitHub replaces a pending deploy with a newer one, so the last deploy is the newest build. A dry run builds the commit it was started on, validates the feed, builds the Worker with `wrangler deploy --dry-run`, uploads the feed as the run's `catalog-feed` artifact, and deploys nothing. It needs no Cloudflare credentials:
+Every deploy builds `dev`'s head, whatever started the run: `main` and release tags trail `dev`, and building them would deploy an older catalog than the last `dev` deploy. Deploys run one at a time; GitHub replaces a pending deploy with a newer one, so the last deploy is the newest build. Only a run that can deploy joins that queue: a dry run, a run for a failed macOS release and a deploy request from a branch other than `dev` or `main` each run on their own, so none of them can replace a pending deploy. A dry run builds the commit it was started on, validates the feed, builds the Worker with `wrangler deploy --dry-run`, uploads the feed as the run's `catalog-feed` artifact, and deploys nothing. It needs no Cloudflare credentials:
 
 ```sh
 gh workflow run catalog-feed.yml --ref <branch> -f dry_run=true

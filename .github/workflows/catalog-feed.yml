@@ -58,9 +58,17 @@ permissions:
   contents: read
 
 # Deploys run one at a time, and GitHub replaces a pending run with a newer one, so the last deploy is the newest
-# build of dev. Each dry run has its own group and never waits for or replaces a deploy.
+# build of dev. Only a run that can deploy joins the deploy group: a dry run, a run for a failed macOS release (which
+# skips generate) and a deploy request from a branch other than dev or main (which the generate job refuses) each get
+# their own group, so they never wait for or replace a pending deploy. The group is workflow-wide rather than on the
+# deploy job, so a slow older generate cannot deploy after a newer one.
 concurrency:
-  group: catalog-feed-${{ (github.event_name == 'pull_request' || inputs.dry_run) && format('dry-run-{0}', github.run_id) || 'deploy' }}
+  # Folded (one line): each line break below becomes a space.
+  group: >-
+    catalog-feed-${{ (github.event_name == 'pull_request' || inputs.dry_run
+    || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success')
+    || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main'))
+    && format('run-{0}', github.run_id) || 'deploy' }}
   cancel-in-progress: false
 
 jobs:
