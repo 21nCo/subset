@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { promises as fsp, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -11,7 +11,7 @@ import { parseInstallArgs, runInstall } from '../src/commands/install.mjs';
 import { validateReceipt } from '../src/feed.mjs';
 import { receiptFile } from '../src/macos/apps.mjs';
 import { INSTALL_TOOLS } from '../src/macos/install.mjs';
-import { compareVersions } from '../src/macos/verify.mjs';
+import { compareNumbers, compareVersions, runTool } from '../src/macos/verify.mjs';
 import { makeApp } from './helpers.mjs';
 import { appFiles, attachedImages, makeImage, makeImageWithModes, stubTools, stubToolsSkip } from './install-stubs.mjs';
 
@@ -123,6 +123,11 @@ test('parses the app, --beta, --user and --dir, and refuses anything else', () =
   assert.match(parseInstallArgs(['breaks', '--dir']).error, /--dir needs a folder/);
   assert.match(parseInstallArgs(['breaks', '--user', '--dir', '/tmp']).error, /cannot be used together/);
   assert.ok(compareVersions('0.1.10', '0.1.9') > 0 && compareVersions('1.0.0', '1.0.0') === 0 && compareVersions('0.9.9', '1.0.0') < 0);
+  // Exact beyond Number.MAX_SAFE_INTEGER (where 9007199254740993 and 9007199254740992 are the same Number).
+  assert.equal(compareVersions('9007199254740993.0.0', '9007199254740992.0.0'), 1);
+  assert.equal(compareVersions('1.0.9007199254740992', '1.0.9007199254740993'), -1);
+  assert.equal(compareVersions('01.2.3', '1.2.3'), 0);
+  assert.equal(compareNumbers('9007199254740993', '9007199254740992'), 1);
 });
 
 test('exits 2 for a usage error and 1 off macOS, touching nothing', { skip }, async () => {
@@ -304,6 +309,16 @@ test('refuses an app that is already there, or a downgrade, before downloading',
   makeApp(beta.user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.1', build: '5' });
   const olderBuild = await install(beta, ['breaks', '--beta'], { fetch });
   assert.match(olderBuild.stderr, /0\.1\.1 \(build 5\) is installed in ~\/Applications, and subset install does not downgrade/);
+
+  // Versions past Number.MAX_SAFE_INTEGER are compared exactly.
+  const huge = setup();
+  feed(huge, { live: { image: breaksImage() }, change: (app) => (app.channels.live.version = '9007199254740992.0.0') });
+  makeApp(huge.user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '9007199254740993.0.0', build: '1' });
+  const hugeDowngrade = await install(huge, ['breaks'], { fetch });
+  assert.equal(hugeDowngrade.code, 1);
+  assert.equal(hugeDowngrade.stderr, 'subset: Breaks 9007199254740992.0.0 was not installed: 9007199254740993.0.0 is installed in ~/Applications, and subset install does not downgrade.\n');
+  assert.deepEqual(readdirSync(huge.system), []);
+  assert.equal(existsSync(receipt(huge)), false);
   assert.deepEqual(fetch.calls, []);
 });
 
@@ -355,6 +370,117 @@ test('installing next to a copy in the other folder says that the receipt now de
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /subset: note: Breaks 0\.1\.0 is also installed in ~\/Applications; the receipt now describes the copy in \/Applications\.\n/);
   assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
+});
+
+// A tool that exits while a process it started (in its group, ignoring SIGTERM) keeps its output open: abort and
+// timeout still stop that process, by signalling the group, and settle. ps, not the runner, says it is gone.
+test('runTool stops the process group of a tool that has already exited', { skip: process.platform === 'win32' && 'needs POSIX process groups' }, async () => {
+  const dir = mkdtempSync(path.join(root, 'lifecycle-'));
+  const leader = path.join(dir, 'leader.cjs');
+  writeFileSync(
+    leader,
+    `const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'inherit', 'inherit'] });
+require('node:fs').writeFileSync(process.argv[2], String(child.pid));
+process.exit(0);
+`
+  );
+  const alive = (pid) => {
+    const state = spawnSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+    return state !== '' && !state.startsWith('Z');
+  };
+  const pids = [];
+  const descendant = async (file) => {
+    while (!existsSync(file) || readFileSync(file, 'utf8') === '') await new Promise((resolve) => setTimeout(resolve, 20));
+    const pid = Number(readFileSync(file, 'utf8'));
+    pids.push(pid);
+    return pid;
+  };
+  const within = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`did not settle in ${ms} ms`)), ms).unref())]);
+  try {
+    const run = async (name, options) => {
+      const file = path.join(dir, `${name}.pid`);
+      const started = Date.now();
+      const result = runTool(process.execPath, [leader, file], options).then((value) => ({ value }), (error) => ({ error }));
+      const pid = await descendant(file);
+      assert.ok(alive(pid), `${name}: the descendant runs`);
+      return { pid, started, result };
+    };
+    const controller = new AbortController();
+    const aborted = await run('abort', { signal: controller.signal });
+    // The leader has exited (it wrote the pid and quit) before the abort.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort(new Error('stop'));
+    const timedOut = await run('timeout', { timeout: 500 });
+    const [abortResult, timeoutResult] = await within(Promise.all([aborted.result, timedOut.result]), 20000);
+    assert.equal(abortResult.error?.message, 'stop');
+    assert.equal(timeoutResult.value?.code, null);
+    assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 0\.5 seconds/);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(alive(aborted.pid), false, 'the descendant of the aborted tool is gone');
+    assert.equal(alive(timedOut.pid), false, 'the descendant of the timed-out tool is gone');
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+});
+
+// The feed's app name and an installed copy's version are free text: written to the terminal, each control character
+// is escaped, so they cannot move the cursor or forge a line.
+test('escapes the feed name and an installed version in every message', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage();
+  const name = 'Bre\u001b[2Jaks\nsubset: forged';
+  const shown = 'Bre\\x1b[2Jaks\\x0asubset: forged';
+  feed(c, { live: { image }, change: (app) => (app.name = name) });
+  makeApp(c.user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0\nsubset: forged line', build: '1' });
+  const result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `Installed ${shown} 0.1.0 in ${path.join(c.system, 'Breaks.app')}\n`);
+  assert.deepEqual(result.stderr.split('\n'), [
+    `Downloading ${shown} 0.1.0 from ${LIVE_URL}`,
+    'Verifying Breaks.app',
+    `subset: note: ${shown} 0.1.0\\x0asubset: forged line is also installed in ~/Applications; the receipt now describes the copy in /Applications.`,
+    ''
+  ]);
+  // A refusal names the app the same way.
+  const refused = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stderr, `subset: ${shown} 0.1.0 was not installed: ${path.join(c.system, 'Breaks.app')} already exists; use subset update to change its version.\n`);
+  const noBeta = await install(c, ['breaks', '--beta'], { fetch: fakeFetch({}) });
+  assert.equal(noBeta.stderr, `subset: ${shown} has no beta.\n`);
+});
+
+// A write can store only part of a chunk; the rest is still written, so the image is every byte that was checksummed.
+test('a short write while downloading still stores the whole image', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage();
+  feed(c, { live: { image } });
+  const probe = await fsp.open(path.join(c.base, 'probe'), 'w');
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const write = prototype.write;
+  let short = 0;
+  prototype.write = function (buffer, offset = 0, length = buffer.byteLength - offset, ...rest) {
+    if (typeof buffer === 'string') return write.call(this, buffer, offset, length, ...rest);
+    short += length > 7 ? 1 : 0;
+    return write.call(this, buffer, offset, Math.min(length, 7), ...rest);
+  };
+  let result;
+  try {
+    result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  } finally {
+    prototype.write = write;
+  }
+  assert.ok(short > 0, 'writes were cut short');
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
+  assert.deepEqual(readdirSync(c.tmp), []);
 });
 
 test('a signal before the rename stops the install and leaves nothing (in process)', { skip }, async () => {
@@ -542,32 +668,34 @@ function outsideTargets(c) {
 }
 
 for (const [name, files, expected] of [
-  // ditto copies the bundle; its copy is cleared and then refused at the signature check (it is unsigned).
+  // ditto copies the bundle; its copy is cleared and then refused at the signature check (it is unsigned). No uappnd
+  // file here: macOS 26's ditto cannot copy one (the next case has one).
   [
-    'a folder with a deny delete_child ACL, uchg and uappnd files and protected links',
+    'a folder with a deny delete_child ACL, a uchg file and protected links',
     (contents, outside) => {
       mkdirSync(path.join(contents, 'Locked', 'Deeper'), { recursive: true });
       writeFileSync(path.join(contents, 'Locked', 'immutable'), 'x');
-      writeFileSync(path.join(contents, 'Locked', 'Deeper', 'append-only'), 'x');
+      writeFileSync(path.join(contents, 'Locked', 'Deeper', 'plain'), 'x');
       symlinkSync(outside.file, path.join(contents, 'Locked', 'to-file'));
       symlinkSync(outside.dir, path.join(contents, 'to-folder'));
       execFileSync('/usr/bin/chflags', ['uchg', path.join(contents, 'Locked', 'immutable')]);
-      execFileSync('/usr/bin/chflags', ['uappnd', path.join(contents, 'Locked', 'Deeper', 'append-only')]);
       execFileSync('/usr/bin/chflags', ['-h', 'uchg', path.join(contents, 'Locked', 'to-file')]);
       execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'Locked', 'Deeper')]);
       execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'Locked')]);
     },
     /the signature check failed/
   ],
-  // ditto stops at a file with a deny delete ACL, after copying the protected folder before it: the partial copy is
-  // what the cleanup removes.
+  // ditto stops at a file with a deny delete ACL (or, on macOS 26, a uappnd file), after copying the protected folder
+  // before it: the partial copy is what the cleanup removes.
   [
-    'a deny delete file that stops ditto part-way',
+    'a deny delete file and a uappnd file that stop ditto part-way',
     (contents) => {
       mkdirSync(path.join(contents, 'A-locked'));
       writeFileSync(path.join(contents, 'A-locked', 'immutable'), 'x');
+      writeFileSync(path.join(contents, 'A-locked', 'append-only'), 'x');
       writeFileSync(path.join(contents, 'Z-denied'), 'x');
       execFileSync('/usr/bin/chflags', ['uchg', path.join(contents, 'A-locked', 'immutable')]);
+      execFileSync('/usr/bin/chflags', ['uappnd', path.join(contents, 'A-locked', 'append-only')]);
       execFileSync('/bin/chmod', ['+a', 'everyone deny delete_child', path.join(contents, 'A-locked')]);
       execFileSync('/bin/chmod', ['+a', 'everyone deny delete', path.join(contents, 'Z-denied')]);
     },
@@ -586,14 +714,16 @@ for (const [name, files, expected] of [
       });
       feed(c, { live: { image } });
       const result = await install(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), toolSet: INSTALL_TOOLS });
+      // The cleanup is checked first, whichever step refused the app.
       assert.equal(result.code, 1, result.stderr);
-      assert.match(result.stderr, expected);
       assert.doesNotMatch(result.stderr, /warning/);
       assert.deepEqual(readdirSync(c.system), [], 'no staged copy is left');
       assert.equal(existsSync(receipt(c)), false);
       assert.deepEqual(readdirSync(c.tmp), []);
+      assert.equal(execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8' }).includes(c.tmp), false, 'the image is detached');
       assert.deepEqual([protections(outside.file), protections(outside.dir)], outside.before, 'the link targets keep their flags and ACLs');
       assert.match(outside.before[0], /uchg[\s\S]*deny delete/);
+      assert.match(result.stderr, expected);
     } finally {
       unprotect(c.base);
     }

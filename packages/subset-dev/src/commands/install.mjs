@@ -8,7 +8,7 @@ import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable, validateReceipt } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { INSTALL_TOOLS, InstallError, installApp, InterruptedError } from '../macos/install.mjs';
-import { compareVersions, VerificationError } from '../macos/verify.mjs';
+import { compareNumbers, compareVersions, VerificationError } from '../macos/verify.mjs';
 
 const USAGE = 'Usage: subset install <app> [--beta] [--user] [--dir <folder>]';
 const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
@@ -81,7 +81,7 @@ function downgrade(copies, release, beta) {
   for (const copy of copies) {
     if (typeof copy.version !== 'string' || !VERSION.test(copy.version)) continue;
     const order = compareVersions(release.version, copy.version);
-    const olderBuild = order === 0 && beta && /^\d+$/.test(copy.build ?? '') && Number(copy.build) > release.build;
+    const olderBuild = order === 0 && beta && /^\d+$/.test(copy.build ?? '') && compareNumbers(copy.build, String(release.build)) > 0;
     if (order < 0 || olderBuild) return `${copy.version}${olderBuild ? ` (build ${copy.build})` : ''} is installed in ${copy.folder}`;
   }
   return undefined;
@@ -105,8 +105,8 @@ function receiptFor({ app, release, beta, folder, home, now, clock }) {
 }
 
 const failure = (error) => {
-  if (error instanceof VerificationError) return `the ${error.check} check failed: ${printable(error.message)}`;
-  if (error instanceof InstallError) return `the ${error.check} step failed: ${printable(error.message)}`;
+  if (error instanceof VerificationError) return `the ${error.check} check failed: ${error.message}`;
+  if (error instanceof InstallError) return `the ${error.check} step failed: ${error.message}`;
   return undefined;
 };
 
@@ -122,8 +122,11 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
     stderr.write(`subset: ${options.error}\n`);
     return 2;
   }
+  // Each line is made printable as it is written: it can hold the feed's app name, an installed copy's version, a
+  // path or a tool's output, none of which may move the cursor or forge a line.
+  const say = (stream, text) => stream.write(`${printable(text)}\n`);
   const fail = (message) => {
-    stderr.write(`subset: ${message}\n`);
+    say(stderr, `subset: ${message}`);
     return 1;
   };
   if (platform !== 'darwin') return fail('Mac apps can be installed only on macOS.');
@@ -135,9 +138,11 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
     catalog = await loadCatalog({ env, platform, home, now, fetch });
   } catch (error) {
     if (!(error instanceof CatalogInvalidError || error instanceof CatalogUnavailableError || error instanceof ApplicationsFoldersError)) throw error;
-    return fail(error.message);
+    // Already printable, one problem per line.
+    stderr.write(`subset: ${error.message}\n`);
+    return 1;
   }
-  if (catalog.warning) stderr.write(`subset: ${catalog.warning}\n`);
+  if (catalog.warning) say(stderr, `subset: ${catalog.warning}`);
   const app = catalog.feed.apps.find((candidate) => candidate.id === options.app);
   if (!app) return fail(`there is no Subset Mac app "${printable(options.app)}"; subset list shows them.`);
   const release = options.beta ? app.channels.beta : app.channels.live;
@@ -173,17 +178,20 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
       signal: controller.signal,
       fetch,
       tools,
-      log: (line) => stderr.write(`${line}\n`),
-      warn: (line) => stderr.write(`subset: warning: ${line}\n`)
+      log: (line) => say(stderr, line),
+      warn: (line) => say(stderr, `subset: warning: ${line}`)
     });
-    stdout.write(`Installed ${label} in ${installed.path}\n`);
+    say(stdout, `Installed ${label} in ${installed.path}`);
     // There is one receipt per bundle ID (SET-227), so it now describes this copy, not one in the other folder.
     const other = receipt ? copies.find((copy) => copy.folder !== where.folder.label) : undefined;
-    if (other) stderr.write(`subset: note: ${app.name}${other.version ? ` ${other.version}` : ''} is also installed in ${other.folder}; the receipt now describes the copy in ${where.folder.label}.\n`);
+    if (other) {
+      const version = other.version ? ` ${other.version}` : '';
+      say(stderr, `subset: note: ${app.name}${version} is also installed in ${other.folder}; the receipt now describes the copy in ${where.folder.label}.`);
+    }
     return 0;
   } catch (error) {
     if (error instanceof InterruptedError) {
-      stderr.write(`subset: ${label} was not installed: interrupted by ${error.signal}.\n`);
+      say(stderr, `subset: ${label} was not installed: interrupted by ${error.signal}.`);
       return 128 + SIGNALS[error.signal];
     }
     const message = failure(error);

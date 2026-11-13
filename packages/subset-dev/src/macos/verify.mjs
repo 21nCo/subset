@@ -39,7 +39,9 @@ export class VerificationError extends Error {
  * The tool runs in its own process group, so a Ctrl-C at the terminal (a signal to the whole foreground group) reaches
  * only this process, which decides what to stop: on abort, or after `timeout` ms, it sends SIGTERM to the tool's group
  * and SIGKILL KILL_AFTER_MS later, and waits for the tool to exit, so no cleanup races a tool still writing files. A
- * tool that writes more than MAX_OUTPUT_BYTES is stopped the same way, and its stderr ends with why.
+ * tool that writes more than MAX_OUTPUT_BYTES is stopped the same way, and its stderr ends with why. The group is
+ * signalled even when the tool itself has already exited, because a process it started can still hold its output
+ * open; a process that left the group and still holds it is let go KILL_AFTER_MS after the SIGKILL.
  */
 export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason);
@@ -56,11 +58,18 @@ export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) 
         child.kill(name);
       }
     };
+    // Until 'close', the tool or a process it started still holds its output, so the group is still there to stop.
     const stop = (reason) => {
-      if (stopping || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+      if (stopping || child.pid === undefined) return;
       stopping = reason;
       kill('SIGTERM');
-      killer = setTimeout(() => kill('SIGKILL'), KILL_AFTER_MS);
+      killer = setTimeout(() => {
+        kill('SIGKILL');
+        killer = setTimeout(() => {
+          child.stdout.destroy();
+          child.stderr.destroy();
+        }, KILL_AFTER_MS);
+      }, KILL_AFTER_MS);
     };
     const onAbort = () => stop('abort');
     const timer = setTimeout(() => stop(`it did not finish in ${timeout / 1000} seconds`), timeout);
@@ -87,21 +96,30 @@ export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) 
   });
 }
 
-/** Compares two x.y.z versions: negative, 0 or positive. Each must match ^\d+\.\d+\.\d+$. */
+/** Compares two decimal numbers of any size exactly (e.g. builds): -1, 0 or 1. Each must match ^\d+$. */
+export function compareNumbers(a, b) {
+  const left = BigInt(a);
+  const right = BigInt(b);
+  if (left === right) return 0;
+  return left > right ? 1 : -1;
+}
+
+/** Compares two x.y.z versions exactly, whatever the size of their parts: -1, 0 or 1. Each must match ^\d+\.\d+\.\d+$. */
 export function compareVersions(a, b) {
-  const left = a.split('.').map(Number);
-  const right = b.split('.').map(Number);
+  const left = a.split('.');
+  const right = b.split('.');
   for (let index = 0; index < 3; index += 1) {
-    if (left[index] !== right[index]) return left[index] - right[index];
+    const order = compareNumbers(left[index], right[index]);
+    if (order !== 0) return order;
   }
   return 0;
 }
 
-// A macOS version (14, 14.0, 14.2.1) as three numbers, or undefined when it is not one.
+// A macOS version (14, 14.0, 14.2.1) as x.y.z, or undefined when it is not one.
 function macosVersion(text) {
   if (typeof text !== 'string' || !/^\d+(?:\.\d+){0,2}$/.test(text)) return undefined;
-  const parts = text.split('.').map(Number);
-  while (parts.length < 3) parts.push(0);
+  const parts = text.split('.');
+  while (parts.length < 3) parts.push('0');
   return parts.join('.');
 }
 

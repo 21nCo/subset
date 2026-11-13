@@ -112,7 +112,12 @@ async function downloadImage(url, file, sha256, { fetch, signal }) {
       size += chunk.byteLength;
       if (size > MAX_IMAGE_BYTES) throw new InstallError('download', `the image is larger than ${MAX_IMAGE_BYTES} bytes`);
       hash.update(chunk);
-      await handle.write(chunk);
+      // A write can store only part of the chunk; the rest is written before the next chunk, so the file is what was hashed.
+      for (let offset = 0; offset < chunk.byteLength; ) {
+        const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
+        if (bytesWritten <= 0) throw new InstallError('download', 'the image could not be written to the private folder');
+        offset += bytesWritten;
+      }
     }
     const digest = hash.digest('hex');
     if (digest !== sha256) throw new InstallError('checksum', `the download's SHA-256 is ${digest}, not ${sha256} as the feed lists`);
