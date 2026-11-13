@@ -22,6 +22,7 @@ export const VERIFY_TOOLS = Object.freeze({
 const TOOL_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const KILL_AFTER_MS = 5000;
+const GROUP_POLL_MS = 50;
 
 /** A check refused the app: `check` names it (signature, team, notarization, bundle ID, version, macOS version). */
 export class VerificationError extends Error {
@@ -34,14 +35,17 @@ export class VerificationError extends Error {
 /**
  * Runs a tool without a shell and resolves { code, signal, stdout, stderr } whatever its exit status (code null when
  * it was stopped). Rejects only when it cannot be started, or when `signal` (an AbortSignal) aborts it, and then only
- * once the tool has exited.
+ * once the tool and the processes it started have exited.
  *
  * The tool runs in its own process group, so a Ctrl-C at the terminal (a signal to the whole foreground group) reaches
  * only this process, which decides what to stop: on abort, or after `timeout` ms, it sends SIGTERM to the tool's group
- * and SIGKILL KILL_AFTER_MS later, and waits for the tool to exit, so no cleanup races a tool still writing files. A
- * tool that writes more than MAX_OUTPUT_BYTES is stopped the same way, and its stderr ends with why. The group is
- * signalled even when the tool itself has already exited, because a process it started can still hold its output
- * open; a process that left the group and still holds it is let go KILL_AFTER_MS after the SIGKILL.
+ * and SIGKILL KILL_AFTER_MS later, so no cleanup races a tool, or a process it started, still writing files. A tool
+ * that writes more than MAX_OUTPUT_BYTES is stopped the same way, and its stderr ends with why. A stopped tool settles
+ * only once its process group is empty (kill(-group, 0) fails with ESRCH): the end of its output is not proof of that,
+ * since a process it started may hold none of it. The group is signalled even when the tool itself has already exited.
+ * KILL_AFTER_MS after the SIGKILL, it settles anyway, letting go of a process that left the group but still holds the
+ * output, or of one that has not died yet (its stderr then says so), so a cleanup never waits forever. A tool that
+ * exits by itself settles as soon as its output ends.
  */
 export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason);
@@ -51,23 +55,59 @@ export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) 
     const output = { stdout: '', stderr: '' };
     let stopping;
     let killer;
+    let poller;
+    let closed;
+    let givenUp = false;
+    let settled = false;
+    const exited = () => child.exitCode !== null || child.signalCode !== null;
     const kill = (name) => {
       try {
         process.kill(-child.pid, name);
       } catch {
-        child.kill(name);
+        // The tool left its group; signal it alone, but never a pid that is no longer its own.
+        if (!exited()) child.kill(name);
       }
     };
-    // Until 'close', the tool or a process it started still holds its output, so the group is still there to stop.
+    // Whether no process is left in the tool's group. EPERM means one is, though it cannot be signalled.
+    const groupGone = () => {
+      try {
+        process.kill(-child.pid, 0);
+        return false;
+      } catch (error) {
+        return error.code === 'ESRCH';
+      }
+    };
+    const settle = (error, code, exitSignal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killer);
+      clearInterval(poller);
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) return reject(signal.reason);
+      if (error) return reject(error);
+      // A tool stopped for taking too long or writing too much failed, and says why as its last line.
+      let stderr = output.stderr;
+      if (stopping) stderr += `\nstopped: ${stopping}`;
+      if (givenUp && !(closed && groupGone())) stderr += '\nstopped: a process it started did not exit';
+      resolve({ code: stopping ? null : code, signal: exitSignal, stdout: output.stdout, stderr });
+    };
+    // A stopped tool settles once its output has ended and its group is empty, or once the grace after SIGKILL ends.
+    const finish = () => {
+      if (givenUp || (closed && groupGone())) settle(undefined, closed?.code ?? null, closed?.exitSignal ?? null);
+    };
     const stop = (reason) => {
-      if (stopping || child.pid === undefined) return;
+      if (stopping || settled || child.pid === undefined) return;
       stopping = reason;
       kill('SIGTERM');
+      poller = setInterval(finish, GROUP_POLL_MS);
       killer = setTimeout(() => {
         kill('SIGKILL');
         killer = setTimeout(() => {
+          givenUp = true;
           child.stdout.destroy();
           child.stderr.destroy();
+          finish();
         }, KILL_AFTER_MS);
       }, KILL_AFTER_MS);
     };
@@ -81,18 +121,12 @@ export function runTool(file, args, { signal, timeout = TOOL_TIMEOUT_MS } = {}) 
       });
     }
     signal?.addEventListener('abort', onAbort, { once: true });
-    const settle = (error, code, exitSignal) => {
-      clearTimeout(timer);
-      clearTimeout(killer);
-      signal?.removeEventListener('abort', onAbort);
-      if (signal?.aborted) return reject(signal.reason);
-      if (error) return reject(error);
-      // A tool stopped for taking too long or writing too much failed, and says why as its last line.
-      const stderr = stopping ? `${output.stderr}\nstopped: ${stopping}` : output.stderr;
-      resolve({ code: stopping ? null : code, signal: exitSignal, stdout: output.stdout, stderr });
-    };
     child.once('error', (error) => settle(error));
-    child.once('close', (code, exitSignal) => settle(undefined, code, exitSignal));
+    child.once('close', (code, exitSignal) => {
+      closed = { code, exitSignal };
+      if (stopping) finish();
+      else settle(undefined, code, exitSignal);
+    });
   });
 }
 

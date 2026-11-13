@@ -372,61 +372,159 @@ test('installing next to a copy in the other folder says that the receipt now de
   assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
 });
 
-// A tool that exits while a process it started (in its group, ignoring SIGTERM) keeps its output open: abort and
-// timeout still stop that process, by signalling the group, and settle. ps, not the runner, says it is gone.
-test('runTool stops the process group of a tool that has already exited', { skip: process.platform === 'win32' && 'needs POSIX process groups' }, async () => {
-  const dir = mkdtempSync(path.join(root, 'lifecycle-'));
-  const leader = path.join(dir, 'leader.cjs');
+// Whether process `pid` still runs, asked of the operating system (kill(pid, 0)), not of runTool. A zombie (exited, not
+// yet reaped by the init process it was reparented to) has stopped running: it is let go after a short wait, and on
+// Linux /proc says so at once.
+function zombie(pid) {
+  try {
+    return /^\d+ \(.*\) Z /s.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+function runs(pid) {
+  try {
+    process.kill(pid, 0);
+    return !zombie(pid);
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+async function stillRuns(pid, ms = 1000) {
+  for (const end = Date.now() + ms; Date.now() < end; ) {
+    if (!runs(pid)) return false;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return runs(pid);
+}
+async function pidFrom(file, ms = 15000) {
+  for (const end = Date.now() + ms; !existsSync(file) || readFileSync(file, 'utf8') === ''; ) {
+    if (Date.now() > end) throw new Error(`${path.basename(file)} was not written in ${ms} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return Number(readFileSync(file, 'utf8'));
+}
+// Writes a tool (run with node) that starts a process in the tool's process group which, once it ignores SIGTERM (or
+// not, with `ignoreTerm` false), writes its pid to the file named by the tool's first argument. The process inherits the tool's
+// output (`stdio` 'inherit') or holds none of it ('ignore'). With `exit`, the tool exits once the pid is written;
+// otherwise it keeps running. With `leaves`, the process starts a group of its own instead.
+function lifecycleTool(dir, { stdio, exit, ignoreTerm = true, leaves = false }) {
+  const file = path.join(dir, `tool-${stdio}-${exit ? 'exits' : 'runs'}${leaves ? '-leaves' : ''}.cjs`);
+  const descendant = `${ignoreTerm ? "process.on('SIGTERM', () => {}); " : ''}require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)`;
   writeFileSync(
-    leader,
-    `const { spawn } = require('node:child_process');
-const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'inherit', 'inherit'] });
-require('node:fs').writeFileSync(process.argv[2], String(child.pid));
-process.exit(0);
+    file,
+    `const { existsSync } = require('node:fs');
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}, process.argv[2]], { stdio: '${stdio}', detached: ${leaves} });
+${exit ? "const wait = setInterval(() => { if (existsSync(process.argv[2])) { clearInterval(wait); process.exit(0); } }, 10);" : 'setInterval(() => {}, 1000);'}
 `
   );
-  const alive = (pid) => {
-    const state = spawnSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
-    return state !== '' && !state.startsWith('Z');
-  };
+  return file;
+}
+const settlesWithin = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`did not settle in ${ms} ms`)), ms).unref())]);
+function killAll(pids) {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+// A tool that exits while a process it started (in its group, ignoring SIGTERM) keeps its output open: abort and
+// timeout still stop that process, by signalling the group, and settle. The OS, not the runner, says it is gone. A
+// process that left the group and keeps the output open cannot be stopped that way: runTool lets it go and settles
+// KILL_AFTER_MS after the SIGKILL, saying so, rather than waiting for it.
+test('runTool stops the process group of a tool that has already exited', { skip: process.platform === 'win32' && 'needs POSIX process groups' }, async () => {
+  const dir = mkdtempSync(path.join(root, 'lifecycle-'));
+  const leader = lifecycleTool(dir, { stdio: 'inherit', exit: true });
+  const leaver = lifecycleTool(dir, { stdio: 'inherit', exit: true, leaves: true });
   const pids = [];
-  const descendant = async (file) => {
-    while (!existsSync(file) || readFileSync(file, 'utf8') === '') await new Promise((resolve) => setTimeout(resolve, 20));
-    const pid = Number(readFileSync(file, 'utf8'));
-    pids.push(pid);
-    return pid;
-  };
-  const within = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`did not settle in ${ms} ms`)), ms).unref())]);
+  try {
+    const run = async (name, options, tool = leader) => {
+      const file = path.join(dir, `${name}.pid`);
+      const result = runTool(process.execPath, [tool, file], options).then((value) => ({ value }), (error) => ({ error }));
+      const pid = await pidFrom(file);
+      pids.push(pid);
+      assert.ok(runs(pid), `${name}: the descendant runs`);
+      return { pid, result };
+    };
+    const controller = new AbortController();
+    const [aborted, timedOut, left] = await Promise.all([
+      run('abort', { signal: controller.signal }),
+      run('timeout', { timeout: 3000 }),
+      run('left', { timeout: 3000 }, leaver)
+    ]);
+    // The tool has exited (once the descendant wrote its pid) before the abort.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort(new Error('stop'));
+    const [abortResult, timeoutResult, leftResult] = await settlesWithin(Promise.all([aborted.result, timedOut.result, left.result]), 25000);
+    assert.equal(abortResult.error?.message, 'stop');
+    assert.equal(timeoutResult.value?.code, null);
+    assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 3 seconds/);
+    assert.doesNotMatch(timeoutResult.value.stderr, /did not exit/);
+    assert.equal(leftResult.value?.code, null);
+    assert.match(leftResult.value.stderr, /stopped: it did not finish in 3 seconds\nstopped: a process it started did not exit$/);
+    assert.equal(await stillRuns(aborted.pid), false, 'the descendant of the aborted tool is gone');
+    assert.equal(await stillRuns(timedOut.pid), false, 'the descendant of the timed-out tool is gone');
+  } finally {
+    killAll(pids);
+  }
+});
+
+// A tool that is still running starts a process in its group that ignores SIGTERM and holds none of its output. On
+// abort or timeout the tool itself dies of the SIGTERM and its output closes, but runTool settles only once that
+// process is gone too (it is sent SIGKILL), so no cleanup runs beside it. The OS, not the runner, says it is gone.
+test('runTool settles a stopped tool only once its process group is empty', { skip: process.platform === 'win32' && 'needs POSIX process groups' }, async () => {
+  const dir = mkdtempSync(path.join(root, 'lifecycle-group-'));
+  const leader = lifecycleTool(dir, { stdio: 'ignore', exit: false });
+  const pids = [];
   try {
     const run = async (name, options) => {
       const file = path.join(dir, `${name}.pid`);
-      const started = Date.now();
       const result = runTool(process.execPath, [leader, file], options).then((value) => ({ value }), (error) => ({ error }));
-      const pid = await descendant(file);
-      assert.ok(alive(pid), `${name}: the descendant runs`);
-      return { pid, started, result };
+      const pid = await pidFrom(file);
+      pids.push(pid);
+      assert.ok(runs(pid), `${name}: the descendant runs`);
+      // Whether the descendant still runs once runTool has settled.
+      return { result: result.then(async (outcome) => ({ ...outcome, running: await stillRuns(pid) })) };
     };
     const controller = new AbortController();
-    const aborted = await run('abort', { signal: controller.signal });
-    // The leader has exited (it wrote the pid and quit) before the abort.
+    const [aborted, timedOut] = await Promise.all([run('abort', { signal: controller.signal }), run('timeout', { timeout: 3000 })]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     controller.abort(new Error('stop'));
-    const timedOut = await run('timeout', { timeout: 500 });
-    const [abortResult, timeoutResult] = await within(Promise.all([aborted.result, timedOut.result]), 20000);
+    const [abortResult, timeoutResult] = await settlesWithin(Promise.all([aborted.result, timedOut.result]), 25000);
+    assert.deepEqual(
+      { aborted: abortResult.running, timedOut: timeoutResult.running },
+      { aborted: false, timedOut: false },
+      'the descendants of the aborted and the timed-out tool are gone once runTool settles'
+    );
     assert.equal(abortResult.error?.message, 'stop');
     assert.equal(timeoutResult.value?.code, null);
-    assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 0\.5 seconds/);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.equal(alive(aborted.pid), false, 'the descendant of the aborted tool is gone');
-    assert.equal(alive(timedOut.pid), false, 'the descendant of the timed-out tool is gone');
+    assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 3 seconds/);
+    assert.doesNotMatch(timeoutResult.value.stderr, /did not exit/);
   } finally {
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }
+    killAll(pids);
+  }
+});
+
+// Only a stopped tool waits for its group: one that exits by itself settles at once, even if a process it started
+// (holding none of its output) still runs.
+test('runTool settles a tool that exits by itself without waiting for its process group', { skip: process.platform === 'win32' && 'needs POSIX process groups' }, async () => {
+  const dir = mkdtempSync(path.join(root, 'lifecycle-exit-'));
+  const leader = lifecycleTool(dir, { stdio: 'ignore', exit: true, ignoreTerm: false });
+  const file = path.join(dir, 'exit.pid');
+  const pids = [];
+  try {
+    const result = await settlesWithin(runTool(process.execPath, [leader, file], { timeout: 60000 }), 20000);
+    pids.push(await pidFrom(file));
+    assert.equal(result.code, 0);
+    assert.doesNotMatch(result.stderr, /stopped:/);
+    // It settled while the process it started still ran: nothing waited for the group.
+    assert.ok(runs(pids[0]), 'the process the tool started still runs');
+  } finally {
+    killAll(pids);
   }
 });
 

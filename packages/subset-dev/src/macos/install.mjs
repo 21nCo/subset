@@ -8,7 +8,8 @@
 //      the private folder.
 // Any failed step, and a SIGINT, SIGTERM or SIGHUP before step 5 (the caller aborts `signal`), removes the staged copy
 // and writes no receipt. Step 5 is synchronous, so no signal handler runs between the rename and the receipt. A tool
-// that is running when the install is aborted is stopped, and the cleanup starts only once it has exited (runTool).
+// that is running when the install is aborted is stopped with its whole process group, and the cleanup starts only once
+// no process is left in that group (runTool).
 // The cleanup itself is never aborted: it clears the staged copy's ACLs and user flags again (a copy stopped part-way
 // was not cleared yet), makes its folders writable and removes it; it detaches the image by its device, found both in
 // hdiutil attach's output and in hdiutil info (an attach stopped part-way prints nothing), and removes the private
