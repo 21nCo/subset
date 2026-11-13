@@ -52,6 +52,12 @@ export function releaseVersion(version, prerelease) {
   return prerelease === undefined ? version : `${version}-${prerelease.channel}.${prerelease.build}`;
 }
 
+// The name a build's DMG and zip (and their SHA256SUMS lines) start with: the app name, each run of whitespace a
+// hyphen, then the version. scripts/catalog-feed.mjs finds a release's DMG by it.
+export function releaseFileBase(appName, fullVersion) {
+  return `${appName.replace(/\s+/g, '-')}-${fullVersion}`;
+}
+
 // Catalog surfaces list only live releases (AGENTS.md rule 4). The version must be a plain x.y.z, and no link may
 // name a pre-release version such as 0.1.1-beta.2 (a beta tag like /v0.1.1-beta.2 or a file like App-0.1.1-beta.2.dmg).
 // The lookbehind starts a version only at the beginning of a digit run, so long digit runs scan in linear time.
@@ -581,7 +587,7 @@ function main() {
   if (outDirProblem) throw new Error(`Refusing to use ${outDir} as --out: ${outDirProblem}`);
   // Only remove what this script writes; --out may be a folder with other files in it.
   const workDir = path.join(outDir, '.release-macos-work');
-  const base = `${manifest.app.replace(/\s+/g, '-')}-${fullVersion}`;
+  const base = releaseFileBase(manifest.app, fullVersion);
   const zipPath = path.join(outDir, `${base}.zip`);
   const dmgPath = path.join(outDir, `${base}.dmg`);
   for (const owned of [workDir, zipPath, dmgPath, path.join(outDir, 'SHA256SUMS')]) rmSync(owned, { recursive: true, force: true });

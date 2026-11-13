@@ -12,9 +12,9 @@
 //          app's DMG and a SHA256SUMS line for it, from the GitHub REST releases list (with GITHUB_TOKEN when set).
 //          -dev.<n> builds are never listed.
 //   tools  release-packages.json entries whose package has a bin (other than the subset launcher), with the
-//          latest and beta dist-tags from `npm view <package> dist-tags --json` (and `npm view <package>@beta ...` when
-//          npm prints nothing because the package has no latest). A package npm has never seen, or with neither tag,
-//          is left out, and so is a tag whose version the schema does not allow (a latest that is a pre-release).
+//          latest and beta dist-tags from `npm view <package>@latest dist-tags --json` (or `<package>@beta` when the
+//          package has no latest). A package the registry does not have, or with neither tag, is left out, and so is a
+//          tag whose version the schema does not allow (a latest that is a pre-release). Other npm errors stop the build.
 //
 // The document is checked against the schema, the 256 KiB limit and the uniqueness rules before it is written, and
 // written to --out (atomically) or stdout. --recorded <file> answers every GitHub and npm request from a file of
@@ -26,7 +26,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseReleaseTag, readMacosReleaseManifests, releaseVersion } from './release-macos.mjs';
+import { parseReleaseTag, readMacosReleaseManifests, releaseFileBase, releaseVersion } from './release-macos.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const feedDirectory = path.join(repoRoot, 'packages/catalog/feed');
@@ -131,10 +131,10 @@ export function betaCandidates(releases, appId, appName) {
       continue;
     }
     if (tag.appId !== appId || tag.prerelease?.channel !== 'beta' || release.draft !== false || release.prerelease !== true) continue;
-    // release-macos.mjs names the DMG <app>-<x.y.z>-beta.<n>.dmg; GitHub stores a space in an asset name as a dot.
-    const dmgName = `${appName}-${releaseVersion(tag.version, tag.prerelease)}.dmg`;
+    // release-macos.mjs names the DMG, and its SHA256SUMS line, <App-Name>-<x.y.z>-beta.<n>.dmg (whitespace as hyphens).
+    const dmgName = `${releaseFileBase(appName, releaseVersion(tag.version, tag.prerelease))}.dmg`;
     const uploaded = (release.assets ?? []).filter((asset) => asset.state === 'uploaded');
-    const dmg = uploaded.find((asset) => asset.name === dmgName.replaceAll(' ', '.'));
+    const dmg = uploaded.find((asset) => asset.name === dmgName);
     const sums = uploaded.find((asset) => asset.name === 'SHA256SUMS');
     if (!dmg || !sums) continue;
     const expected = { url: `${DOWNLOAD_PREFIX}${release.tag_name}/${dmg.name}`, releaseUrl: `${RELEASE_PAGE_PREFIX}${release.tag_name}`, sums: `${DOWNLOAD_PREFIX}${release.tag_name}/SHA256SUMS` };
@@ -150,7 +150,7 @@ export function betaCandidates(releases, appId, appName) {
 async function betaChannel(candidates, fetchText) {
   for (const candidate of candidates) {
     const sums = await fetchText(candidate.sumsUrl);
-    const hashes = new Set([...sumsFor(sums, candidate.dmgName), ...sumsFor(sums, candidate.dmg.name)]);
+    const hashes = new Set(sumsFor(sums, candidate.dmgName));
     if (hashes.size === 0) continue;
     if (hashes.size > 1) throw new Error(`${candidate.tag} SHA256SUMS lists ${candidate.dmgName} with different checksums`);
     const [sha256] = hashes;
@@ -286,37 +286,51 @@ function runNpm(command, args) {
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-// One `npm view <spec> dist-tags --json`: { tags } when npm answers, { missing: true } for E404 (no such package or
-// tag), {} when npm prints nothing. Anything else (another error, an answer that is not a JSON object) rejects.
-async function viewDistTags(command, spec) {
-  const args = ['view', spec, 'dist-tags', '--json'];
+// npm's E404 messages: the registry has no such package (or every version was unpublished), or the package has no
+// version for the tag asked for. Any other E404 is not understood and stops the build.
+const PACKAGE_MISSING = /^(?:404 )?Not Found - GET |^Unpublished on /;
+const TAG_MISSING = /^No match found for version /;
+
+// One `npm view <package>@<tag> dist-tags --json`. The tag is always named, so npm's configured `tag` is never used.
+// Settles with { tags } for the package's dist-tags (npm 10 prints the object, npm 12 a one-element array of it),
+// { packageMissing: true }, or { tagMissing: true } (npm prints nothing when the package has no latest, and answers
+// E404 "No match found" for another missing tag). Another error or an answer it cannot read rejects.
+async function viewDistTags(command, name, tag) {
+  const args = ['view', `${name}@${tag}`, 'dist-tags', '--json'];
   const { status, stdout } = await runNpm(command, args);
+  if (status === 0 && stdout.trim() === '') return { tagMissing: true };
   let answer;
   try {
-    answer = stdout.trim() === '' ? undefined : JSON.parse(stdout);
+    answer = JSON.parse(stdout);
   } catch {
     answer = undefined;
   }
-  if (status === 0 && stdout.trim() === '') return {};
+  if (status === 0 && Array.isArray(answer) && answer.length === 1) [answer] = answer;
   if (status === 0 && isObject(answer) && answer.error === undefined) return { tags: answer };
-  if (status !== 0 && answer?.error?.code === 'E404') return { missing: true };
-  throw new Error(`npm ${args.join(' ')} failed (exit ${status}): ${answer?.error?.summary ?? 'no JSON answer'}`);
+  const error = isObject(answer) && isObject(answer.error) ? answer.error : undefined;
+  if (status !== 0 && error?.code === 'E404' && typeof error.summary === 'string') {
+    if (PACKAGE_MISSING.test(error.summary)) return { packageMissing: true };
+    if (TAG_MISSING.test(error.summary)) return { tagMissing: true };
+  }
+  const reason = error ? `${error.code}: ${error.summary}` : 'no JSON dist-tags answer';
+  throw new Error(`npm ${args.join(' ')} failed (exit ${status}): ${reason}`);
 }
 
 /**
  * The npm registry's dist-tags, through the npm command (`command`, npm by default): the package's dist-tags, null
- * when npm has no such package, or {} when it has neither a latest nor a beta. `npm view <package>` resolves the
- * latest version first and prints nothing for a package that has none, so then the beta is asked for; its answer
- * holds the package's dist-tags too. (`npm dist-tag ls` is not used: the registry answers 401, not 404, for a scoped
- * package it does not have.)
+ * when the registry has no such package, or {} when it has the package but neither a latest nor a beta. It asks for
+ * <package>@latest and, when the package has no latest, <package>@beta; either answer holds all the package's
+ * dist-tags. (`npm dist-tag ls` is not used: the registry answers 401, not 404, for a scoped package it does not have.)
  */
 export function liveNpm({ command = 'npm' } = {}) {
   return {
     async distTags(name) {
-      const latest = await viewDistTags(command, name);
-      if (latest.missing) return null;
-      if (latest.tags) return latest.tags;
-      return (await viewDistTags(command, `${name}@beta`)).tags ?? {};
+      for (const tag of ['latest', 'beta']) {
+        const answer = await viewDistTags(command, name, tag);
+        if (answer.packageMissing) return null;
+        if (answer.tags) return answer.tags;
+      }
+      return {};
     }
   };
 }
