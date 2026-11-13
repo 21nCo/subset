@@ -38,6 +38,9 @@ export function writeReceipt(home, bundleId, receipt) {
   writeFileSync(path.join(folder, `${bundleId}.json`), typeof receipt === 'string' ? receipt : JSON.stringify(receipt));
 }
 
+/** Why a test running the plutil stand-in (a shebang script, which Windows cannot run) is skipped, or false. */
+export const stubPlutilSkip = process.platform === 'win32' && 'the plutil stand-in is a shebang script, which Windows cannot run';
+
 /**
  * Writes an executable plutil stand-in into `dir` and returns its path. Like `plutil -convert json -o - <file>`, it
  * prints the <key>/<string> pairs of an XML plist's top-level dict as JSON, and fails on anything else or other

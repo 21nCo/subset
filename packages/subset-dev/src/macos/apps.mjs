@@ -60,12 +60,15 @@ function channelOf(receipt, logicalPath, copy) {
   return receipt.channel;
 }
 
-// The Info.plist of an app bundle as JSON, or undefined when the bundle or its Info.plist is not a plain directory and
-// file, or plutil cannot read it.
+// The Info.plist of an app bundle as JSON, or undefined when the bundle, its Contents folder or its Info.plist is not a
+// plain directory, directory and file (a symbolic link at any of them could name a plist outside the bundle), or plutil
+// cannot read it.
 async function readInfoPlist(bundle, plutil) {
   try {
     if (!(await lstat(bundle)).isDirectory()) return undefined;
-    const file = path.join(bundle, 'Contents', 'Info.plist');
+    const contents = path.join(bundle, 'Contents');
+    if (!(await lstat(contents)).isDirectory()) return undefined;
+    const file = path.join(contents, 'Info.plist');
     if (!(await lstat(file)).isFile()) return undefined;
     const { stdout } = await run(plutil, ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', timeout: PLUTIL_TIMEOUT_MS, maxBuffer: MAX_PLIST_JSON_BYTES });
     const info = JSON.parse(stdout);

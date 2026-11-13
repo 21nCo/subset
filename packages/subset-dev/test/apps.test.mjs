@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, PLUTIL, receiptFile } from '../src/macos/apps.mjs';
-import { linkApp, makeApp, stubPlutil, writeReceipt } from './helpers.mjs';
+import { linkApp, makeApp, stubPlutil, stubPlutilSkip, writeReceipt } from './helpers.mjs';
 
 const root = mkdtempSync(path.join(tmpdir(), 'subset-apps-test-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const stub = stubPlutil(root);
-// Every detection test runs with the plutil stand-in, and on macOS also with the real plutil.
-const plutils = [['stub plutil', stub], ...(process.platform === 'darwin' ? [['real plutil', PLUTIL]] : [])];
+// Every detection test runs with the plutil stand-in (except on Windows, which cannot run it), and on macOS also with
+// the real plutil.
+const plutils = [...(stubPlutilSkip ? [] : [['stub plutil', stub]]), ...(process.platform === 'darwin' ? [['real plutil', PLUTIL]] : [])];
 
 const BREAKS = { id: 'breaks', appName: 'Breaks', bundleId: 'dev.subset.breaks' };
 const TIMER = { id: 'timer', appName: 'Timer', bundleId: 'dev.subset.timer' };
@@ -41,7 +42,7 @@ test('looks in /Applications and ~/Applications, or in the two folders of SUBSET
   for (const value of ['/a', `/a${path.delimiter}/b${path.delimiter}/c`, `a${path.delimiter}/b`]) {
     assert.throws(() => applicationsFolders({ env: { SUBSET_APPLICATIONS_DIRS: value }, home: '/Users/alex' }), ApplicationsFoldersError, value);
   }
-  assert.equal(receiptFile('/Users/alex', 'dev.subset.breaks'), '/Users/alex/Library/Application Support/Subset/receipts/dev.subset.breaks.json');
+  assert.equal(receiptFile('/Users/alex', 'dev.subset.breaks'), path.join('/Users/alex', 'Library', 'Application Support', 'Subset', 'receipts', 'dev.subset.breaks.json'));
 });
 
 for (const [label, plutil] of plutils) {
@@ -78,6 +79,19 @@ for (const [label, plutil] of plutils) {
     const system_ = makeApp(system, 'Subset System', { bundleId: 'dev.subset.system', version: '1.0.0', build: '1' });
     writeFileSync(path.join(system_, 'Contents', 'Info.plist'), 'garbage');
     assert.deepEqual(await detectApps([BREAKS, TIMER, SYSTEM], { folders, home, plutil }), [[], [], []]);
+  });
+
+  test(`does not follow a Contents folder that is a symbolic link out of the bundle (${label})`, async () => {
+    const { home, system, folders } = setup();
+    const elsewhere = makeApp(path.join(root, `contents-${count}`), 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
+    const bundle = path.join(system, 'Breaks.app');
+    mkdirSync(bundle);
+    symlinkSync(path.join(elsewhere, 'Contents'), path.join(bundle, 'Contents'));
+    assert.deepEqual(await detectApps([BREAKS], { folders, home, plutil }), [[]]);
+    // The same bundle with a real Contents folder is detected.
+    rmSync(path.join(bundle, 'Contents'));
+    makeApp(system, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
+    assert.equal((await detectApps([BREAKS], { folders, home, plutil }))[0].length, 1);
   });
 
   test(`shows the channel of a receipt that describes the installed copy (${label})`, async () => {
@@ -124,7 +138,7 @@ for (const [label, plutil] of plutils) {
   });
 }
 
-test('an app whose Info.plist plutil cannot convert, or a missing plutil, is not detected', async () => {
+test('an app whose Info.plist plutil cannot convert, or a missing plutil, is not detected', { skip: stubPlutilSkip }, async () => {
   const { home, system, folders } = setup();
   makeApp(system, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
   assert.deepEqual(await detectApps([BREAKS], { folders, home, plutil: path.join(root, 'no-such-plutil') }), [[]]);

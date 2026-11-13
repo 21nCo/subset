@@ -11,6 +11,7 @@ import {
   CatalogUnavailableError,
   catalogUrl,
   DEFAULT_CATALOG_URL,
+  download,
   loadCatalog,
   MAX_FEED_BYTES,
   parseFeed,
@@ -223,6 +224,20 @@ test('ignores a cache for another URL, an unreadable one, and one dated in the f
   await assert.rejects(load({ now: NOW + MINUTE }), /there is no cached copy/);
 });
 
+test('refuses a fresh cache that is not UTF-8, and fetches again', async () => {
+  const { feedFile, load, cache } = setup();
+  await load();
+  // A byte that is never UTF-8 inside the cached feed's summary, a string the schema takes as it is.
+  const bytes = readFileSync(cache);
+  const at = bytes.indexOf('Take well-timed');
+  assert.ok(at > 0);
+  writeFileSync(cache, Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at)]));
+  writeFileSync(feedFile, fixture('catalog-valid-tools-only.json'));
+  const loaded = await load({ now: NOW + MINUTE });
+  assert.equal(loaded.cached, false);
+  assert.equal(loaded.feed.apps.length, 0);
+});
+
 // A stand-in fetch answering with `body` (bytes, sent in chunks) and `status`, recording its requests.
 function fakeFetch({ status = 200, body = fixture('catalog-valid-live-only.json'), headers = {}, error } = {}) {
   const requests = [];
@@ -261,6 +276,18 @@ test('stops reading a feed after 256 KiB and refuses it', async () => {
   const fetch = fakeFetch({ body: Buffer.alloc(4 * MAX_FEED_BYTES, 0x20) });
   await assert.rejects(loadCatalog({ env: {}, platform: 'darwin', home, now: NOW, fetch }), /larger than 262144 bytes/);
   assert.ok(fetch.pulled() <= MAX_FEED_BYTES / (16 * 1024) + 2, `read ${fetch.pulled()} chunks`);
+});
+
+test('keeps at most 256 KiB and one byte of a feed that arrives as one larger chunk', async () => {
+  const body = Buffer.alloc(8 * MAX_FEED_BYTES, 0x20);
+  const fetch = async () => new Response(new ReadableStream({ start: (controller) => (controller.enqueue(body), controller.close()) }));
+  const bytes = await download(new URL(DEFAULT_CATALOG_URL), fetch);
+  assert.equal(bytes.byteLength, MAX_FEED_BYTES + 1);
+  // A feed of exactly 256 KiB, in chunks of every size, is kept whole.
+  const exact = Buffer.alloc(MAX_FEED_BYTES, 0x61);
+  const fetchExact = fakeFetch({ body: exact });
+  assert.deepEqual(await download(new URL(DEFAULT_CATALOG_URL), fetchExact), exact);
+  await assert.rejects(loadCatalog({ env: {}, platform: 'darwin', home: path.join(root, 'one-chunk-home'), now: NOW, fetch }), /larger than 262144 bytes/);
 });
 
 test('an HTTP error or a network failure leaves the catalog unavailable, so a cached copy may stand in', async () => {

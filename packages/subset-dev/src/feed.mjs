@@ -113,8 +113,11 @@ export function readBounded(file, limit) {
   }
 }
 
-// The feed's bytes, at most MAX_FEED_BYTES + 1 of them. https: fetches refuse redirects and time out after 20 s.
-async function download(url, fetchImpl) {
+/**
+ * The feed's bytes, at most MAX_FEED_BYTES + 1 of them however large the chunks it arrives in, so an oversized feed is
+ * known to be too large without keeping it. https: fetches refuse redirects and time out after 20 s.
+ */
+export async function download(url, fetchImpl) {
   if (url.protocol === 'file:') {
     try {
       return readBounded(fileURLToPath(url), MAX_FEED_BYTES);
@@ -132,12 +135,13 @@ async function download(url, fetchImpl) {
     await response.body?.cancel().catch(() => {});
     throw new CatalogUnavailableError(`HTTP ${response.status}`);
   }
-  const chunks = [];
+  const kept = Buffer.alloc(MAX_FEED_BYTES + 1);
   let size = 0;
   try {
     for await (const chunk of response.body ?? []) {
-      chunks.push(chunk);
-      size += chunk.byteLength;
+      const take = Math.min(chunk.byteLength, kept.length - size);
+      kept.set(chunk.subarray(0, take), size);
+      size += take;
       if (size > MAX_FEED_BYTES) {
         await response.body.cancel().catch(() => {});
         break;
@@ -146,7 +150,7 @@ async function download(url, fetchImpl) {
   } catch (error) {
     throw new CatalogUnavailableError(networkReason(error));
   }
-  return Buffer.concat(chunks);
+  return kept.subarray(0, size);
 }
 
 function networkReason(error) {
@@ -156,36 +160,37 @@ function networkReason(error) {
 }
 
 // The cached feed for `url`: { feed, fetchedAt } or undefined when there is none, it is for another URL, or it is
-// unreadable, invalid or dated in the future (it is then simply not used).
+// unreadable, not UTF-8, invalid or dated in the future (it is then simply not used). Never throws: the cache is
+// best-effort.
 function readCache(file, url, now) {
-  let entry;
   try {
     const bytes = readBounded(file, MAX_CACHE_BYTES);
     if (bytes.byteLength > MAX_CACHE_BYTES) return undefined;
-    entry = JSON.parse(bytes.toString('utf8'));
+    const entry = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+    if (entry?.schema !== CACHE_SCHEMA || entry.url !== url.href || typeof entry.body !== 'string' || typeof entry.fetchedAt !== 'string') return undefined;
+    const fetchedAt = Date.parse(entry.fetchedAt);
+    if (!Number.isFinite(fetchedAt) || fetchedAt > now) return undefined;
+    const { feed } = parseFeed(Buffer.from(entry.body, 'utf8'));
+    return feed ? { feed, fetchedAt } : undefined;
   } catch {
     return undefined;
   }
-  if (entry?.schema !== CACHE_SCHEMA || entry.url !== url.href || typeof entry.body !== 'string' || typeof entry.fetchedAt !== 'string') return undefined;
-  const fetchedAt = Date.parse(entry.fetchedAt);
-  if (!Number.isFinite(fetchedAt) || fetchedAt > now) return undefined;
-  const { feed } = parseFeed(Buffer.from(entry.body, 'utf8'));
-  return feed ? { feed, fetchedAt } : undefined;
 }
 
 // Replaces the cached copy atomically (a uniquely named temporary file renamed over it). The cache is best-effort: when
-// its folder cannot be made or written (not a folder, no permission, a full disk) nothing is thrown, the temporary file
-// is removed if it can be, and the next run fetches again.
+// any step fails (naming the temporary file, making the folder, writing, renaming: not a folder, no permission, a full
+// disk) nothing is thrown, the temporary file is removed if there is one and it can be, and the next run fetches again.
 function writeCache(file, url, bytes, now) {
-  const temporary = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  let temporary;
   try {
+    temporary = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     mkdirSync(path.dirname(file), { recursive: true });
     const entry = { schema: CACHE_SCHEMA, url: url.href, fetchedAt: new Date(now).toISOString(), body: bytes.toString('utf8') };
     writeFileSync(temporary, JSON.stringify(entry), { mode: 0o600 });
     renameSync(temporary, file);
   } catch {
     try {
-      rmSync(temporary, { force: true });
+      if (temporary !== undefined) rmSync(temporary, { force: true });
     } catch {
       // The temporary file cannot be removed either (its folder is not a folder or not writable): leave it.
     }

@@ -3,12 +3,13 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { after, test } from 'node:test';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { after, mock, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { listDocument, listText, parseListArgs, runList } from '../src/commands/list.mjs';
 import { cacheFile } from '../src/feed.mjs';
 import { PLUTIL } from '../src/macos/apps.mjs';
-import { makeApp, stubPlutil, writeReceipt } from './helpers.mjs';
+import { makeApp, stubPlutil, stubPlutilSkip, writeReceipt } from './helpers.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const fixturesDir = new URL('../../catalog/feed/fixtures/', import.meta.url);
@@ -47,8 +48,11 @@ async function list(args, { env, platform = 'darwin', home, now = NOW, plutil = 
   return { code, stdout, stderr };
 }
 
-// Runs the real command, without network: every test names its feed with SUBSET_CATALOG_URL.
-const subset = (args, env) => spawnSync(process.execPath, [cli, 'list', ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
+// Runs the real command, without network: every test names its feed with SUBSET_CATALOG_URL. The home folder is the
+// test's on every platform (HOME, and USERPROFILE on Windows), and the cache is in it: no XDG_CACHE_HOME or
+// LOCALAPPDATA of the user running the tests is inherited, so their own cache is never read or replaced.
+const subset = (args, env) =>
+  spawnSync(process.execPath, [cli, 'list', ...args], { encoding: 'utf8', env: { ...process.env, XDG_CACHE_HOME: '', LOCALAPPDATA: '', ...env, USERPROFILE: env.HOME ?? '' } });
 
 test('takes --beta, --json and --refresh, and nothing else', () => {
   assert.deepEqual(parseListArgs([]), { beta: false, json: false, refresh: false });
@@ -58,7 +62,7 @@ test('takes --beta, --json and --refresh, and nothing else', () => {
   assert.match(parseListArgs(['--', 'x']).error, /does not take the option "--"/);
 });
 
-test('lists installed apps, live versions and tools; --beta adds the beta column', async () => {
+test('lists installed apps, live versions and tools; --beta adds the beta column', { skip: stubPlutilSkip }, async () => {
   const { home, system, user, dirs } = setup();
   makeApp(user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
   // A same-named app that is not Subset's Timer.
@@ -90,7 +94,7 @@ usage  0.2.0  0.2.1-beta.1
   );
 });
 
-test('shows the channel from a matching receipt', async () => {
+test('shows the channel from a matching receipt', { skip: stubPlutilSkip }, async () => {
   const { home, system, dirs } = setup();
   makeApp(system, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.1', build: '4' });
   writeReceipt(home, 'dev.subset.breaks', { schema: 'subset.receipt@1', channel: 'beta', version: '0.1.1', build: 4, sha256: SHA, installedAt: '2026-11-12T09:30:00Z', path: '/Applications/Breaks.app' });
@@ -101,7 +105,7 @@ test('shows the channel from a matching receipt', async () => {
   assert.deepEqual(JSON.parse(json).apps[0].installed, [{ path: path.join(system, 'Breaks.app'), folder: '/Applications', version: '0.1.1', build: '4', channel: 'beta' }]);
 });
 
-test('--json prints the subset.list@1 document', async () => {
+test('--json prints the subset.list@1 document', { skip: stubPlutilSkip }, async () => {
   const { home, user, dirs } = setup();
   makeApp(user, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.0', build: '1' });
   const url = fixtureUrl('catalog-valid-live-and-beta.json');
@@ -129,6 +133,29 @@ test('--json prints the subset.list@1 document', async () => {
   });
   // --beta changes only the text: the document always has both channels.
   assert.equal((await list(['--json', '--beta'], { env: { SUBSET_CATALOG_URL: url, SUBSET_APPLICATIONS_DIRS: dirs }, home, now: NOW + 1000 })).stdout.replace('"cached": true', '"cached": false'), stdout);
+});
+
+test('prints control characters and line separators of an installed app\'s version as visible escapes, and keeps them in --json', async () => {
+  const forged = '1.0\u001b]8;;https://x.test\u0007\u001b[2J\nfake    9.9.9 (/Applications)\u2028\u0085\u007f';
+  const shown = '1.0\\x1b]8;;https://x.test\\x07\\x1b[2J\\x0afake    9.9.9 (/Applications)\\u2028\\x85\\x7f';
+  const catalog = { url: 'https://x.test/', fetchedAt: NOW, cached: false, feed: JSON.parse(readFileSync(new URL('catalog-valid-live-only.json', fixturesDir), 'utf8')) };
+  const document = listDocument(catalog, [[{ path: '/Applications/Breaks.app', folder: '/Applications', version: forged, build: '1\r', channel: 'beta' }]], 'darwin');
+  const cell = `${shown}-beta.1\\x0d (beta, /Applications)`;
+  assert.equal(listText(document, { beta: false }), `APP     ${'INSTALLED'.padEnd(cell.length)}  LIVE\nbreaks  ${cell}  0.1.0\n`);
+  // Through the command, with the plutil stand-in and on macOS the real plutil.
+  const plutils = [...(stubPlutilSkip ? [] : [stub]), ...(process.platform === 'darwin' ? [PLUTIL] : [])];
+  for (const plutil of plutils) {
+    const { home, system, dirs } = setup();
+    makeApp(system, 'Breaks', { bundleId: 'dev.subset.breaks', version: forged, build: '1' });
+    const env = { SUBSET_CATALOG_URL: fixtureUrl('catalog-valid-live-only.json'), SUBSET_APPLICATIONS_DIRS: dirs };
+    const text = await list([], { env, home, plutil });
+    assert.equal(text.code, 0, plutil);
+    assert.equal(text.stdout.split('\n')[1], `breaks  ${shown} (/Applications)  0.1.0`, plutil);
+    assert.doesNotMatch(text.stdout, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/, plutil);
+    assert.equal(text.stdout.split('\n').length, 3, plutil);
+    const json = await list(['--json'], { env, home, plutil, now: NOW + 1000 });
+    assert.equal(JSON.parse(json.stdout).apps[0].installed[0].version, forged, plutil);
+  }
 });
 
 test('on Linux and Windows, lists the apps with their installation unsupported, and the tools', async () => {
@@ -258,6 +285,24 @@ test('lists a valid catalog and exits 0 when the cache cannot be written or read
         // Not a folder in this case.
       }
     }
+  }
+});
+
+test('lists a valid catalog and exits 0 when the cache\'s temporary file cannot be named', async () => {
+  // randomBytes, which names the temporary file, fails (as it may when the system has no entropy to give).
+  const crypto = createRequire(import.meta.url)('node:crypto');
+  mock.method(crypto, 'randomBytes', () => {
+    throw new Error('no entropy');
+  });
+  syncBuiltinESMExports();
+  try {
+    const { home, dirs } = setup();
+    const env = { SUBSET_CATALOG_URL: fixtureUrl('catalog-valid-live-only.json'), SUBSET_APPLICATIONS_DIRS: dirs };
+    assert.deepEqual(await list([], { env, home }), { code: 0, stdout: 'APP     INSTALLED  LIVE\nbreaks  -          0.1.0\n', stderr: '' });
+    assert.equal(crypto.randomBytes.mock.callCount(), 1);
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
   }
 });
 
