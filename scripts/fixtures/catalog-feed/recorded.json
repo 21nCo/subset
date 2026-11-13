@@ -1,0 +1,671 @@
+{
+  "recordedAt": "2026-11-12T23:20:00Z",
+  "github": {
+    "https://api.github.com/repos/21nCo/subset/releases?per_page=100&page=1": [
+      {
+        "tag_name": "macos/timer/v0.1.0-beta.2",
+        "name": "Timer 0.1.0-beta.2 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/timer/v0.1.0-beta.2",
+        "published_at": "2026-11-12T10:37:00Z",
+        "assets": [
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:c55cb5c84b5e88688ce6b4e6049538371ff652e19ee0ebc860bf70d6d7763e5b",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.2/SHA256SUMS"
+          },
+          {
+            "name": "Timer-0.1.0-beta.2.dmg",
+            "state": "uploaded",
+            "size": 1166765,
+            "digest": "sha256:5fba2c0d603fc50817287495ce588446c1acb63921f4d975c908bdb6ddbf4a83",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.2/Timer-0.1.0-beta.2.dmg"
+          },
+          {
+            "name": "Timer-0.1.0-beta.2.zip",
+            "state": "uploaded",
+            "size": 1010328,
+            "digest": "sha256:093fc526450cc871ed720613be2186b5f2f33b1c9e6b0d36484cbfd40de8cdce",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.2/Timer-0.1.0-beta.2.zip"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/screenshot/v1.0.0-beta.3",
+        "name": "Screenshot 1.0.0-beta.3 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/screenshot/v1.0.0-beta.3",
+        "published_at": "2026-11-12T07:23:57Z",
+        "assets": [
+          {
+            "name": "Screenshot-1.0.0-beta.3.dmg",
+            "state": "uploaded",
+            "size": 3461645,
+            "digest": "sha256:2d94f5309165266358d9909d0f94069a105d4ff97123e75dc066c6bc1f850d46",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-beta.3/Screenshot-1.0.0-beta.3.dmg"
+          },
+          {
+            "name": "Screenshot-1.0.0-beta.3.zip",
+            "state": "uploaded",
+            "size": 2451219,
+            "digest": "sha256:4d152298811739b3d47bbd98b7d51ddfff2d5e9c91017d297a43e76eddbd7f92",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-beta.3/Screenshot-1.0.0-beta.3.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 188,
+            "digest": "sha256:c5600980064cf42d23c49776bbf4e74b70fedaca06eb6b5cc327fd01c8c09beb",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-beta.3/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/timer/v0.1.0-beta.1",
+        "name": "Timer 0.1.0-beta.1 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/timer/v0.1.0-beta.1",
+        "published_at": "2026-10-30T02:13:32Z",
+        "assets": [
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:061c432c8bae99acba6557f2cc3a77d6def05ffa3a7069af2289e7e2363d09a8",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.1/SHA256SUMS"
+          },
+          {
+            "name": "Timer-0.1.0-beta.1.dmg",
+            "state": "uploaded",
+            "size": 1166733,
+            "digest": "sha256:66932cef36e0b3fb1d16f8ddb405b3f4325ea0e775693768f97165aa9fddf396",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.1/Timer-0.1.0-beta.1.dmg"
+          },
+          {
+            "name": "Timer-0.1.0-beta.1.zip",
+            "state": "uploaded",
+            "size": 1010318,
+            "digest": "sha256:3fd04ca63f60160c7594f0f9d3ae3429938fefd1130478ccbd5ef56237afc6e0",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.1/Timer-0.1.0-beta.1.zip"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/hop/v0.1.0-beta.2",
+        "name": "Hop 0.1.0-beta.2 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/hop/v0.1.0-beta.2",
+        "published_at": "2026-10-23T18:44:23Z",
+        "assets": [
+          {
+            "name": "Hop-0.1.0-beta.2.dmg",
+            "state": "uploaded",
+            "size": 799070,
+            "digest": "sha256:fa6351ee12ea805241ee45bc20f2540ef0b4ebf0313322f6bacb2144fcba546a",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.2/Hop-0.1.0-beta.2.dmg"
+          },
+          {
+            "name": "Hop-0.1.0-beta.2.zip",
+            "state": "uploaded",
+            "size": 707613,
+            "digest": "sha256:4ef0d291e8bf9bf5129df80b0d0e862d0aa2de6a730958021163491d6b465de4",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.2/Hop-0.1.0-beta.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 174,
+            "digest": "sha256:857711efeb07ce8bb959a1e679dd24a40c15a0b0ae75da1ba8fdae8151afccc6",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/hop/v0.1.0-beta.1",
+        "name": "Hop 0.1.0-beta.1 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/hop/v0.1.0-beta.1",
+        "published_at": "2026-10-21T20:25:52Z",
+        "assets": [
+          {
+            "name": "Hop-0.1.0-beta.1.dmg",
+            "state": "uploaded",
+            "size": 794604,
+            "digest": "sha256:0bfcda9ad836360a7426885a5211dc6e1536d9589e862f4da2bcceca50d6428b",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.1/Hop-0.1.0-beta.1.dmg"
+          },
+          {
+            "name": "Hop-0.1.0-beta.1.zip",
+            "state": "uploaded",
+            "size": 704126,
+            "digest": "sha256:9620991e59638c528280be9f801687ae5adcb96330170f9f6b8eb4c4b4ef1b97",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.1/Hop-0.1.0-beta.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 174,
+            "digest": "sha256:099817f78cdb23197090be7f34108501726aa96f721a39441614e655b73196ff",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/minutes/v0.1.0-beta.2",
+        "name": "Minutes 0.1.0-beta.2 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/minutes/v0.1.0-beta.2",
+        "published_at": "2026-10-18T06:46:56Z",
+        "assets": [
+          {
+            "name": "Minutes-0.1.0-beta.2.dmg",
+            "state": "uploaded",
+            "size": 6135048,
+            "digest": "sha256:a9c45ca9d588e5031eb5d73ed5bd05577b09e96ec743b8df20ae0f10e0699675",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-beta.2/Minutes-0.1.0-beta.2.dmg"
+          },
+          {
+            "name": "Minutes-0.1.0-beta.2.zip",
+            "state": "uploaded",
+            "size": 4643348,
+            "digest": "sha256:01ac064e1bfaf4ec581c7cfa7fdd78b0176e0a4dd8dca66a727cd194a9c17a64",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-beta.2/Minutes-0.1.0-beta.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 182,
+            "digest": "sha256:43ab0759535f987bac69d769bfdc9b5adbe3bb1edcd647661965df3df00df4f5",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-beta.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/breaks/v0.1.1-beta.4",
+        "name": "Breaks 0.1.1-beta.4 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-beta.4",
+        "published_at": "2026-10-18T18:35:16Z",
+        "assets": [
+          {
+            "name": "Breaks-0.1.1-beta.4.dmg",
+            "state": "uploaded",
+            "size": 2784450,
+            "digest": "sha256:6d37efbe0af41ce3b1acbdff2b70990988be4318799e40f99dcedf417c612f4d",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.4/Breaks-0.1.1-beta.4.dmg"
+          },
+          {
+            "name": "Breaks-0.1.1-beta.4.zip",
+            "state": "uploaded",
+            "size": 2630724,
+            "digest": "sha256:46e222d837149f2bdfc04f815e79dcef7eacc03aea78a48fb55f70da09e607f4",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.4/Breaks-0.1.1-beta.4.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 180,
+            "digest": "sha256:fa7407289c69520bdae24e42ca199f80966a7046b237ca7928a9676d76c86582",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.4/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/breaks/v0.1.1-beta.3",
+        "name": "Breaks 0.1.1-beta.3 (beta build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-beta.3",
+        "published_at": "2026-10-18T06:46:01Z",
+        "assets": [
+          {
+            "name": "Breaks-0.1.1-beta.3.dmg",
+            "state": "uploaded",
+            "size": 2784436,
+            "digest": "sha256:c82f6c2c9c29aa9bbec1b4efa5aa33e367b94779b49a282a31f8c6c0dcb9df2f",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.3/Breaks-0.1.1-beta.3.dmg"
+          },
+          {
+            "name": "Breaks-0.1.1-beta.3.zip",
+            "state": "uploaded",
+            "size": 2630711,
+            "digest": "sha256:73ab0aea54d9039647e3d8f4c554fa6e67589445191ea9140c8df2dc1250ce69",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.3/Breaks-0.1.1-beta.3.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 180,
+            "digest": "sha256:5ede50beb1a3b30153e8be6d657914269403469622326a473c32435567db395c",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.3/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/screenshot/v1.0.0-dev.2",
+        "name": "Screenshot 1.0.0-dev.2 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/screenshot/v1.0.0-dev.2",
+        "published_at": "2026-10-11T11:11:45Z",
+        "assets": [
+          {
+            "name": "Screenshot-1.0.0-dev.2.dmg",
+            "state": "uploaded",
+            "size": 2445951,
+            "digest": "sha256:8a152bcf41b763979105116b204f7a58b5466438f2579d02026ae9aceb305a3a",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.2/Screenshot-1.0.0-dev.2.dmg"
+          },
+          {
+            "name": "Screenshot-1.0.0-dev.2.zip",
+            "state": "uploaded",
+            "size": 2333931,
+            "digest": "sha256:b9a33df3716c2d368e8a843381f929a0ed0f0c229fa9626d3852953158498d0b",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.2/Screenshot-1.0.0-dev.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 186,
+            "digest": "sha256:56668936e46cc16df82a57dafd623bb823dc988b02c34f84b08d6de055387cfd",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/screenshot/v1.0.0-dev.1",
+        "name": "Screenshot 1.0.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/screenshot/v1.0.0-dev.1",
+        "published_at": "2026-10-11T08:37:16Z",
+        "assets": [
+          {
+            "name": "Screenshot-1.0.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 2445968,
+            "digest": "sha256:d84a63e1409ff81e98792f2a48650193bf09284729055b1037298f8c72616513",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.1/Screenshot-1.0.0-dev.1.dmg"
+          },
+          {
+            "name": "Screenshot-1.0.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 2333924,
+            "digest": "sha256:9e5f83cfa7dc4139ee2f42a2c01312ca37cf7ac0b37a170be79de1fd3b879961",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.1/Screenshot-1.0.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 186,
+            "digest": "sha256:1b2e0101f0181c35b535a40c152bd0fc457eddc87e4ea85722cf7f3ae03f1f0f",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/record/v0.1.0-dev.2",
+        "name": "Record 0.1.0-dev.2 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/record/v0.1.0-dev.2",
+        "published_at": "2026-10-11T11:11:46Z",
+        "assets": [
+          {
+            "name": "Record-0.1.0-dev.2.dmg",
+            "state": "uploaded",
+            "size": 1838304,
+            "digest": "sha256:5b97646180737dfc9e18bfbf228875059a34d5a829500b47981dd1ca438f683e",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.2/Record-0.1.0-dev.2.dmg"
+          },
+          {
+            "name": "Record-0.1.0-dev.2.zip",
+            "state": "uploaded",
+            "size": 1768659,
+            "digest": "sha256:e0d523d3fe655ee7d6982e63e4abc2bb2774624229466817cac6d6fa0841a402",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.2/Record-0.1.0-dev.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:5d0f331860f505620f8cd0fb3960108792545dbb1e0f713a4b8f886fa173ca15",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/record/v0.1.0-dev.1",
+        "name": "Record 0.1.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/record/v0.1.0-dev.1",
+        "published_at": "2026-10-11T08:37:23Z",
+        "assets": [
+          {
+            "name": "Record-0.1.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 1838298,
+            "digest": "sha256:6fc4be06698ebcff5f803e8cbe7d0b198d2e7ee85c189b7085df43bacfb7e282",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.1/Record-0.1.0-dev.1.dmg"
+          },
+          {
+            "name": "Record-0.1.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 1768671,
+            "digest": "sha256:e231004a619e6da04d0d3bc34f9f86cb148ee6fd1a7499d6570fd13ad98263f7",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.1/Record-0.1.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:6e3ffd341c631b8fbb524b5cd3087aa3115ee3a8befe605030677be0b6a50c39",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/record/v0.1.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/minutes/v0.1.0-dev.1",
+        "name": "Minutes 0.1.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/minutes/v0.1.0-dev.1",
+        "published_at": "2026-10-11T11:07:26Z",
+        "assets": [
+          {
+            "name": "Minutes-0.1.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 6135038,
+            "digest": "sha256:71c58e6cfd4400d08b916d3304e62d536736869753d54f4f86a0d08aa905a803",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-dev.1/Minutes-0.1.0-dev.1.dmg"
+          },
+          {
+            "name": "Minutes-0.1.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 4643352,
+            "digest": "sha256:8fe2c27e0a264cec502e96ecb21ad3b280a28aa0e706c029a3f8ac9089a29851",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-dev.1/Minutes-0.1.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 180,
+            "digest": "sha256:cc782b57d673758731d46902b0a0b1461bbd80a1734a4f6e7d31f8edb102cbac",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/launcher/v1.0.0-dev.2",
+        "name": "Launcher 1.0.0-dev.2 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/launcher/v1.0.0-dev.2",
+        "published_at": "2026-10-11T11:15:11Z",
+        "assets": [
+          {
+            "name": "Launcher-1.0.0-dev.2.dmg",
+            "state": "uploaded",
+            "size": 2766691,
+            "digest": "sha256:981bf2fbb3f541a46a3696b68f5c78b4ee29b964afb848363b0d48a2fb1ee3c4",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.2/Launcher-1.0.0-dev.2.dmg"
+          },
+          {
+            "name": "Launcher-1.0.0-dev.2.zip",
+            "state": "uploaded",
+            "size": 2593484,
+            "digest": "sha256:a3ca69d214b906cb78f55b7ccecaa327135849e0df90410fe2b2465a7cf8d64f",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.2/Launcher-1.0.0-dev.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 182,
+            "digest": "sha256:cfe22d6478341ccd93f6ee5f9123abdeba3b6b528340fff4d7681abd3f3ead71",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/launcher/v1.0.0-dev.1",
+        "name": "Launcher 1.0.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/launcher/v1.0.0-dev.1",
+        "published_at": "2026-10-11T08:53:49Z",
+        "assets": [
+          {
+            "name": "Launcher-1.0.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 2772814,
+            "digest": "sha256:63a096e8e8871e9910ad59613a0a8150de5047891f577ea70179977cb4379ccf",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.1/Launcher-1.0.0-dev.1.dmg"
+          },
+          {
+            "name": "Launcher-1.0.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 2598758,
+            "digest": "sha256:b01dee50fbb767b75057ed07a6f3469088f4f2dabcdad8c047bf403d261c9a99",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.1/Launcher-1.0.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 182,
+            "digest": "sha256:886eaed994727fbe4a86e745067759e6acbc77e71b13ecdcac62e54f82f44865",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/launcher/v1.0.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/dictate/v0.1.0-dev.1",
+        "name": "Dictate 0.1.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/dictate/v0.1.0-dev.1",
+        "published_at": "2026-10-11T11:07:28Z",
+        "assets": [
+          {
+            "name": "Dictate-0.1.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 3871403,
+            "digest": "sha256:8e1fcc80c20558d5f7d6261c1ed3af1eb2ac2f8c8c295b42167bf2a6fd443fd4",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/dictate/v0.1.0-dev.1/Dictate-0.1.0-dev.1.dmg"
+          },
+          {
+            "name": "Dictate-0.1.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 3630010,
+            "digest": "sha256:b7539a33cadfe8caf6b95c7d2a3000b8093de727b54d67f766d6e1819512d303",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/dictate/v0.1.0-dev.1/Dictate-0.1.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 180,
+            "digest": "sha256:15d481642beace185ee1bdc6bc90dd61f3ffaea83c191bca3265ee4b89188f97",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/dictate/v0.1.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/clipboard/v1.0.0-dev.2",
+        "name": "Clipboard 1.0.0-dev.2 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/clipboard/v1.0.0-dev.2",
+        "published_at": "2026-10-11T11:11:25Z",
+        "assets": [
+          {
+            "name": "Clipboard-1.0.0-dev.2.dmg",
+            "state": "uploaded",
+            "size": 1990985,
+            "digest": "sha256:e4e6895a16e46b7e2235b1838a399475fe21992cfb80a5d1463a858445de11ed",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.2/Clipboard-1.0.0-dev.2.dmg"
+          },
+          {
+            "name": "Clipboard-1.0.0-dev.2.zip",
+            "state": "uploaded",
+            "size": 1899928,
+            "digest": "sha256:f79f5630dea92cc8ac1cf5731eec24126cbc12bff3e82a38839403145fe2d135",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.2/Clipboard-1.0.0-dev.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 184,
+            "digest": "sha256:8d83339fa5af293ce3900091efef697b1d696045db268171aa586e53ccec4d16",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/clipboard/v1.0.0-dev.1",
+        "name": "Clipboard 1.0.0-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/clipboard/v1.0.0-dev.1",
+        "published_at": "2026-10-11T08:37:41Z",
+        "assets": [
+          {
+            "name": "Clipboard-1.0.0-dev.1.dmg",
+            "state": "uploaded",
+            "size": 1990995,
+            "digest": "sha256:c3d62fd39a0f436a07f16d4178df12249fab1fbc45da7233cab5c8ca1f309e11",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.1/Clipboard-1.0.0-dev.1.dmg"
+          },
+          {
+            "name": "Clipboard-1.0.0-dev.1.zip",
+            "state": "uploaded",
+            "size": 1899926,
+            "digest": "sha256:28a5b9a07a4876033d169a176e6423dfbbc227efa1bab1d25e6c5df90140f93e",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.1/Clipboard-1.0.0-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 184,
+            "digest": "sha256:3b373588f50ebc4272c0659520274442ef7f34ae165266e7b6d6ff19839bac59",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/clipboard/v1.0.0-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/breaks/v0.1.1-dev.2",
+        "name": "Breaks 0.1.1-dev.2 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-dev.2",
+        "published_at": "2026-10-11T11:10:57Z",
+        "assets": [
+          {
+            "name": "Breaks-0.1.1-dev.2.dmg",
+            "state": "uploaded",
+            "size": 2109503,
+            "digest": "sha256:6c4cba960e71af781b76a9503d021aef91174d266d949063c2e1e208e0f21e86",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.2/Breaks-0.1.1-dev.2.dmg"
+          },
+          {
+            "name": "Breaks-0.1.1-dev.2.zip",
+            "state": "uploaded",
+            "size": 2036342,
+            "digest": "sha256:5fa521ecf58cdc4dec7201a91794339f625b1acfee1675c7a667391dc59a2956",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.2/Breaks-0.1.1-dev.2.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:4d5329605b4b33682f01b23b110098779119802c7bebdbd3eedc9c07595f2964",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.2/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/breaks/v0.1.1-dev.1",
+        "name": "Breaks 0.1.1-dev.1 (dev build)",
+        "draft": false,
+        "prerelease": true,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.1-dev.1",
+        "published_at": "2026-10-11T08:33:51Z",
+        "assets": [
+          {
+            "name": "Breaks-0.1.1-dev.1.dmg",
+            "state": "uploaded",
+            "size": 2109510,
+            "digest": "sha256:ce28f18e73106ff6df882e198cbc6bd7b5908ac135b9cb1c1a040912c43caebb",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.1/Breaks-0.1.1-dev.1.dmg"
+          },
+          {
+            "name": "Breaks-0.1.1-dev.1.zip",
+            "state": "uploaded",
+            "size": 2036348,
+            "digest": "sha256:9ca2ecd5ceeb8a335637a7cfaa98d94c70b4d9db7d3554355ffb0ac644955778",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.1/Breaks-0.1.1-dev.1.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 178,
+            "digest": "sha256:38d2edf75eed1937348c91023382888f5dc7dc073745867aa43cad36c6596979",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-dev.1/SHA256SUMS"
+          }
+        ]
+      },
+      {
+        "tag_name": "macos/breaks/v0.1.0",
+        "name": "Breaks 0.1.0 for macOS",
+        "draft": false,
+        "prerelease": false,
+        "html_url": "https://github.com/21nCo/subset/releases/tag/macos/breaks/v0.1.0",
+        "published_at": "2026-10-10T18:20:33Z",
+        "assets": [
+          {
+            "name": "Breaks-0.1.0.dmg",
+            "state": "uploaded",
+            "size": 2109493,
+            "digest": "sha256:5ce3e8c78fcb273a738cdc72eec829716b5da3e945ad5ce45fe26f10d4fbd92e",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg"
+          },
+          {
+            "name": "Breaks-0.1.0.zip",
+            "state": "uploaded",
+            "size": 2036351,
+            "digest": "sha256:062285c156e7015623336d86d99904b7e576bc8e6ec0c65c3bfcac53179e9848",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.zip"
+          },
+          {
+            "name": "SHA256SUMS",
+            "state": "uploaded",
+            "size": 166,
+            "digest": "sha256:79bf0c67d5a93a283549ec49f2de32b8d790c9346530dc84ddc574a0401d87f2",
+            "browser_download_url": "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/SHA256SUMS"
+          }
+        ]
+      }
+    ],
+    "https://github.com/21nCo/subset/releases/download/macos/timer/v0.1.0-beta.2/SHA256SUMS": "5fba2c0d603fc50817287495ce588446c1acb63921f4d975c908bdb6ddbf4a83  Timer-0.1.0-beta.2.dmg\n093fc526450cc871ed720613be2186b5f2f33b1c9e6b0d36484cbfd40de8cdce  Timer-0.1.0-beta.2.zip\n",
+    "https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1-beta.4/SHA256SUMS": "6d37efbe0af41ce3b1acbdff2b70990988be4318799e40f99dcedf417c612f4d  Breaks-0.1.1-beta.4.dmg\n46e222d837149f2bdfc04f815e79dcef7eacc03aea78a48fb55f70da09e607f4  Breaks-0.1.1-beta.4.zip\n",
+    "https://github.com/21nCo/subset/releases/download/macos/hop/v0.1.0-beta.2/SHA256SUMS": "fa6351ee12ea805241ee45bc20f2540ef0b4ebf0313322f6bacb2144fcba546a  Hop-0.1.0-beta.2.dmg\n4ef0d291e8bf9bf5129df80b0d0e862d0aa2de6a730958021163491d6b465de4  Hop-0.1.0-beta.2.zip\n",
+    "https://github.com/21nCo/subset/releases/download/macos/minutes/v0.1.0-beta.2/SHA256SUMS": "a9c45ca9d588e5031eb5d73ed5bd05577b09e96ec743b8df20ae0f10e0699675  Minutes-0.1.0-beta.2.dmg\n01ac064e1bfaf4ec581c7cfa7fdd78b0176e0a4dd8dca66a727cd194a9c17a64  Minutes-0.1.0-beta.2.zip\n",
+    "https://github.com/21nCo/subset/releases/download/macos/screenshot/v1.0.0-beta.3/SHA256SUMS": "2d94f5309165266358d9909d0f94069a105d4ff97123e75dc066c6bc1f850d46  Screenshot-1.0.0-beta.3.dmg\n4d152298811739b3d47bbd98b7d51ddfff2d5e9c91017d297a43e76eddbd7f92  Screenshot-1.0.0-beta.3.zip\n"
+  },
+  "npm": {
+    "@subset.dev/usage": {
+      "latest": "0.2.0",
+      "beta": "0.2.0-beta.2"
+    },
+    "@subset.dev/minutes": null,
+    "@subset.dev/timer": null
+  }
+}

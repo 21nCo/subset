@@ -2,5 +2,9 @@
   "project": "System.xcodeproj",
   "scheme": "SubsetSystem",
   "app": "Subset System",
-  "team": "SAZVPX4CAA"
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.system",
+  "helpers": [
+    { "command": "system", "path": "Contents/Helpers/subset-system", "kind": "native" }
+  ]
 }

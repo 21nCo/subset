@@ -2,5 +2,6 @@
   "project": "Launcher.xcodeproj",
   "scheme": "Launcher",
   "app": "Launcher",
-  "team": "SAZVPX4CAA"
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.launcher"
 }

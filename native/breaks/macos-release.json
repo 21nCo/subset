@@ -1,1 +1,7 @@
-{ "project": "Breaks.xcodeproj", "scheme": "BreaksMac", "app": "Breaks", "team": "SAZVPX4CAA" }
+{
+  "project": "Breaks.xcodeproj",
+  "scheme": "BreaksMac",
+  "app": "Breaks",
+  "team": "SAZVPX4CAA",
+  "bundleId": "dev.subset.breaks"
+}

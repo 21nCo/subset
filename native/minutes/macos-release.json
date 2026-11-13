@@ -3,5 +3,9 @@
   "scheme": "Minutes",
   "app": "Minutes",
   "team": "SAZVPX4CAA",
-  "workspaces": ["@subset.dev/minutes-core", "@subset.dev/minutes"]
+  "workspaces": ["@subset.dev/minutes-core", "@subset.dev/minutes"],
+  "bundleId": "dev.subset.minutes",
+  "helpers": [
+    { "command": "minutes", "path": "Contents/Resources/minutes-cli/dist/cli.mjs", "kind": "node" }
+  ]
 }

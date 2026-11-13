@@ -3,5 +3,9 @@
   "scheme": "Timer",
   "app": "Timer",
   "team": "SAZVPX4CAA",
-  "workspaces": ["@subset.dev/timer-core", "@subset.dev/timer-web", "@subset.dev/timer"]
+  "workspaces": ["@subset.dev/timer-core", "@subset.dev/timer-web", "@subset.dev/timer"],
+  "bundleId": "dev.subset.timer",
+  "helpers": [
+    { "command": "timer", "path": "Contents/Resources/timer-cli/dist/cli.mjs", "kind": "node" }
+  ]
 }
