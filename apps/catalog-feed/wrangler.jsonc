@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // Serves the subset.catalog@1 feed (docs/catalog-feed.md) as a static asset: no Worker script, bindings or storage.
+  // public/catalog/v1.json is written by .github/workflows/catalog-feed.yml and is not committed.
+  "name": "subset-catalog-feed",
+  // The 21n-dev Cloudflare account. Deploys go only here, whatever account the API token can also reach.
+  "account_id": "c801efc2879825babdb9b2534199c4dd",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public"
+  },
+  // Only the custom domain serves the feed; no workers.dev or preview URL.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "subset.21n.dev", "custom_domain": true }]
+}
