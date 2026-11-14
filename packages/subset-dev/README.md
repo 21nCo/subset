@@ -21,8 +21,12 @@ With `npm install -g subset.dev`, the same commands are `subset usage`, `subset 
 | Tool | Runs |
 | --- | --- |
 | `usage` | `subset-usage` from [`@subset.dev/usage`](../usage-cli) |
-| `timer` | `subset-timer` from [`@subset.dev/timer`](../timer-cli) |
-| `minutes` | `subset-minutes` from [`@subset.dev/minutes`](../minutes-cli) |
+| `timer` | the Timer app's CLI, or `subset-timer` from [`@subset.dev/timer`](../timer-cli) |
+| `minutes` | the Minutes app's CLI, or `subset-minutes` from [`@subset.dev/minutes`](../minutes-cli) |
+| `system` | `subset-system` from the Subset System app (macOS) |
+| `point-in-time` | `point-in-time` from the pointInTime app (macOS) |
+
+A tool that comes with a Subset Mac app runs from the installed app ([below](#commands-bundled-in-mac-apps)).
 
 `subset --help` and `subset --version` show the launcher's own help and version.
 
@@ -100,7 +104,7 @@ A valid feed is cached in `~/Library/Caches/Subset/catalog.json` (Linux: `$XDG_C
 
 Every key is always present. `platform` is Node.js's `process.platform`. `appDetection` is `supported` on macOS and `unsupported` elsewhere, where every `installed` is `null`; on macOS `installed` lists the copies found (`[]` for none), with `folder` `/Applications` or `~/Applications`, `version` and `build` from `Info.plist` (`null` when missing) and `channel` `live`, `beta` or `null` (no matching receipt). `live` and `beta` are `null` when the feed has no such channel; the document always has both, whatever `--beta` says. A tool's `live` and `beta` are its `latest` and `beta` dist-tags, or `null`. `cached` is true when the cached copy was used, and `fetchedAt` is when that copy was fetched.
 
-`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, that stand in for `/Applications` and `~/Applications`. `subset list`, `subset update` and `subset uninstall` search them and `subset install` installs into them instead; receipts still name the real folders.
+`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, that stand in for `/Applications` and `~/Applications`. `subset list`, `subset update`, `subset uninstall` and, on macOS, `subset <tool>` (for [commands bundled in Mac apps](#commands-bundled-in-mac-apps)) search them and `subset install` installs into them instead; receipts still name the real folders.
 
 ## subset install
 
@@ -191,11 +195,11 @@ It exits with code 0 when every copy is in the Trash and the receipt is deleted,
 
 ## How it works
 
-`subset <tool>[@<version>] [arguments...]` first asks npm for the tool: `npm exec --yes --package=@subset.dev/<tool>@<version>` fetches it into npm's cache (or uses a local install that satisfies the version) and reports the `PATH` it would run it with. The launcher takes the tool's bin from the first `node_modules/.bin` folder on that `PATH` that holds the package, and loads that ES module into its own Node.js process, as if Node.js had been started on it. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both.
+`subset <tool>[@<version>] [arguments...]` asks npm for the tool when you give a version, or when no installed Mac app bundles the command (see [Commands bundled in Mac apps](#commands-bundled-in-mac-apps)): `npm exec --yes --package=@subset.dev/<tool>@<version>` fetches it into npm's cache (or uses a local install that satisfies the version) and reports the `PATH` it would run it with. The launcher takes the tool's bin from the first `node_modules/.bin` folder on that `PATH` that holds the package, and loads that ES module into its own Node.js process, as if Node.js had been started on it. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both.
 
 npm runs as the `npm-cli.js` of the npm that started the launcher (through `npm_execpath`), or otherwise as `npm` from `PATH`; on Windows it is always `npm-cli.js` (from the first `PATH` folder that holds both `npm.cmd` and `node_modules\npm\bin\npm-cli.js`, or else the npm installed with Node.js), never `cmd.exe`. No shell is involved, so arguments such as `%PATH%` or a path ending in `\` reach the tool unchanged.
 
-Because the tool runs in the launcher's own process, there is no second process to pass signals on: Ctrl-C, a hangup or a SIGTERM reaches the tool once, whether it is sent to the process or to its whole process group, and the tool reads the terminal and sets the exit code itself.
+Because an npm tool (or an app's Node.js command) runs in the launcher's own process, there is no second process to pass signals on: Ctrl-C, a hangup or a SIGTERM reaches the tool once, whether it is sent to the process or to its whole process group, and the tool reads the terminal and sets the exit code itself.
 
 The version is a dist-tag the release workflow publishes (`latest`, `beta`, `next`) or an exact version (`0.2.0`, `0.2.0-beta.3`). The launcher refuses ranges (including tag-like ones such as `x` or `v1`) and other npm specs, so an argument cannot turn into an npm option or a file, URL or git dependency. Unknown tools and commands exit with code 2 without starting npm.
 
@@ -209,9 +213,33 @@ The registry is asked only after a failed fetch, never when the tool runs.
 
 Before loading the tool, the launcher sets `SUBSET_COMMAND` in its environment to `subset <tool>` (for example `subset usage`, whatever version was asked for), so a tool can name the command that started it in its messages. It is informational: a tool must not behave differently because of it, only print a different command name.
 
+## Commands bundled in Mac apps
+
+Some Subset Mac apps bundle a command, declared in the app's `helpers` (see [docs/macos-release.md](../../docs/macos-release.md#opting-an-app-in)). On macOS, `subset <tool>` runs it from the installed app:
+
+| Command | Runs |
+| --- | --- |
+| `subset system ...` | `Subset System.app/Contents/Helpers/subset-system ...` |
+| `subset point-in-time ...` | `pointInTime.app/Contents/Helpers/point-in-time ...` |
+| `subset timer ...` | `Timer.app/Contents/Resources/timer-cli/dist/cli.mjs`, loaded like an npm tool |
+| `subset minutes ...` | `Minutes.app/Contents/Resources/minutes-cli/dist/cli.mjs`, loaded like an npm tool |
+
+So the command matches the version of the installed app (and of the daemon Timer runs). The order is:
+
+1. An explicit version (`subset timer@beta`, `subset timer@latest`) always runs the npm package.
+2. Otherwise, the installed app's command: the first `<App>.app` at the top level of `/Applications`, then `~/Applications`, whose `CFBundleIdentifier` is the app's bundle ID. Apps elsewhere are not looked for.
+3. Otherwise (no such app, or an older app without the command), the npm package.
+4. For a command that comes only with an app (`system`, `point-in-time`), `subset: system comes with the Subset System app. Install it with: subset install system` (exit 1); an installed app without the command is to be updated (`subset update <id>`), and elsewhere than macOS the command says the app runs only on macOS. It takes no version (exit 2).
+
+The table of these commands is in `src/tools.mjs`, so running one asks no network; `npm run check` fails when it and the apps' `helpers` declarations disagree.
+
+Before running a command, `subset` checks its signature with `codesign --verify --strict`; `codesign -d --verbose=2`, which must report `TeamIdentifier=SAZVPX4CAA`; and `codesign --verify --strict -R=<requirement>`, where the requirement is `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "SAZVPX4CAA"`: a Developer ID Application certificate Apple issued to the Subset team (an ad-hoc signature can claim any team). It checks a native command's own signature, and for a Node.js command (a resource of the app, with no signature of its own) the app's, whose seal covers the file. The command's path must be a file inside the app (a link may point only within it). The app is an older one without the command only when nothing is at the command's path, or at one of its folders; a broken link, or a file where a folder should be, is refused like a bad signature. A command that fails is not run, and the npm package is not run instead: `subset: <app> was not run: <reason>.` (exit 1).
+
+A native command runs as a child process with the launcher's standard input, output and error. It runs in its own process group, and `subset` passes each SIGINT, SIGTERM and SIGHUP it gets on to it, so the command gets each signal once, whether it was sent to `subset` or to its process group (Ctrl-C at a terminal). `subset` then exits with the command's exit code, or ends by the signal that ended it. Being outside the terminal's foreground process group, a native command can write to the terminal but not read from it (Subset's commands do not), and the terminal's `Ctrl-\` (SIGQUIT) and Ctrl-Z (SIGTSTP) reach `subset`, not the command: `Ctrl-\` ends `subset` and leaves the command running, and Ctrl-Z stops only `subset`. A Node.js command is loaded into the launcher's own process, as an npm tool is. `SUBSET_COMMAND` is set for both. `PATH` is left as it is.
+
 ## Adding a tool
 
-Add the published package and its bin to `src/tools.mjs`. `npm run check` fails if a published package with a `bin` is missing from the list, or if an entry names a package or bin that does not exist.
+Add the published package and its bin to `src/tools.mjs`. `npm run check` fails if a published package with a `bin` is missing from the list, or if an entry names a package or bin that does not exist. For a command an app bundles, add the app (`id`, `appName`, `bundleId`, `helper`, `kind`) to the tool, as declared in the app's `helpers`.
 
 ## Superfunctions packages evaluated
 

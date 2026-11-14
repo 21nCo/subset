@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { findToolBin } from '../src/bin.mjs';
 import { findNpmCli } from '../src/npm.mjs';
 import { RESERVED_NAMES, route, VERBS } from '../src/commands.mjs';
-import { fetchFailureMessage, npmDistTagsArgs, npmLocateArgs, resolveTool, TOOLS } from '../src/tools.mjs';
+import { fetchFailureMessage, npmDistTagsArgs, npmLocateArgs, resolveTool, TOOLS, toolSource } from '../src/tools.mjs';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -56,7 +56,15 @@ writeFileSync(
    process.stdout.write('some npm output\\n' + ${JSON.stringify(`/elsewhere/node_modules/.bin${path.delimiter}${path.join(modules, '.bin')}${path.delimiter}/usr/bin`)} + '\\n');
    process.exit(Number(process.env.FAKE_NPM_EXIT ?? 0));`
 );
-const env = { ...process.env, npm_execpath: path.join(root, 'npm', 'npx-cli.js') };
+// Empty folders stand in for /Applications and ~/Applications, so on macOS no installed app's command runs instead of
+// the npm package (app-helpers.test.mjs tests that).
+mkdirSync(path.join(root, 'Applications'));
+mkdirSync(path.join(root, 'user-Applications'));
+const env = {
+  ...process.env,
+  npm_execpath: path.join(root, 'npm', 'npx-cli.js'),
+  SUBSET_APPLICATIONS_DIRS: `${path.join(root, 'Applications')}${path.delimiter}${path.join(root, 'user-Applications')}`
+};
 
 const subset = (args, extra = {}) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env: { ...env, ...extra } });
 // The npm runs since the last call: the arguments of each.
@@ -72,7 +80,7 @@ function npmCalls() {
 }
 
 test('resolves a tool to its package at latest, a dist-tag or an exact version', () => {
-  assert.deepEqual(resolveTool('usage'), { name: 'usage', package: '@subset.dev/usage', bin: 'subset-usage', version: 'latest', spec: '@subset.dev/usage@latest' });
+  assert.deepEqual(resolveTool('usage'), { name: 'usage', package: '@subset.dev/usage', bin: 'subset-usage', version: 'latest', spec: '@subset.dev/usage@latest', explicit: false });
   assert.equal(resolveTool('timer@beta').spec, '@subset.dev/timer@beta');
   assert.equal(resolveTool('minutes@0.1.0').spec, '@subset.dev/minutes@0.1.0');
   assert.equal(resolveTool('usage@0.2.0-beta.3').spec, '@subset.dev/usage@0.2.0-beta.3');
@@ -111,11 +119,23 @@ test("exits with the tool's exit code, and fails when npm or the tool's bin does
   assert.match(subset(['timer']).stderr, /its subset-timer command was not found/);
 });
 
+test('a tool that comes only with a Mac app says where to get it, without asking npm', () => {
+  npmCalls();
+  const result = subset(['system', 'status']);
+  assert.equal(result.status, 1);
+  const expected =
+    process.platform === 'darwin'
+      ? 'subset: system comes with the Subset System app. Install it with: subset install system\n'
+      : 'subset: system comes with the Subset System app, which runs only on macOS.\n';
+  assert.equal(result.stderr, expected);
+  assert.deepEqual(npmCalls(), []);
+});
+
 test('prints help listing every tool and command, and its version', () => {
   for (const args of [[], ['--help'], ['-h'], ['help']]) {
     const result = subset(args);
     assert.equal(result.status, 0);
-    for (const [name, tool] of Object.entries(TOOLS)) assert.match(result.stdout, new RegExp(`^  ${name}\\s.*\\(${tool.package}\\)$`, 'm'));
+    for (const [name, tool] of Object.entries(TOOLS)) assert.match(result.stdout, new RegExp(`^  ${name}\\s.*\\(${toolSource(tool).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm'));
     for (const name of RESERVED_NAMES) assert.match(result.stdout, new RegExp(`^  ${name}\\s+${VERBS[name].summary}$`, 'm'), name);
     assert.doesNotMatch(result.stdout, /not available yet/);
   }

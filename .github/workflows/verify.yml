@@ -65,8 +65,9 @@ jobs:
   # /usr/bin/plutil (the workspace job runs the same tests on Linux with a plutil stand-in). The tests serve the
   # catalog fixtures from file: URLs and use temporary folders for the Applications folders. SET-230: the tests also
   # refuse an ad-hoc signed app with the real hdiutil, codesign and spctl, and a step installs the real Breaks 0.1.0
-  # into a temporary folder. SET-231: the last step installs it again and uninstalls it into a test Trash. No
-  # secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
+  # into a temporary folder. SET-231: the last step installs it again and uninstalls it into a test Trash. SET-232:
+  # the tests run a native helper ad-hoc signed with the real codesign and check that `subset system` refuses it at the
+  # team check. No secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
   subset-dev-macos:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
     runs-on: macos-26

@@ -20,7 +20,7 @@ Add `native/<app-id>/macos-release.json` next to the app's Xcode project:
 - `path`: the file, relative to the `.app` and inside its `Contents/` folder, with no `.` or `..` parts.
 - `kind`: `native` for an executable, or `node` for an ES module (`.mjs`) run with Node.js.
 
-Omit `helpers` when the app bundles no command. The current helpers are System's `system` (`Contents/Helpers/subset-system`), pointInTime's `point-in-time` (`Contents/Helpers/point-in-time`), and the Node.js CLIs Timer and Minutes embed: `timer` (`Contents/Resources/timer-cli/dist/cli.mjs`) and `minutes` (`Contents/Resources/minutes-cli/dist/cli.mjs`). `scripts/check-workspaces.mjs` (`npm run check`) checks the shape of every manifest; the release script checks the declarations against the app (see below).
+Omit `helpers` when the app bundles no command. The current helpers are System's `system` (`Contents/Helpers/subset-system`), pointInTime's `point-in-time` (`Contents/Helpers/point-in-time`), and the Node.js CLIs Timer and Minutes embed: `timer` (`Contents/Resources/timer-cli/dist/cli.mjs`) and `minutes` (`Contents/Resources/minutes-cli/dist/cli.mjs`). `scripts/check-workspaces.mjs` (`npm run check`) checks the shape of every manifest, and that every helper has a matching tool, with that app and path, in `packages/subset-dev/src/tools.mjs` (so a new helper needs an entry there); the release script checks the declarations against the app (see below).
 
 Some apps need build inputs the repository doesn't hold:
 

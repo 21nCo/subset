@@ -120,10 +120,12 @@ for (const name of ['@subset.dev/links', '@subset.dev/link-capture']) {
   assert.ok(isPublic(name), `${name} must be a published package`);
 }
 
-// `subset <tool>` (the subset.dev launcher) runs exactly the published CLIs: each tool names a public workspace and one
-// of its bins, and every public workspace with a bin (other than the launcher itself) is a tool.
+// `subset <tool>` (the subset.dev launcher) runs exactly the published CLIs: each tool with a package names a public
+// workspace and one of its bins, and every public workspace with a bin (other than the launcher itself) is a tool. A
+// tool may instead (or also) run the command an app bundles, checked against the apps' helpers below.
 const { TOOLS: launcherTools } = await import(new URL('packages/subset-dev/src/tools.mjs', root));
 for (const [tool, { package: name, bin }] of Object.entries(launcherTools)) {
+  if (name === undefined) continue;
   assert.ok(isPublic(name), `subset ${tool} runs ${name}, which is not a public workspace`);
   assert.ok(Object.hasOwn(workspacesByName.get(name).bin ?? {}, bin), `subset ${tool} runs bin ${bin}, which ${name} does not declare`);
   // The launcher imports the bin into its own process, so it must be an ES module that reads process.argv.
@@ -162,7 +164,12 @@ if (existsSync(nativeRoot)) {
 // checks them against the signed app.
 if (existsSync(nativeRoot)) {
   const { RESERVED_NAMES } = await import(new URL('packages/subset-dev/src/commands.mjs', root));
-  assert.deepEqual(macosReleaseManifestProblems(readMacosReleaseManifests(fileURLToPath(nativeRoot)), RESERVED_NAMES), [], 'A native macos-release.json is invalid');
+  const macosReleaseManifests = readMacosReleaseManifests(fileURLToPath(nativeRoot));
+  assert.deepEqual(macosReleaseManifestProblems(macosReleaseManifests, RESERVED_NAMES), [], 'A native macos-release.json is invalid');
+  // `subset <command>` names each app's helpers statically (SET-232), so it runs them with no network: the launcher's
+  // tools with an app and the declared helpers must agree.
+  const { helperDeclarationProblems } = await import(new URL('packages/subset-dev/src/helpers.mjs', root));
+  assert.deepEqual(helperDeclarationProblems(launcherTools, macosReleaseManifests), [], 'The subset.dev launcher tools and the apps\' helpers disagree');
 }
 
 // The Minutes macOS app decodes the CLI's NDJSON contract; its supported version must match the package's.

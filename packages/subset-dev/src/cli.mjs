@@ -3,15 +3,18 @@
 // `npx subset.dev usage status` does what `npx @subset.dev/usage status` does: npm fetches the tool (the launcher
 // depends on none of them), and the launcher then loads the tool's bin module into this same process. The commands
 // (list, install and the others in commands.mjs) are the launcher's own; commands/<verb>.mjs runs `subset <verb>`.
+// A tool bundled in an installed Subset Mac app runs from the app (helpers.mjs) unless a version is given.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { constants, homedir } from 'node:os';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { findToolBin } from './bin.mjs';
 import { route, VERBS, verbHelp } from './commands.mjs';
+import { findAppHelper, runNativeHelper } from './helpers.mjs';
+import { ApplicationsFoldersError } from './macos/apps.mjs';
 import { findNpmCli } from './npm.mjs';
-import { fetchFailureMessage, npmDistTagsArgs, npmLocateArgs, resolveTool, TOOLS } from './tools.mjs';
+import { fetchFailureMessage, npmDistTagsArgs, npmLocateArgs, resolveTool, TOOLS, toolSource } from './tools.mjs';
 
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -22,18 +25,20 @@ function columns(rows) {
 }
 
 function help() {
-  const tools = columns(Object.entries(TOOLS).map(([name, tool]) => [name, `${tool.summary} (${tool.package})`]));
+  const tools = columns(Object.entries(TOOLS).map(([name, tool]) => [name, `${tool.summary} (${toolSource(tool)})`]));
   const commands = columns(Object.entries(VERBS).map(([name, verb]) => [name, verb.summary]));
   return `Usage: subset <tool>[@<version>] [arguments...]
        subset <command> [arguments...]
 
 Runs a Subset command-line tool. The arguments go to the tool unchanged;
-"subset <tool> --help" shows the tool's own help.
+"subset <tool> --help" shows the tool's own help. A tool that comes with a
+Subset Mac app runs from the installed app, unless a version is given.
 
 Tools:
 ${tools}
 
-<version> is latest, beta, next or an exact version such as 0.2.0 (default: latest).
+<version> is latest, beta, next or an exact version such as 0.2.0 of the npm
+package (default: latest).
 
 Commands:
 ${commands}
@@ -78,18 +83,74 @@ function probeRegistry(command, npmCli, tool) {
   return spawnSync(command, argv, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 30_000 });
 }
 
-// Runs the tool in this process, as if Node.js had been started on its bin: no second process stands between the
-// tool and the terminal, so it alone gets every signal (Ctrl-C, a hangup, a SIGTERM to the process or its group)
+// Loads a tool's ES module into this process, as if Node.js had been started on it: no second process stands between
+// the tool and the terminal, so it alone gets every signal (Ctrl-C, a hangup, a SIGTERM to the process or its group)
 // exactly once, reads the terminal directly, and sets the exit code. Tool bins are ES modules
 // (scripts/check-workspaces.mjs) that read their arguments from process.argv.
-async function run(tool, args) {
+async function load(name, file, args) {
+  // Informational: tells the tool the command that started it, so it can print `subset usage ...` in its messages.
+  process.env.SUBSET_COMMAND = `subset ${name}`;
+  process.argv = [process.argv[0], file, ...args];
+  await import(pathToFileURL(file).href);
+}
+
+// Runs the npm package of a tool.
+async function runPackage(tool, args) {
   const { file, reportedPath } = locate(tool);
   // The tool and the commands it starts see the PATH they would have under npx, with its packages' bin folders.
   process.env.PATH = reportedPath;
-  // Informational: tells the tool the command that started it, so it can print `subset usage ...` in its messages.
+  await load(tool.name, file, args);
+}
+
+// Exits as the helper did: with its exit code, or by the signal that ended it (with 128 + its number should this
+// process survive it, as for SIGPIPE, which Node.js ignores).
+function exitLike({ code, signal }) {
+  if (signal === null) {
+    process.exitCode = code;
+    return;
+  }
+  process.exitCode = 128 + (constants.signals[signal] ?? 0);
+  process.kill(process.pid, signal);
+}
+
+// Runs the command of an installed app (helpers.mjs) and returns true, fails when the app's command is refused, or
+// returns false when there is no app or it has no such command, for the npm package to run.
+async function runFromApp(tool, args) {
+  const { app } = tool;
+  let found;
+  try {
+    found = await findAppHelper(app, { env: process.env, home: homedir() });
+  } catch (error) {
+    if (!(error instanceof ApplicationsFoldersError)) throw error;
+    fail(error.message);
+  }
+  if (found.status === 'refused') fail(`${found.bundle} was not run: ${found.reason}.`);
+  // An app from before its command was bundled: the npm package runs instead, when there is one.
+  if (found.status === 'missing' && tool.package === undefined) fail(`${found.bundle} has no ${app.helper}. Update it with: subset update ${app.id}`);
+  if (found.status !== 'found') return false;
+  if (found.kind === 'node') {
+    await load(tool.name, found.file, args);
+    return true;
+  }
   process.env.SUBSET_COMMAND = `subset ${tool.name}`;
-  process.argv = [process.argv[0], file, ...args];
-  await import(pathToFileURL(file).href);
+  let result;
+  try {
+    result = await runNativeHelper(found.file, args, { env: process.env });
+  } catch (error) {
+    fail(`could not start ${found.file}: ${error.message}`);
+  }
+  exitLike(result);
+  return true;
+}
+
+// subset <tool>: a version given always runs the npm package; otherwise the installed app's command, then the npm
+// package. A tool with no package fails with how to get its app.
+async function run(tool, args) {
+  if (!tool.explicit && tool.app && process.platform === 'darwin' && (await runFromApp(tool, args))) return;
+  if (tool.package !== undefined) return runPackage(tool, args);
+  const { app } = tool;
+  if (process.platform !== 'darwin') fail(`${tool.name} comes with the ${app.appName} app, which runs only on macOS.`);
+  fail(`${tool.name} comes with the ${app.appName} app. Install it with: subset install ${app.id}`);
 }
 
 const command = route(process.argv.slice(2), { isTool: (name) => Object.hasOwn(TOOLS, name) });
@@ -104,7 +165,7 @@ switch (command.action) {
     process.stdout.write(verbHelp(command.verb));
     break;
   case 'tool-help':
-    console.log(`"subset ${command.tool} --help" shows the help of ${command.tool} (${TOOLS[command.tool].package}).`);
+    console.log(`"subset ${command.tool} --help" shows the help of ${command.tool} (${toolSource(TOOLS[command.tool])}).`);
     break;
   case 'error':
     console.error(`subset: ${command.message}`);
