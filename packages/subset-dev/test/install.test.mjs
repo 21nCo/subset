@@ -372,16 +372,31 @@ test('installing next to a copy in the other folder says that the receipt now de
   assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
 });
 
+// The fields of /proc/<pid>/stat after the command name (state, ppid, process group, ...); undefined without /proc.
+function procStat(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  } catch {
+    return undefined;
+  }
+}
+const zombie = (pid) => procStat(pid)?.[0] === 'Z';
+// The process group of `pid` as /proc tells it (Linux), or undefined.
+const groupOf = (pid) => procStat(pid)?.[2];
+// A stopped tool's stderr may end "a process it started did not exit" only when its group still held a process when
+// runTool let it go. Under an init that does not reap orphans (node as PID 1 in a container) a SIGKILLed descendant
+// stays in the group as a zombie until then; it no longer runs. So the note is accepted only where /proc lists the
+// group (`group`, read while the descendant ran) and every process left in it is a zombie; a running one fails.
+function assertNoRunningGroupMember(stderr, group, label) {
+  if (!/did not exit/.test(stderr)) return;
+  assert.ok(group !== undefined, `${label}: a process it started did not exit, and /proc cannot tell whether it still runs`);
+  const running = readdirSync('/proc').filter((pid) => /^\d+$/.test(pid) && groupOf(pid) === group && !zombie(pid));
+  assert.deepEqual(running, [], `${label}: processes of the stopped tool's group still run`);
+}
 // Whether process `pid` still runs, asked of the operating system (kill(pid, 0)), not of runTool. A zombie (exited, not
 // yet reaped by the init process it was reparented to) has stopped running: it is let go after a short wait, and on
 // Linux /proc says so at once.
-function zombie(pid) {
-  try {
-    return /^\d+ \(.*\) Z /s.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
-  } catch {
-    return false;
-  }
-}
 function runs(pid) {
   try {
     process.kill(pid, 0);
@@ -448,7 +463,7 @@ test('runTool stops the process group of a tool that has already exited', { skip
       const pid = await pidFrom(file);
       pids.push(pid);
       assert.ok(runs(pid), `${name}: the descendant runs`);
-      return { pid, result };
+      return { pid, group: groupOf(pid), result };
     };
     const controller = new AbortController();
     const [aborted, timedOut, left] = await Promise.all([
@@ -463,7 +478,7 @@ test('runTool stops the process group of a tool that has already exited', { skip
     assert.equal(abortResult.error?.message, 'stop');
     assert.equal(timeoutResult.value?.code, null);
     assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 3 seconds/);
-    assert.doesNotMatch(timeoutResult.value.stderr, /did not exit/);
+    assertNoRunningGroupMember(timeoutResult.value.stderr, timedOut.group, 'the timed-out tool');
     assert.equal(leftResult.value?.code, null);
     assert.match(leftResult.value.stderr, /stopped: it did not finish in 3 seconds\nstopped: a process it started did not exit$/);
     assert.equal(await stillRuns(aborted.pid), false, 'the descendant of the aborted tool is gone');
@@ -487,8 +502,9 @@ test('runTool settles a stopped tool only once its process group is empty', { sk
       const pid = await pidFrom(file);
       pids.push(pid);
       assert.ok(runs(pid), `${name}: the descendant runs`);
+      const group = groupOf(pid);
       // Whether the descendant still runs once runTool has settled.
-      return { result: result.then(async (outcome) => ({ ...outcome, running: await stillRuns(pid) })) };
+      return { group, result: result.then(async (outcome) => ({ ...outcome, running: await stillRuns(pid) })) };
     };
     const controller = new AbortController();
     const [aborted, timedOut] = await Promise.all([run('abort', { signal: controller.signal }), run('timeout', { timeout: 3000 })]);
@@ -503,7 +519,7 @@ test('runTool settles a stopped tool only once its process group is empty', { sk
     assert.equal(abortResult.error?.message, 'stop');
     assert.equal(timeoutResult.value?.code, null);
     assert.match(timeoutResult.value.stderr, /stopped: it did not finish in 3 seconds/);
-    assert.doesNotMatch(timeoutResult.value.stderr, /did not exit/);
+    assertNoRunningGroupMember(timeoutResult.value.stderr, timedOut.group, 'the timed-out tool');
   } finally {
     killAll(pids);
   }
