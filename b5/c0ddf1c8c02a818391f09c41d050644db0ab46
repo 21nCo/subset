@@ -1,0 +1,23 @@
+packages/subset-dev/README.md
+  s_d9c5fd52957696::t_475d98bc1bc116 188
+packages/subset-dev/src/commands/uninstall.mjs
+  s_d9c5fd52957696::t_e78597b4524edc 158-169,182
+packages/subset-dev/test/update.test.mjs
+  s_d9c5fd52957696::t_06569dc8a540ea 1463-1489
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5c0ddf1c8c02a818391f09c41d050644db0ab46",
+  "prompts": {},
+  "sessions": {
+    "s_d9c5fd52957696": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_d9c5fd52957696",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
