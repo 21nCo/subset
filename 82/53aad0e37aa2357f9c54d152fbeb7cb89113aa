@@ -1,0 +1,19 @@
+packages/subset-dev/test/install.test.mjs
+  s_8e2a28347f9cf2::t_79f9203cabd409 375-376,378-379,381,384-399,466,481,505,507,522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8253aad0e37aa2357f9c54d152fbeb7cb89113aa",
+  "prompts": {},
+  "sessions": {
+    "s_8e2a28347f9cf2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_8e2a28347f9cf2",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
