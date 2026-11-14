@@ -21,8 +21,12 @@ With `npm install -g subset.dev`, the same commands are `subset usage`, `subset 
 | Tool | Runs |
 | --- | --- |
 | `usage` | `subset-usage` from [`@subset.dev/usage`](../usage-cli) |
-| `timer` | `subset-timer` from [`@subset.dev/timer`](../timer-cli) |
-| `minutes` | `subset-minutes` from [`@subset.dev/minutes`](../minutes-cli) |
+| `timer` | the Timer app's CLI, or `subset-timer` from [`@subset.dev/timer`](../timer-cli) |
+| `minutes` | the Minutes app's CLI, or `subset-minutes` from [`@subset.dev/minutes`](../minutes-cli) |
+| `system` | `subset-system` from the Subset System app (macOS) |
+| `point-in-time` | `point-in-time` from the pointInTime app (macOS) |
+
+A tool that comes with a Subset Mac app runs from the installed app ([below](#commands-bundled-in-mac-apps)).
 
 `subset --help` and `subset --version` show the launcher's own help and version.
 
@@ -209,9 +213,33 @@ The registry is asked only after a failed fetch, never when the tool runs.
 
 Before loading the tool, the launcher sets `SUBSET_COMMAND` in its environment to `subset <tool>` (for example `subset usage`, whatever version was asked for), so a tool can name the command that started it in its messages. It is informational: a tool must not behave differently because of it, only print a different command name.
 
+## Commands bundled in Mac apps
+
+Some Subset Mac apps bundle a command, declared in the app's `helpers` (see [docs/macos-release.md](../../docs/macos-release.md#opting-an-app-in)). On macOS, `subset <tool>` runs it from the installed app:
+
+| Command | Runs |
+| --- | --- |
+| `subset system ...` | `Subset System.app/Contents/Helpers/subset-system ...` |
+| `subset point-in-time ...` | `pointInTime.app/Contents/Helpers/point-in-time ...` |
+| `subset timer ...` | `Timer.app/Contents/Resources/timer-cli/dist/cli.mjs`, loaded like an npm tool |
+| `subset minutes ...` | `Minutes.app/Contents/Resources/minutes-cli/dist/cli.mjs`, loaded like an npm tool |
+
+So the command matches the version of the installed app (and of the daemon Timer runs). The order is:
+
+1. An explicit version (`subset timer@beta`, `subset timer@latest`) always runs the npm package.
+2. Otherwise, the installed app's command: the first `<App>.app` at the top level of `/Applications`, then `~/Applications`, whose `CFBundleIdentifier` is the app's bundle ID. Apps elsewhere are not looked for.
+3. Otherwise (no such app, or an older app without the command), the npm package.
+4. For a command that comes only with an app (`system`, `point-in-time`), `subset: system comes with the Subset System app. Install it with: subset install system` (exit 1); an installed app without the command is to be updated (`subset update <id>`), and elsewhere than macOS the command says the app runs only on macOS. It takes no version (exit 2).
+
+The table of these commands is in `src/tools.mjs`, so running one asks no network; `npm run check` fails when it and the apps' `helpers` declarations disagree.
+
+Before running a command, `subset` checks its signature with `codesign --verify --strict` and `codesign -d --verbose=2`, which must report `TeamIdentifier=SAZVPX4CAA`: a native command's own signature, and for a Node.js command (a resource of the app, with no signature of its own) the app's, whose seal covers the file. The command's path must be a file inside the app (a link may point only within it). A command that fails is not run, and the npm package is not run instead: `subset: <app> was not run: <reason>.` (exit 1).
+
+A native command runs as a child process with the launcher's standard input, output and error. It runs in its own process group, and `subset` passes each SIGINT, SIGTERM and SIGHUP it gets on to it, so the command gets each signal once, whether it was sent to `subset` or to its process group (Ctrl-C at a terminal). `subset` then exits with the command's exit code, or ends by the signal that ended it. Being outside the terminal's foreground process group, a native command can write to the terminal but not read from it; Subset's commands do not. A Node.js command is loaded into the launcher's own process, as an npm tool is. `SUBSET_COMMAND` is set for both. `PATH` is left as it is.
+
 ## Adding a tool
 
-Add the published package and its bin to `src/tools.mjs`. `npm run check` fails if a published package with a `bin` is missing from the list, or if an entry names a package or bin that does not exist.
+Add the published package and its bin to `src/tools.mjs`. `npm run check` fails if a published package with a `bin` is missing from the list, or if an entry names a package or bin that does not exist. For a command an app bundles, add the app (`id`, `appName`, `bundleId`, `helper`, `kind`) to the tool, as declared in the app's `helpers`.
 
 ## Superfunctions packages evaluated
 
