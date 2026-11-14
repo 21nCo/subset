@@ -34,12 +34,10 @@ Besides the tools, `subset` has its own commands. Their names are reserved: no t
 | --- | --- |
 | `subset list [--beta] [--json] [--refresh]` | Lists the Subset tools and Mac apps, installed and available ([below](#subset-list)) |
 | `subset install <app> [--beta] [--user] [--dir <folder>]` | Installs a Subset Mac app after checking its checksum, signature, team and notarization ([below](#subset-install)) |
-| `subset update [<app>...] [--beta] [--quit]` | Updates the installed Subset Mac apps (not available yet) |
-| `subset uninstall <app>` | Moves a Subset Mac app to the Trash (not available yet) |
+| `subset update [<app>...] [--beta] [--quit]` | Updates the installed Subset Mac apps, with the checks of `subset install` ([below](#subset-update)) |
+| `subset uninstall <app> [--quit]` | Moves a Subset Mac app to the Trash and deletes its receipt ([below](#subset-uninstall)) |
 | `subset help [<command>]` | Shows the help, or a command's usage (also `subset <command> --help`) |
 | `subset version` | Shows the subset.dev version |
-
-In this version, `update` and `uninstall` only print `subset <command> is not available yet.` and exit with code 2; a later version adds them.
 
 ## subset list
 
@@ -102,7 +100,7 @@ A valid feed is cached in `~/Library/Caches/Subset/catalog.json` (Linux: `$XDG_C
 
 Every key is always present. `platform` is Node.js's `process.platform`. `appDetection` is `supported` on macOS and `unsupported` elsewhere, where every `installed` is `null`; on macOS `installed` lists the copies found (`[]` for none), with `folder` `/Applications` or `~/Applications`, `version` and `build` from `Info.plist` (`null` when missing) and `channel` `live`, `beta` or `null` (no matching receipt). `live` and `beta` are `null` when the feed has no such channel; the document always has both, whatever `--beta` says. A tool's `live` and `beta` are its `latest` and `beta` dist-tags, or `null`. `cached` is true when the cached copy was used, and `fetchedAt` is when that copy was fetched.
 
-`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, that stand in for `/Applications` and `~/Applications`. `subset list` searches them and `subset install` installs into them instead; receipts still name the real folders.
+`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, that stand in for `/Applications` and `~/Applications`. `subset list`, `subset update` and `subset uninstall` search them and `subset install` installs into them instead; receipts still name the real folders.
 
 ## subset install
 
@@ -142,6 +140,50 @@ On Linux and Windows it exits with code 1 (`Mac apps can be installed only on ma
 
 **Not covered.** Another program or local user replacing files in the staging folder between the checks and the rename, a compromised Developer ID key and a malicious root user are outside what `subset install` defends against (SET-240).
 
+## subset update
+
+`subset update [<app>...]` updates the named Mac apps, or every Subset Mac app installed in `/Applications` and `~/Applications`, to the newest release of the live channel (`--beta`: the beta channel), and replaces each copy where it is:
+
+```console
+$ subset update
+Downloading Breaks 0.1.1 from https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.1/Breaks-0.1.1.dmg
+Verifying Breaks.app
+Updated Breaks 0.1.0 to 0.1.1 in /Applications/Breaks.app
+Moved Breaks 0.1.0 to the Trash: /Users/me/.Trash/Breaks 2026-11-14 10.32.05.app
+```
+
+**Which release is newer.** The installed copy's `CFBundleShortVersionString` is compared with the channel's version, as whole numbers. A newer channel version is installed. At the same version, a copy whose [receipt](#installed-apps-macos) says `beta` moves to the live release; with `--beta`, a beta copy (per its receipt) moves to a higher beta build. Otherwise an equal version is up to date (`Breaks 0.1.0 is up to date (/Applications).`, exit code 0); a copy without a receipt counts as current at an equal version. A copy newer than the channel is never downgraded.
+
+**How a copy is replaced.** The new release goes through every step and check of [`subset install`](#subset-install): download, checksum, image, a staged copy beside the installed one, signature, team, notarization, bundle ID, version and macOS version. If any of them fails, the installed app stays exactly as it was. Then, in one step that no signal can split:
+
+1. the installed `<appName>.app` is renamed to a hidden backup name in the same folder, and must still be the copy that was checked (same device and inode); if another `subset install`, `update` or `uninstall` changed it in the meantime, it is renamed back and this update fails (`... was changed or removed while it was being updated`);
+2. the verified copy is renamed to `<appName>.app` (if that fails, the backup is renamed back);
+3. the receipt is rewritten for the new version and channel (if it cannot be, the old receipt is deleted with a warning; the app stays updated);
+4. the old copy is renamed into the Trash as `~/.Trash/<appName> <date> <time>.app`. When the Trash is on another volume, it is copied there with `ditto` after the update and then removed; a copy that fails is removed from the Trash and the old copy stays, under its hidden name, with a warning naming it.
+
+So either the old app or the new verified one is always there. A Ctrl-C, SIGTERM or hangup before step 1 stops the update and leaves the old app untouched (exit code 128 plus the signal number); one after it changes nothing. Of two updates of the same app at once, the first to swap wins and the other fails; a `subset install` of an app that is already there is refused. Only a `SIGKILL` or power loss between steps 1 and 2 can leave `<appName>.app` missing, and then both copies are still in the folder under hidden names (`.<appName>.app.subset-update-*` is the old one, `.<appName>.app.subset-install-*` the new one).
+
+**Running apps.** A running app is never replaced. The processes whose executable is inside the bundle (`ps -axww -o pid=,comm=`, so a helper inside the app counts too) are looked for before the download and again once the new copy is verified. Without `--quit`, `subset update` refuses (`Breaks is running (pid 123); quit it, or use subset update --quit to quit and reopen it`). With `--quit`, it sends them SIGTERM once the new copy is verified, waits up to 10 seconds for every process inside the bundle to exit, and refuses if any remains; an app quit this way is reopened with `open -b <bundleId>` afterwards, whether the update succeeded or not. If `ps` fails, whether the app runs cannot be told, and it is refused too.
+
+**With no apps named**, every installed app is updated. A copy that cannot be updated (newer than the channel, an unreadable version, no release in that channel) is then only a note on stderr and does not fail the command; for a named app it is a failure. If nothing is installed, it says `No Subset Mac apps are installed.` It also asks the npm registry for `subset.dev`'s `latest` version (`https://registry.npmjs.org/subset.dev/latest`), and when that is newer than the running launcher prints the command to update it: `subset.dev 0.3.0 is available (this is 0.2.0); update it with: npm install -g subset.dev@latest`. That check is silent when it fails.
+
+It exits with code 0 when every app is updated or up to date, 1 when one is not (the message names it and the failed step or check, as for `subset install`), and 2 for a usage error. On Linux and Windows it exits with code 1 (`Mac apps can be updated only on macOS.`). It never uses `sudo`.
+
+**Not covered.** A helper process an app leaves running from its old bundle path (for example a daemon that keeps running the old code until it restarts), and other programs writing into the app folder while it is replaced (SET-240).
+
+## subset uninstall
+
+`subset uninstall <app>` moves every copy of the app in `/Applications` and `~/Applications` to the Trash, under the same names as above, and deletes its receipt:
+
+```console
+$ subset uninstall breaks
+Moved Breaks 0.1.0 (/Applications) to the Trash: /Users/me/.Trash/Breaks 2026-11-14 10.40.12.app
+```
+
+The app's data (its preferences, `~/Library/Application Support` folder and containers) stays. A copy is never deleted outright: on the Trash's volume it is renamed there, otherwise copied there with `ditto` and removed only once the copy succeeded. A running app is not moved: without `--quit` it refuses, naming the processes, and with `--quit` it sends them SIGTERM and waits up to 10 seconds, as `subset update` does, but does not reopen the app. Every copy is checked before any is moved.
+
+It exits with code 0 when every copy is in the Trash, and 1 when the app is not installed, is running, or a copy could not be moved (the receipt then stays). `SUBSET_TRASH_DIR` (tests only) is an absolute folder that stands in for `~/.Trash`.
+
 ## How it works
 
 `subset <tool>[@<version>] [arguments...]` first asks npm for the tool: `npm exec --yes --package=@subset.dev/<tool>@<version>` fetches it into npm's cache (or uses a local install that satisfies the version) and reports the `PATH` it would run it with. The launcher takes the tool's bin from the first `node_modules/.bin` folder on that `PATH` that holds the package, and loads that ES module into its own Node.js process, as if Node.js had been started on it. The launcher has no dependencies, so `npx subset.dev usage` downloads only the launcher and the one tool you run, and npm caches both.
@@ -168,4 +210,4 @@ Add the published package and its bin to `src/tools.mjs`. `npm run check` fails 
 
 ## Superfunctions packages evaluated
 
-None apply: the launcher is a dispatcher with no auth, storage, MCP or UI. `subset list` reads one static JSON feed with Node.js's `fetch` and keeps one cache file; it validates the feed with its own small validator for the keywords the catalog schemas use, so the launcher keeps no dependencies. `subset install` downloads one file with `fetch` and asks the macOS tools (`hdiutil`, `ditto`, `find`, `chflags`, `chmod`, `codesign`, `spctl`, `plutil`, `sw_vers`) for everything else; `filefn` (uploads and storage adapters) does not cover verifying a signed macOS app.
+None apply: the launcher is a dispatcher with no auth, storage, MCP or UI. `subset list` reads one static JSON feed with Node.js's `fetch` and keeps one cache file; it validates the feed with its own small validator for the keywords the catalog schemas use, so the launcher keeps no dependencies. `subset install` downloads one file with `fetch` and asks the macOS tools (`hdiutil`, `ditto`, `find`, `chflags`, `chmod`, `codesign`, `spctl`, `plutil`, `sw_vers`) for everything else; `filefn` (uploads and storage adapters) does not cover verifying a signed macOS app. `subset update` and `subset uninstall` add `ps`, `open` and the Trash, which no Superfunctions package covers.

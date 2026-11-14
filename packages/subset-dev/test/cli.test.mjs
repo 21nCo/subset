@@ -116,10 +116,8 @@ test('prints help listing every tool and command, and its version', () => {
     const result = subset(args);
     assert.equal(result.status, 0);
     for (const [name, tool] of Object.entries(TOOLS)) assert.match(result.stdout, new RegExp(`^  ${name}\\s.*\\(${tool.package}\\)$`, 'm'));
-    for (const name of RESERVED_NAMES) {
-      const pending = MANAGEMENT_VERBS.includes(name) ? ' \\(not available yet\\)' : '';
-      assert.match(result.stdout, new RegExp(`^  ${name}\\s+${VERBS[name].summary}${pending}$`, 'm'), name);
-    }
+    for (const name of RESERVED_NAMES) assert.match(result.stdout, new RegExp(`^  ${name}\\s+${VERBS[name].summary}$`, 'm'), name);
+    assert.doesNotMatch(result.stdout, /not available yet/);
   }
   assert.equal(subset(['--version']).stdout.trim(), version);
 });
@@ -133,10 +131,6 @@ test('fails with exit code 2 and starts nothing for an unknown tool', () => {
   assert.deepEqual(npmCalls(), []);
 });
 
-// The management commands this version does not have yet; `subset list` is test/list.test.mjs's and `subset install`
-// test/install.test.mjs's.
-const MANAGEMENT_VERBS = ['uninstall', 'update'];
-
 test('reserves the command names: no tool takes one, and resolving one as a tool is refused', () => {
   assert.deepEqual([...RESERVED_NAMES].sort(), ['help', 'install', 'list', 'uninstall', 'update', 'version']);
   for (const name of Object.keys(TOOLS)) assert.ok(!RESERVED_NAMES.includes(name), `the tool "${name}" takes a reserved command name`);
@@ -146,15 +140,15 @@ test('reserves the command names: no tool takes one, and resolving one as a tool
   }
 });
 
-test('routes each management command to "not available yet" with exit code 2, starting no npm', () => {
+// `subset list`, install, update and uninstall run in test/list.test.mjs, test/install.test.mjs and
+// test/update.test.mjs; here, only that a usage error starts no npm.
+test('runs update and uninstall as commands: a usage error exits 2, starting no npm', () => {
   npmCalls();
-  for (const verb of MANAGEMENT_VERBS) {
-    for (const args of [[verb], [verb, 'timer', '--beta'], [verb, '--', '--help']]) {
-      const result = subset(args);
-      assert.equal(result.status, 2, args.join(' '));
-      assert.equal(result.stdout, '', args.join(' '));
-      assert.equal(result.stderr, `subset ${verb} is not available yet.\n`, args.join(' '));
-    }
+  for (const args of [['update', '--force'], ['uninstall'], ['uninstall', 'breaks', 'timer'], ['update', '--', '--help']]) {
+    const result = subset(args);
+    assert.equal(result.status, 2, args.join(' '));
+    assert.equal(result.stdout, '', args.join(' '));
+    assert.match(result.stderr, new RegExp(`^subset: subset ${args[0]} `), args.join(' '));
   }
   assert.deepEqual(npmCalls(), []);
 });
@@ -168,7 +162,7 @@ test("prints a command's usage for subset help <command> and subset <command> --
       assert.equal(result.status, 0, args.join(' '));
       assert.equal(result.stderr, '', args.join(' '));
       assert.ok(result.stdout.startsWith(`Usage: ${VERBS[verb].usage}\n`), args.join(' '));
-      assert.equal(result.stdout.includes('Not available yet'), MANAGEMENT_VERBS.includes(verb), args.join(' '));
+      assert.equal(result.stdout.includes('Not available yet'), false, args.join(' '));
     }
   }
   assert.ok(subset(['help', 'install']).stdout.startsWith('Usage: subset install <app> [--beta] [--user] [--dir <folder>]\n'));
@@ -194,7 +188,8 @@ test('routes arguments to help, version, a command or a tool', () => {
   assert.deepEqual(route(['list', '--json'], { isTool }), { action: 'command', verb: 'list', args: ['--json'] });
   assert.deepEqual(route(['list', '--', '--help'], { isTool }), { action: 'command', verb: 'list', args: ['--', '--help'] });
   assert.deepEqual(route(['install', 'breaks'], { isTool }), { action: 'command', verb: 'install', args: ['breaks'] });
-  assert.deepEqual(route(['update', 'breaks'], { isTool }), { action: 'unavailable', verb: 'update' });
+  assert.deepEqual(route(['update', 'breaks', '--quit'], { isTool }), { action: 'command', verb: 'update', args: ['breaks', '--quit'] });
+  assert.deepEqual(route(['uninstall', 'breaks'], { isTool }), { action: 'command', verb: 'uninstall', args: ['breaks'] });
   // A tool's arguments, --help included, go to the tool.
   assert.deepEqual(route(['usage', 'list', '--help'], { isTool }), { action: 'tool', argument: 'usage', args: ['list', '--help'] });
   assert.deepEqual(route(['install@beta'], { isTool }), { action: 'tool', argument: 'install@beta', args: [] });

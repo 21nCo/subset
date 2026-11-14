@@ -226,8 +226,9 @@ function makeFoldersWritable(tree) {
 
 // Removes the installer's staged copy, whatever ditto copied from the image: user flags and ACLs are cleared and
 // folders made writable, then the copy is removed, in up to REMOVE_PASSES passes (a folder that could not be listed
-// in one pass can be in the next). Not aborted. Throws the last failure when it cannot be removed.
-async function removeStaged(staged, tools) {
+// in one pass can be in the next). Not aborted. Throws the last failure when it cannot be removed. trash.mjs removes
+// an app it has copied to the Trash on another volume with it too.
+export async function removeStaged(staged, tools) {
   let failure;
   for (let pass = 0; pass < REMOVE_PASSES; pass += 1) {
     if (!exists(staged)) return;
@@ -251,8 +252,13 @@ async function removeStaged(staged, tools) {
  * resolves. `log` gets progress lines and `warn` what could not be cleaned up. Resolves { path };
  * rejects with an InstallError, a VerificationError (verify.mjs) or the abort reason, leaving no staged copy and no
  * receipt behind.
+ *
+ * `subset update` (update.mjs) replaces an installed app with two hooks. `ready()` runs once the staged copy is
+ * verified and may reject with an InstallError to stop. `commit(staged)` then takes the place of step 5: it runs
+ * synchronously, with `<appName>.app` already there, and either puts the staged copy in place or throws an InstallError
+ * leaving it where it was staged (so it is removed). `receipt` is then null: commit writes it.
  */
-export async function installApp({ app, release, beta, dir, receipt, signal, fetch = globalThis.fetch, tools = INSTALL_TOOLS, log = () => {}, warn = () => {} }) {
+export async function installApp({ app, release, beta, dir, receipt, signal, fetch = globalThis.fetch, tools = INSTALL_TOOLS, log = () => {}, warn = () => {}, ready, commit }) {
   const checkpoint = () => {
     if (signal.aborted) throw signal.reason;
   };
@@ -288,7 +294,7 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     const source = findApp(mountRoot, app.appName);
 
     step = 'copy';
-    if (exists(target)) throw alreadyThere();
+    if (!commit && exists(target)) throw alreadyThere();
     mkdirSync(staged, { mode: 0o700 });
     stagedCreated = true;
     const copy = await runTool(tools.ditto, [source, staged], { signal, timeout: COPY_TIMEOUT_MS });
@@ -305,12 +311,18 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     step = 'verify';
     log(`Verifying ${app.appName}.app`);
     await verifyApp(staged, { bundleId: app.bundleId, version: release.version, build: beta ? release.build : undefined }, { tools, signal });
+    if (ready) await ready();
 
     // Step 5, synchronously: nothing else runs in this process until the app and its receipt are in place.
     step = 'install';
     checkpoint();
-    if (exists(target)) throw alreadyThere();
+    if (!commit && exists(target)) throw alreadyThere();
     chmodSync(staged, mode);
+    if (commit) {
+      commit(staged);
+      installed = true;
+      return { path: target };
+    }
     let receiptTemporary;
     if (receipt) {
       try {

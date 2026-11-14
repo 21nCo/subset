@@ -11,7 +11,8 @@ import { INSTALL_TOOLS, InstallError, installApp, InterruptedError } from '../ma
 import { compareNumbers, compareVersions, VerificationError } from '../macos/verify.mjs';
 
 const USAGE = 'Usage: subset install <app> [--beta] [--user] [--dir <folder>]';
-const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+/** The signals that stop `subset install` and `subset update`, with their numbers (exit code 128 + the number). */
+export const SIGNALS = Object.freeze({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 });
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 /** The arguments of `subset install`: { app, beta, user, dir }, or { error } for anything else. */
@@ -90,7 +91,8 @@ function downgrade(copies, release, beta) {
 // The subset.receipt@1 receipt for the install, { file, document() }, or null when the destination is not
 // /Applications or ~/Applications (or a path the receipt schema cannot hold, such as a home folder outside /Users).
 // document() stamps installedAt with `clock()` when it is called, just before the app is renamed into place.
-function receiptFor({ app, release, beta, folder, home, now, clock }) {
+// `subset update` writes its receipts with it too.
+export function receiptFor({ app, release, beta, folder, home, now, clock }) {
   if (folder === null) return null;
   const document = (at) => ({
     schema: 'subset.receipt@1',
@@ -104,7 +106,8 @@ function receiptFor({ app, release, beta, folder, home, now, clock }) {
   return validateReceipt(document(now)).length === 0 ? { file: receiptFile(home, app.bundleId), document: () => document(clock()) } : null;
 }
 
-const failure = (error) => {
+/** What a failed install or update says about `error`, or undefined for an unexpected error. */
+export const failure = (error) => {
   if (error instanceof VerificationError) return `the ${error.check} check failed: ${error.message}`;
   if (error instanceof InstallError) return `the ${error.check} step failed: ${error.message}`;
   return undefined;

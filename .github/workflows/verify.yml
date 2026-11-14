@@ -64,8 +64,9 @@ jobs:
   # SET-229: the subset.dev launcher's tests on macOS, where `subset list` detects installed apps with the real
   # /usr/bin/plutil (the workspace job runs the same tests on Linux with a plutil stand-in). The tests serve the
   # catalog fixtures from file: URLs and use temporary folders for the Applications folders. SET-230: the tests also
-  # refuse an ad-hoc signed app with the real hdiutil, codesign and spctl, and the last step installs the real Breaks
-  # 0.1.0 into a temporary folder. No secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
+  # refuse an ad-hoc signed app with the real hdiutil, codesign and spctl, and a step installs the real Breaks 0.1.0
+  # into a temporary folder. SET-231: the last step installs it again and uninstalls it into a test Trash. No
+  # secrets. Runs for pull requests and pushes to dev and main, like breaks-macos.
   subset-dev-macos:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
     runs-on: macos-26
@@ -102,3 +103,21 @@ jobs:
           spctl --assess --type execute --verbose=2 "$root/apps/Breaks.app"
           # The downloaded image is detached.
           if hdiutil info | grep -F "/subset-install-"; then echo "the downloaded image is still attached" >&2; exit 1; fi
+      # SET-231: installs Breaks 0.1.0 the same way into the /Applications stand-in, so that it gets a receipt, then
+      # subset uninstall (with the real ps) moves it to a test Trash folder and deletes the receipt.
+      - name: subset uninstall breaks with the real tools
+        env:
+          SUBSET_CATALOG_URL: file://${{ github.workspace }}/packages/catalog/feed/fixtures/catalog-valid-live-only.json
+        run: |
+          root="$RUNNER_TEMP/subset-uninstall"
+          mkdir -p "$root/home" "$root/Applications" "$root/user-Applications" "$root/Trash"
+          export HOME="$root/home" SUBSET_APPLICATIONS_DIRS="$root/Applications:$root/user-Applications" SUBSET_TRASH_DIR="$root/Trash"
+          receipt="$root/home/Library/Application Support/Subset/receipts/dev.subset.breaks.json"
+          node packages/subset-dev/src/cli.mjs install breaks --dir "$root/Applications"
+          test -f "$receipt"
+          node packages/subset-dev/src/cli.mjs uninstall breaks
+          test -z "$(ls -A "$root/Applications")"
+          test ! -e "$receipt"
+          trashed="$(ls -A "$root/Trash")"
+          echo "$trashed" | grep -Ex 'Breaks [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}\.[0-9]{2}\.[0-9]{2}\.app'
+          codesign --verify --deep --strict "$root/Trash/$trashed"
