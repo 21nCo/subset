@@ -1,7 +1,8 @@
 // subset uninstall <app> [--quit]: moves every installed copy of a Subset Mac app (in /Applications and ~/Applications)
 // to the user's Trash (macos/trash.mjs) and deletes its receipt. The app's data (preferences, Application Support,
 // containers) stays. A running app is not moved: the command refuses, or with --quit quits it first.
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
+import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
@@ -82,6 +83,10 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
       if (left.length > 0) throw new RunningError(`${app.name} is still running ${quitTimeoutMs / 1000} seconds after it was asked to quit (${pids(left)})`);
     }
     for (const copy of copies) {
+      // Checked again just before the copy is moved: it may have been started since, and a signal stops here.
+      controller.signal.throwIfAborted();
+      const running = await runningProcesses(copy.path, { tools, signal: controller.signal });
+      if (running.length > 0) throw new RunningError(`${app.name} is running from ${copy.path} again (${pids(running)}); quit it and run subset uninstall ${app.id} again`);
       const trashed = await moveToTrash(copy.path, { trash, appName: app.appName, now: new Date(clock()), tools, signal: controller.signal });
       say(stdout, `Moved ${app.name}${copy.version ? ` ${copy.version}` : ''} (${copy.folder}) to the Trash: ${trashed}`);
     }
@@ -95,6 +100,12 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
     throw error;
   } finally {
     for (const [signal, handler] of handlers) signals.off(signal, handler);
+  }
+  // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's).
+  const reinstalled = folders.map((folder) => path.join(folder.dir, `${app.appName}.app`)).find((bundle) => existsSync(bundle));
+  if (reinstalled) {
+    say(stderr, `subset: note: ${reinstalled} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
+    return 0;
   }
   try {
     rmSync(receiptFile(home, app.bundleId), { force: true });

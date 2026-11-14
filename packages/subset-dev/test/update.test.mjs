@@ -544,7 +544,7 @@ test('uninstall moves every copy to the Trash and deletes the receipt; the app d
   assert.deepEqual(trashed.map((name) => lstatSync(path.join(c.trash, name)).ino).sort(), [old.ino, user.ino].sort(), 'renamed into the Trash');
   assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
   assert.equal(readFileSync(path.join(data, 'history.json'), 'utf8'), '[]', 'the app data stays');
-  assert.equal(steps(c).filter((entry) => entry.step === 'ps').length, 2, 'each copy checked');
+  assert.equal(steps(c).filter((entry) => entry.step === 'ps').length, 4, 'each copy checked before any is moved, and again just before it is moved');
 
   const again = await uninstall(c, ['breaks']);
   assert.deepEqual(again, { code: 1, stdout: '', stderr: 'subset: Breaks is not installed in /Applications or ~/Applications.\n' });
@@ -778,9 +778,168 @@ test('recovery leaves a copy alone while the subset that set it aside runs, and 
   assert.equal(notes.length, 1);
   assert.match(notes[0], new RegExp(`; rename the copy to keep to ${c.app.replaceAll('.', '\\.')}\\.$`));
   assert.deepEqual(readdirSync(c.system).sort(), [path.basename(busy), path.basename(second)].sort(), 'nothing is renamed');
+  // With Breaks.app in place, a copy an interrupted update or uninstall left beside it is no longer the installed one: it
+  // is renamed to a name that is never put back (subset list only names it), so a later uninstall cannot revive it.
+  rmSync(c.system, { recursive: true });
+  mkdirSync(c.system);
+  installed(c, { version: '0.2.0' });
+  const stale = path.join(c.system, '.Breaks.app.subset-update-4244-0123456789ab');
+  makeApp(c.system, '.Breaks.app.subset-update-4244-0123456789ab', { bundleId: BUNDLE_ID, version: '0.1.0' });
+  renameSync(`${stale}.app`, stale);
+  const listed = recoverApps([app], folders, { restore: false, running: () => false });
+  assert.match(listed[0], /^a previous copy of Breaks that subset did not move to the Trash is at .*\.Breaks\.app\.subset-update-4244-0123456789ab; /);
+  assert.equal(existsSync(stale), true, 'list renames nothing');
+  const demoted = recoverApps([app], folders, { running: () => false });
+  const [old] = readdirSync(c.system).filter((name) => name !== 'Breaks.app');
+  assert.match(old, /^\.Breaks\.app\.subset-old-\d+-[0-9a-f]{12}$/);
+  assert.equal(demoted[0], `a previous copy of Breaks that subset did not move to the Trash is at ${path.join(c.system, old)}; it is not used any more and can be moved to the Trash.`);
+  rmSync(c.app, { recursive: true });
+  assert.deepEqual(recoverApps([app], folders, { running: () => false }), [demoted[0]], 'an old copy is never put back');
+  assert.equal(existsSync(c.app), false);
   // A staged (unverified) copy alone is never put back.
   rmSync(c.system, { recursive: true });
   mkdirSync(c.system);
   mkdirSync(path.join(c.system, '.Breaks.app.subset-install-0123456789ab'));
   assert.deepEqual(recoverApps([app], folders, { running: () => false }), []);
+});
+
+// The `n` names the Trash gives Breaks at `date` taken (by files, which rename(2) does not replace), so that the next
+// rename of a Breaks copy into the Trash at that time fails.
+function fillTrash(c, date, n = 100) {
+  for (let index = 1; index <= n; index += 1) writeFileSync(path.join(c.trash, trashName('Breaks', date, index)), '');
+}
+
+const leftovers = (c) => readdirSync(c.system).filter((name) => name.startsWith('.Breaks.app.'));
+
+test('an old copy an update could not move to the Trash is never put back: not after an uninstall, not by an install', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1' });
+  feed(c, { live: { version: '0.1.1', image } });
+  installed(c, { channel: 'live' });
+  fillTrash(c, new Date(NOW));
+  const updated = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.match(updated.stderr, /subset: warning: the previous copy could not be moved to the Trash \(.*\); it is at .*\/\.Breaks\.app\.subset-old-\d+-[0-9a-f]{12}\n/);
+  assert.equal(plistVersion(c.app), '0.1.1');
+  const [old] = leftovers(c);
+  assert.match(old, /^\.Breaks\.app\.subset-old-/);
+
+  const later = () => NOW + 60_000;
+  const removed = await uninstall(c, ['breaks'], { clock: later });
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.match(removed.stderr, /note: a previous copy of Breaks that subset did not move to the Trash is at .*subset-old-/);
+  assert.equal(existsSync(c.app), false);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false);
+
+  // The next install installs the release; the old 0.1.0 stays hidden, named.
+  const install = await run(runInstall, c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), clock: later });
+  assert.equal(install.code, 0, install.stderr);
+  assert.doesNotMatch(install.stderr, /put back/);
+  assert.match(install.stderr, /note: a previous copy of Breaks .* is at .*subset-old-/);
+  assert.equal(plistVersion(c.app), '0.1.1');
+  assert.equal(existsSync(path.join(c.app, 'Contents', 'old-copy')), false, 'not the old copy');
+  assert.deepEqual(leftovers(c), [old]);
+});
+
+test('a running app started again between the checks and the move is not uninstalled; a new copy keeps its receipt', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  // ps is asked twice: the first check says nothing runs, the second (just before the move) finds the app.
+  const psFile = path.join(c.base, 'ps.json');
+  const fakePs = path.join(c.base, 'ps-twice');
+  writeFileSync(fakePs, `#!/bin/sh\nif [ -f "${psFile}.seen" ]; then echo "  ${process.ppid} ${c.app}/Contents/MacOS/Breaks"; else touch "${psFile}.seen"; fi\n`);
+  chmodSync(fakePs, 0o755);
+  const refused = await uninstall(c, ['breaks'], { tools: { ...tools, ps: fakePs } });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /Breaks was not uninstalled: Breaks is running from .*Breaks\.app again \(pid \d+\)/);
+  assert.equal(lstatSync(c.app).ino, old.ino);
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+
+  // A new Breaks.app put in place while the old one went to the Trash keeps the receipt.
+  const putNew = path.join(c.base, 'ps-new');
+  writeFileSync(putNew, `#!/bin/sh\nif [ -f "${psFile}.new" ]; then mkdir -p "${c.user}/Breaks.app/Contents"; else touch "${psFile}.new"; fi\n`);
+  chmodSync(putNew, 0o755);
+  const kept = await uninstall(c, ['breaks'], { tools: { ...tools, ps: putNew } });
+  assert.equal(kept.code, 0, kept.stderr);
+  assert.match(kept.stderr, /note: .*user-Applications\/Breaks\.app was installed again while Breaks was uninstalled, so its receipt stays\./);
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+});
+
+// The stand-in tools for a spawned command, with `overrides` ({ ditto, find, ... }: wrapper scripts) in place of some.
+function toolMap(c, overrides) {
+  const map = Object.fromEntries(Object.entries(UPDATE_TOOLS).map(([key, file]) => [file, overrides[key] ?? tools[key]]));
+  return JSON.stringify(map);
+}
+const wrapper = (c, name, body) => {
+  const file = path.join(c.base, name);
+  writeFileSync(file, `#!/bin/sh\n${body}\n`);
+  chmodSync(file, 0o755);
+  return file;
+};
+
+// A case whose Trash is on another volume (the rename into it fails with a real EXDEV).
+function setupOtherVolume() {
+  const c = setup();
+  c.trash = mkdtempSync(path.join(other, 'case-'));
+  c.env.SUBSET_TRASH_DIR = c.trash;
+  return c;
+}
+
+const otherSkip = skip || (!other && 'no folder on another volume');
+test('trash on another volume, SIGKILL while the uninstalled copy is removed: the partly removed copy is never put back', { skip: otherSkip }, async () => {
+  const c = setupOtherVolume();
+  const image = breaksImage();
+  feed(c, { live: { version: '0.1.0', image } });
+  installed(c, { channel: 'live' });
+  // The copy in the Trash succeeded; its removal (find runs first) removes part of it, then the uninstall is killed.
+  const find = wrapper(c, 'find-killed', `case "$2" in *.subset-*) rm -f "$2/Contents/Info.plist"; kill -KILL $PPID; sleep 5;; esac\nexec "${tools.find}" "$@"`);
+  const killed = await spawnCommand(c, image, ['uninstall', 'breaks'], { STUB_TOOL_MAP: toolMap(c, { find }) });
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  assert.equal(existsSync(c.app), false);
+  const [partial] = leftovers(c);
+  assert.match(partial, /^\.Breaks\.app\.subset-old-\d+-[0-9a-f]{12}$/, 'renamed out of the names put back before its removal');
+  const [trashed] = readdirSync(c.trash);
+  assert.equal(readFileSync(path.join(c.trash, trashed, 'Contents', 'old-copy'), 'utf8'), '0.1.0', 'the complete copy is in the Trash');
+
+  const install = await run(runInstall, c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(install.code, 0, install.stderr);
+  assert.doesNotMatch(install.stderr, /put back/);
+  assert.equal(existsSync(path.join(c.app, 'Contents', 'old-copy')), false, 'the release is installed, not the partly removed copy');
+  assert.deepEqual(leftovers(c), [partial]);
+});
+
+test('trash on another volume, SIGKILL while an update copies the old copy to the Trash: the old copy is never put back', { skip: otherSkip }, async () => {
+  const c = setupOtherVolume();
+  const image = breaksImage({ version: '0.1.1' });
+  feed(c, { live: { version: '0.1.1', image } });
+  installed(c, { channel: 'live' });
+  const ditto = wrapper(c, 'ditto-killed', `case "$2" in "${c.trash}"/*) mkdir -p "$2/Contents"; kill -KILL $PPID; sleep 5;; esac\nexec "${tools.ditto}" "$@"`);
+  const killed = await spawnCommand(c, image, ['update', 'breaks'], { STUB_TOOL_MAP: toolMap(c, { ditto }) });
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  assert.equal(plistVersion(c.app), '0.1.1', 'the new copy is in place');
+  const [old] = leftovers(c);
+  assert.match(old, /^\.Breaks\.app\.subset-old-\d+-[0-9a-f]{12}$/);
+
+  const removed = await uninstall(c, ['breaks'], { clock: () => NOW + 60_000 });
+  assert.equal(removed.code, 0, removed.stderr);
+  const install = await run(runInstall, c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), clock: () => NOW + 120_000 });
+  assert.equal(install.code, 0, install.stderr);
+  assert.doesNotMatch(install.stderr, /put back/);
+  assert.equal(existsSync(path.join(c.app, 'Contents', 'old-copy')), false, 'not the old 0.1.0');
+  assert.deepEqual(leftovers(c), [old]);
+});
+
+test('trash on another volume, a SIGTERM while uninstall copies to the Trash: the app is back, the Trash empty, the receipt kept', { skip: otherSkip }, async () => {
+  const c = setupOtherVolume();
+  const image = breaksImage();
+  feed(c, { live: { version: '0.1.0', image } });
+  const old = installed(c, { channel: 'live' });
+  const result = await spawnCommand(c, image, ['uninstall', 'breaks'], { STUB_SIGNAL_AT: 'ditto' });
+  assert.equal(result.status, 143, result.stderr);
+  assert.match(result.stderr, /subset: Breaks was not uninstalled: interrupted by SIGTERM\./);
+  assert.equal(lstatSync(c.app).ino, old.ino, 'the same copy, renamed back');
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
+  assert.deepEqual(readdirSync(c.trash), []);
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
 });
