@@ -372,18 +372,30 @@ test('installing next to a copy in the other folder says that the receipt now de
   assert.equal(JSON.parse(readFileSync(receipt(c), 'utf8')).path, '/Applications/Breaks.app');
 });
 
-// The fields of /proc/<pid>/stat after the command name (state, ppid, process group, ...); undefined without /proc.
-function procStat(pid) {
+// Whether this system has /proc (Linux). Without it the helpers below learn nothing from it.
+const hasProc = existsSync('/proc/self/stat');
+// The state ('Z' for a zombie) and process group of `pid`, taken from ONE read of /proc/<pid>/stat (with `read`, a
+// readFileSync stand-in); undefined when there is no such file: no /proc, or the process is gone (reaped).
+function procStat(pid, read = readFileSync) {
+  let stat;
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    stat = read(`/proc/${pid}/stat`, 'utf8');
   } catch {
     return undefined;
   }
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  return { state: fields[0], group: fields[2] };
 }
-const zombie = (pid) => procStat(pid)?.[0] === 'Z';
 // The process group of `pid` as /proc tells it (Linux), or undefined.
-const groupOf = (pid) => procStat(pid)?.[2];
+const groupOf = (pid) => procStat(pid)?.group;
+// The pids among `pids` that /proc lists in process group `group` and that still run (not zombies). Each process is
+// read once, so one reaped while the list is made is never counted as running.
+function runningGroupMembers(pids, group, read = readFileSync) {
+  return pids.filter((pid) => {
+    const stat = procStat(pid, read);
+    return stat !== undefined && stat.group === group && stat.state !== 'Z';
+  });
+}
 // A stopped tool's stderr may end "a process it started did not exit" only when its group still held a process when
 // runTool let it go. Under an init that does not reap orphans (node as PID 1 in a container) a SIGKILLed descendant
 // stays in the group as a zombie until then; it no longer runs. So the note is accepted only where /proc lists the
@@ -391,19 +403,21 @@ const groupOf = (pid) => procStat(pid)?.[2];
 function assertNoRunningGroupMember(stderr, group, label) {
   if (!/did not exit/.test(stderr)) return;
   assert.ok(group !== undefined, `${label}: a process it started did not exit, and /proc cannot tell whether it still runs`);
-  const running = readdirSync('/proc').filter((pid) => /^\d+$/.test(pid) && groupOf(pid) === group && !zombie(pid));
-  assert.deepEqual(running, [], `${label}: processes of the stopped tool's group still run`);
+  const pids = readdirSync('/proc').filter((pid) => /^\d+$/.test(pid));
+  assert.deepEqual(runningGroupMembers(pids, group), [], `${label}: processes of the stopped tool's group still run`);
 }
 // Whether process `pid` still runs, asked of the operating system (kill(pid, 0)), not of runTool. A zombie (exited, not
 // yet reaped by the init process it was reparented to) has stopped running: it is let go after a short wait, and on
-// Linux /proc says so at once.
+// Linux /proc says so at once. On Linux a process reaped after kill(pid, 0) (no /proc entry left) has stopped too.
 function runs(pid) {
   try {
     process.kill(pid, 0);
-    return !zombie(pid);
   } catch (error) {
     return error.code === 'EPERM';
   }
+  if (!hasProc) return true;
+  const stat = procStat(pid);
+  return stat !== undefined && stat.state !== 'Z';
 }
 async function stillRuns(pid, ms = 1000) {
   for (const end = Date.now() + ms; Date.now() < end; ) {
@@ -446,6 +460,28 @@ function killAll(pids) {
     }
   }
 }
+
+// The group check reads each /proc/<pid>/stat once: a process reaped between two reads would otherwise look like a
+// running member of the group. Stat texts come from a stand-in reader, so the reap is deterministic.
+test('the /proc group check counts a process reaped while it is read as not running', () => {
+  const stats = {
+    10: ['10 (sh) Z 1 500 500 0'], // a zombie of the group, reaped right after its first read
+    11: ['11 (node) S 1 500 500 0', '11 (node) S 1 500 500 0'], // runs in the group
+    12: ['12 (node) S 1 600 600 0', '12 (node) S 1 600 600 0'], // runs in another group
+    13: [], // already gone
+    14: ['14 (a) S 1 9 9 (b) R 1 500 500 0', '14 (a) S 1 9 9 (b) R 1 500 500 0'] // a command name holding ") "
+  };
+  const reads = {};
+  const read = (file) => {
+    const pid = file.split('/')[2];
+    reads[pid] = (reads[pid] ?? 0) + 1;
+    const text = stats[pid].shift();
+    if (text === undefined) throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+    return text;
+  };
+  assert.deepEqual(runningGroupMembers(Object.keys(stats), '500', read), ['11', '14']);
+  assert.ok(Object.values(reads).every((count) => count === 1), `each process is read once: ${JSON.stringify(reads)}`);
+});
 
 // A tool that exits while a process it started (in its group, ignoring SIGTERM) keeps its output open: abort and
 // timeout still stop that process, by signalling the group, and settle. The OS, not the runner, says it is gone. A
