@@ -1,0 +1,21 @@
+packages/subset-dev/src/macos/install.mjs
+  s_8f9fc34e21d9b7::t_9bac4bdd61116c 330-331
+packages/subset-dev/test/update.test.mjs
+  s_8f9fc34e21d9b7::t_54b20194d078c7 1271-1273,1287,1289-1293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cb52ed3ff2c4963467f41174f16091edad1fe455",
+  "prompts": {},
+  "sessions": {
+    "s_8f9fc34e21d9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_8f9fc34e21d9b7",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
