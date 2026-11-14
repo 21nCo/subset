@@ -6,7 +6,7 @@ import { lstatSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
-import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
+import { ApplicationsFoldersError, applicationsFolders, detectApps, readInfoPlist, receiptFile } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
 import { LockError, lockApp } from '../macos/lock.mjs';
 import { moveToTrash, prepareTrash, removeLeftCopies, TrashError, trashFolder } from '../macos/trash.mjs';
@@ -39,7 +39,7 @@ const statOf = (file) => {
 /**
  * Runs `subset uninstall <args>`, writing to `stdout` and `stderr`, and returns the exit code: 0 when every copy is in
  * the Trash and the receipt is gone, 1 when the app is not installed, another subset is working on it, a copy could not
- * be moved (the receipt then stays) or the receipt could not be removed, 2 for a usage error, or 128 + the signal
+ * be moved or read (the receipt then stays) or the receipt could not be removed, 2 for a usage error, or 128 + the signal
  * number when a signal stopped it.
  */
 export async function runUninstall(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), clock = Date.now, tools = UPDATE_TOOLS, signals = process, quitTimeoutMs = QUIT_TIMEOUT_MS }) {
@@ -153,17 +153,21 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   }
   // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's): something now at
   // a moved copy's path, or at a path that was empty or held another file or folder (device and inode) when the copies
-  // were identified. A bundle that was already there unchanged (another app of the same name) is not a reinstall.
+  // were identified. A bundle that was already there unchanged keeps it too, unless its Info.plist names another bundle
+  // ID (another app of the same name): one whose Info.plist could not be read may be this app.
   const moved = new Set(copies.map((copy) => copy.path));
-  const reinstalled = bundles.find((bundle) => {
+  for (const bundle of bundles) {
     const current = statOf(bundle);
-    if (!current) return false;
+    if (!current) continue;
     const seen = before.get(bundle);
-    return moved.has(bundle) || !seen || seen.dev !== current.dev || seen.ino !== current.ino;
-  });
-  if (reinstalled) {
-    say(stderr, `subset: note: ${reinstalled} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
-    return 0;
+    if (moved.has(bundle) || !seen || seen.dev !== current.dev || seen.ino !== current.ino) {
+      say(stderr, `subset: note: ${bundle} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
+      return 0;
+    }
+    const info = await readInfoPlist(bundle, tools.plutil);
+    if (typeof info?.CFBundleIdentifier !== 'string' || info.CFBundleIdentifier === app.bundleId) {
+      return fail(`${bundle} was not uninstalled: its Info.plist could not be read when it was checked, so it may be ${app.name} and its receipt stays; run subset uninstall ${app.id} again.`);
+    }
   }
   try {
     rmSync(receiptFile(home, app.bundleId), { force: true });

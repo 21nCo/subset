@@ -1411,3 +1411,27 @@ test('uninstall deletes the receipt when another app of the same name was alread
   assert.deepEqual(readFileSync(path.join(foreign, 'Contents', 'Info.plist')), foreignPlist);
   assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
 });
+
+test('uninstall keeps the receipt of a copy whose Info.plist could not be read: it may be the app, and its beta stays known', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1', build: '5' });
+  feed(c, { live: { version: '0.1.1', image } });
+  // The beta in /Applications is what the receipt describes; plutil fails on its Info.plist only.
+  const beta = installed(c, { version: '0.1.1', build: '4', channel: 'beta' });
+  installed(c, { version: '0.1.1', build: '4', dir: c.user });
+  const unreadable = path.join(c.app, 'Contents', 'Info.plist');
+  const plutil = wrapper(c, 'plutil-fails', `[ "$5" = "${unreadable}" ] && exit 1\nexec "${tools.plutil}" "$@"`);
+  const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
+  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: its Info.plist could not be read when it was checked, so it may be Breaks and its receipt stays; run subset uninstall breaks again.\n`);
+  assert.deepEqual(readdirSync(c.user), []);
+  assert.equal(lstatSync(c.app).ino, beta.ino, 'the unread copy stays');
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
+
+  // Read again, the copy is still known as the beta: the same version's live build replaces it.
+  const updated = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.equal(updated.stdout, `Updated Breaks 0.1.1-beta.4 to 0.1.1 in ${c.app}\n`);
+  assert.equal(receipt(c).channel, 'live');
+});
