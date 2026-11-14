@@ -1,0 +1,23 @@
+packages/subset-dev/src/commands/update.mjs
+  s_0c56c0a9824070::t_b7f2b7a77d7e69 36,64-65,67
+packages/subset-dev/src/macos/update.mjs
+  s_0c56c0a9824070::t_35a8e67c8964b2 192
+packages/subset-dev/test/update.test.mjs
+  s_0c56c0a9824070::t_800e1a88827ead 411-428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "676fdbd81c62ad3f076f0a50f5b7c8e775c6e0e7",
+  "prompts": {},
+  "sessions": {
+    "s_0c56c0a9824070": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0c56c0a9824070",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
