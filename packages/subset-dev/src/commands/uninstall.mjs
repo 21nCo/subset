@@ -9,7 +9,7 @@ import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } 
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
 import { LockError, lockApp } from '../macos/lock.mjs';
-import { moveToTrash, prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
+import { moveToTrash, prepareTrash, removeLeftCopies, TrashError, trashFolder } from '../macos/trash.mjs';
 import { pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, RunningError, runningProcesses, UPDATE_TOOLS } from '../macos/update.mjs';
 import { SIGNALS } from './install.mjs';
 
@@ -90,6 +90,8 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
 async function uninstallLocked({ app, options, folders, trash, home, clock, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, notMoved }) {
   // A copy an interrupted update or uninstall left under a hidden name is put back first, and so uninstalled too.
   for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
+  // So is an incomplete copy a killed subset left in the Trash on another volume.
+  for (const note of await removeLeftCopies(app, trash, { tools })) say(stderr, `subset: note: ${note}`);
   // Each copy is identified (device and inode) before and after its Info.plist is read; only that copy is moved.
   const bundles = folders.map((folder) => path.join(folder.dir, `${app.appName}.app`));
   const before = new Map(bundles.map((bundle) => [bundle, statOf(bundle)]));
@@ -115,6 +117,11 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
     if (running.length === 0) return;
     if (!options.quit) {
       throw new RunningError(again ? `${app.name} is running from ${copy.path} again (${pids(running)}); quit it and run subset uninstall ${app.id} again` : `${app.name} is running from ${copy.path} (${pids(running)}); quit it, or use subset uninstall ${app.id} --quit`);
+    }
+    // The processes were found by path: they are quit only while that path is still the copy checked.
+    const now = statOf(copy.path);
+    if (!now || now.dev !== copy.identity.dev || now.ino !== copy.identity.ino) {
+      throw new TrashError(`${copy.path} was replaced since it was checked (by another program?), so it was not quit or moved`);
     }
     say(stderr, `Quitting ${app.name} (${pids(running)})`);
     const left = await quitProcesses(copy.path, running, { tools, timeoutMs: quitTimeoutMs, signal: controller.signal });

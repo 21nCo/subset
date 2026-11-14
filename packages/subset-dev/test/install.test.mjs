@@ -736,10 +736,22 @@ test('two installs of the same app at once: the one holding the app\'s lock inst
   mkdirSync(barrier);
   // The first waits at its last check before the rename (sw_vers), holding the app's lock, until the second has run.
   const first = spawnInstall(c, image, { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' });
-  while (readdirSync(barrier).length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-  const second = await spawnInstall(c, image);
-  writeFileSync(path.join(barrier, 'go'), '');
-  const result = await first;
+  let ended;
+  first.then((done) => (ended = done));
+  let second;
+  let result;
+  try {
+    // At most 60 seconds, and not after the first install has ended without reaching the barrier.
+    for (const deadline = Date.now() + 60_000; readdirSync(barrier).length === 0; ) {
+      if (ended) assert.fail(`the first install ended before the barrier: ${ended.stderr}`);
+      if (Date.now() > deadline) assert.fail('the first install did not reach the barrier within 60 seconds');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    second = await spawnInstall(c, image);
+  } finally {
+    writeFileSync(path.join(barrier, 'go'), '');
+    result = await first;
+  }
   assert.equal(result.status, 0, result.stderr);
   assert.equal(second.status, 1, second.stderr);
   assert.match(second.stderr, /was not installed: another subset \(pid \d+\) is installing, updating or uninstalling Breaks; run this again once it has finished/);

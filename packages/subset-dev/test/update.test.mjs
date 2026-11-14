@@ -16,8 +16,8 @@ import { runList } from '../src/commands/list.mjs';
 import { parseUninstallArgs, runUninstall } from '../src/commands/uninstall.mjs';
 import { NPM_LATEST_URL, newerLauncher, parseUpdateArgs, runUpdate } from '../src/commands/update.mjs';
 import { receiptFile } from '../src/macos/apps.mjs';
-import { moveToTrash, prepareTrash, renameIntoTrash, trashFolder, trashName } from '../src/macos/trash.mjs';
-import { lockApp, locksFolder } from '../src/macos/lock.mjs';
+import { moveToTrash, prepareTrash, removeLeftCopies, renameIntoTrash, trashFolder, trashName } from '../src/macos/trash.mjs';
+import { LockError, lockApp, lockKey, locksFolder } from '../src/macos/lock.mjs';
 import { decideUpdate, recoverApps, swapApp, UPDATE_TOOLS } from '../src/macos/update.mjs';
 import { makeApp, writeReceipt } from './helpers.mjs';
 import { appFiles, attachedImages, makeImage, stubTools, stubToolsSkip } from './install-stubs.mjs';
@@ -657,25 +657,28 @@ test('one subset at a time per app: while an update runs, another update, an ins
   const old = installed(c, { channel: 'live' });
   const gate = psGate(c);
   const first = spawnCommand(c, image, ['update', 'breaks'], gate.env);
-  await gate.held(first);
-  const fetch = fakeFetch({ [LIVE_URL]: image });
-  const again = await update(c, ['breaks'], { fetch });
-  assert.equal(again.code, 1);
-  assert.match(again.stderr, /^subset: Breaks was not updated: another subset/);
-  assert.match(again.stderr, BUSY);
-  const removed = await uninstall(c, ['breaks']);
-  assert.equal(removed.code, 1);
-  assert.match(removed.stderr, /^subset: Breaks was not uninstalled: another subset/);
-  const install = await run(runInstall, c, ['breaks', '--user'], { fetch });
-  assert.equal(install.code, 1);
-  assert.match(install.stderr, /^subset: Breaks 0\.1\.1 was not installed: another subset/);
-  assert.deepEqual(fetch.calls, [], 'nothing downloaded');
-  assert.deepEqual([readdirSync(c.user), readdirSync(c.trash)], [[], []]);
-  assert.equal(lstatSync(c.app).ino, old.ino);
-  assert.equal((await run(runList, c, [], { plutil: tools.plutil })).code, 0, 'list takes no lock');
-
-  gate.release();
-  const result = await first;
+  let result;
+  try {
+    await gate.held(first);
+    const fetch = fakeFetch({ [LIVE_URL]: image });
+    const again = await update(c, ['breaks'], { fetch });
+    assert.equal(again.code, 1);
+    assert.match(again.stderr, /^subset: Breaks was not updated: another subset/);
+    assert.match(again.stderr, BUSY);
+    const removed = await uninstall(c, ['breaks']);
+    assert.equal(removed.code, 1);
+    assert.match(removed.stderr, /^subset: Breaks was not uninstalled: another subset/);
+    const install = await run(runInstall, c, ['breaks', '--user'], { fetch });
+    assert.equal(install.code, 1);
+    assert.match(install.stderr, /^subset: Breaks 0\.1\.1 was not installed: another subset/);
+    assert.deepEqual(fetch.calls, [], 'nothing downloaded');
+    assert.deepEqual([readdirSync(c.user), readdirSync(c.trash)], [[], []]);
+    assert.equal(lstatSync(c.app).ino, old.ino);
+    assert.equal((await run(runList, c, [], { plutil: tools.plutil })).code, 0, 'list takes no lock');
+  } finally {
+    gate.release();
+    result = await first;
+  }
   assert.equal(result.status, 0, result.stderr);
   assertUpdated(c, '0.1.1', '0.1.0');
   assert.equal(receipt(c).version, '0.1.1');
@@ -689,13 +692,17 @@ test('an install while an uninstall runs refuses: the uninstall then removes the
   installed(c, { channel: 'live' });
   const gate = psGate(c);
   const first = spawnCommand(c, image, ['uninstall', 'breaks'], gate.env);
-  await gate.held(first);
-  const install = await run(runInstall, c, ['breaks', '--user'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
-  assert.equal(install.code, 1);
-  assert.match(install.stderr, BUSY);
-  assert.deepEqual(readdirSync(c.user), []);
-  gate.release();
-  const result = await first;
+  let result;
+  try {
+    await gate.held(first);
+    const install = await run(runInstall, c, ['breaks', '--user'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+    assert.equal(install.code, 1);
+    assert.match(install.stderr, BUSY);
+    assert.deepEqual(readdirSync(c.user), []);
+  } finally {
+    gate.release();
+    result = await first;
+  }
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual([readdirSync(c.system), readdirSync(c.trash).length], [[], 1]);
   assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false);
@@ -958,9 +965,14 @@ test('trash on another volume, SIGKILL while an update copies the old copy to th
   assert.equal(plistVersion(c.app), '0.1.1', 'the new copy is in place');
   const [old] = leftovers(c);
   assert.match(old, /^\.Breaks\.app\.subset-old-\d+-[0-9a-f]{12}$/);
+  const [orphan] = readdirSync(c.trash);
+  assert.match(orphan, /^\.Breaks\.app\.subset-copy-\d+-[0-9a-f]{12}$/, 'the killed copy is left in the Trash');
 
   const removed = await uninstall(c, ['breaks'], { clock: () => NOW + 60_000 });
   assert.equal(removed.code, 0, removed.stderr);
+  assert.match(removed.stderr, new RegExp(`note: an incomplete copy of Breaks that an interrupted subset left in the Trash was removed \\(${escapeRegExp(path.join(c.trash, orphan))}\\)\\.`));
+  assert.equal(readdirSync(c.trash).length, 1, 'only the uninstalled copy is in the Trash');
+  assert.match(readdirSync(c.trash)[0], /^Breaks \d{4}-/);
   const install = await run(runInstall, c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), clock: () => NOW + 120_000 });
   assert.equal(install.code, 0, install.stderr);
   assert.doesNotMatch(install.stderr, /put back/);
@@ -1101,7 +1113,7 @@ test('locks: a live holder refuses another command, which changes nothing; a dea
   // A subset that runs (this test's parent) holds the lock, with its update's backup set aside and Breaks.app missing.
   feed(c, { live: { version: '0.1.0', image: breaksImage() } });
   installed(c, { channel: 'live' });
-  const live = path.join(locksFolder(c.home), `${BUNDLE_ID}.${process.ppid}.0123456789ab.lock`);
+  const live = path.join(locksFolder(c.home), `${lockKey(BUNDLE_ID)}.${process.ppid}.0123456789ab.lock`);
   writeFileSync(live, '');
   const backup = path.join(c.system, `.Breaks.app.subset-update-${process.ppid}-0123456789ab`);
   renameSync(c.app, backup);
@@ -1112,7 +1124,7 @@ test('locks: a live holder refuses another command, which changes nothing; a dea
     assert.deepEqual(readdirSync(c.system), [path.basename(backup)], 'neither put back nor renamed');
   }
   // Once that subset is gone, its lock is removed and the backup put back.
-  const dead = path.join(locksFolder(c.home), `${BUNDLE_ID}.${deadPid()}.0123456789ab.lock`);
+  const dead = path.join(locksFolder(c.home), `${lockKey(BUNDLE_ID)}.${deadPid()}.0123456789ab.lock`);
   renameSync(live, dead);
   const dying = path.join(c.system, `.Breaks.app.subset-update-${deadPid()}-0123456789ab`);
   renameSync(backup, dying);
@@ -1132,7 +1144,7 @@ test('an update killed between its swap and renaming its backup: the next uninst
   renameSync(c.app, path.join(c.system, `.Breaks.app.subset-update-${pid}-0123456789ab`));
   makeApp(c.system, 'Breaks', { bundleId: BUNDLE_ID, version: '0.1.1' });
   mkdirSync(locksFolder(c.home), { recursive: true });
-  writeFileSync(path.join(locksFolder(c.home), `${BUNDLE_ID}.${pid}.0123456789ab.lock`), '');
+  writeFileSync(path.join(locksFolder(c.home), `${lockKey(BUNDLE_ID)}.${pid}.0123456789ab.lock`), '');
   const removed = await uninstall(c, ['breaks']);
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stderr, /note: a previous copy of Breaks that subset did not move to the Trash is at .*subset-old-/);
@@ -1189,5 +1201,154 @@ test('uninstall exits 1 naming the receipt when it cannot be removed; the app st
     assert.deepEqual([readdirSync(c.system), readdirSync(c.trash).length], [[], 1]);
   } finally {
     chmodSync(receipts, 0o755);
+  }
+});
+
+test('trash on another volume, SIGKILL while uninstall copies to the Trash: the app is put back and the incomplete copy removed', { skip: otherSkip }, async () => {
+  const c = setupOtherVolume();
+  const image = breaksImage();
+  feed(c, { live: { version: '0.1.0', image } });
+  const old = installed(c, { channel: 'live' });
+  const ditto = wrapper(c, 'ditto-killed', `case "$2" in "${c.trash}"/*) mkdir -p "$2/Contents" && echo partial > "$2/Contents/partial"; kill -KILL $PPID; sleep 5;; esac\nexec "${tools.ditto}" "$@"`);
+  const killed = await spawnCommand(c, image, ['uninstall', 'breaks'], { STUB_TOOL_MAP: toolMap(c, { ditto }) });
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  const [aside] = leftovers(c);
+  assert.match(aside, /^\.Breaks\.app\.subset-trash-\d+-[0-9a-f]{12}$/, 'the app is set aside, whole');
+  const [orphan] = readdirSync(c.trash);
+  assert.match(orphan, /^\.Breaks\.app\.subset-copy-\d+-[0-9a-f]{12}$/);
+  // Something else in the Trash, and a copy of a subset that still runs (this test's parent), are never touched.
+  const live = path.join(c.trash, `.Breaks.app.subset-copy-${process.ppid}-0123456789ab`);
+  mkdirSync(live);
+  makeApp(c.trash, 'Other', { bundleId: 'dev.example.other', version: '1.0' });
+  const list = await run(runList, c, [], { plutil: tools.plutil });
+  assert.match(list.stderr, /subset update breaks puts it back/);
+
+  const removed = await uninstall(c, ['breaks'], { clock: () => NOW + 60_000 });
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.match(removed.stderr, /note: Breaks was put back at /);
+  assert.match(removed.stderr, new RegExp(`note: an incomplete copy of Breaks that an interrupted subset left in the Trash was removed \\(${escapeRegExp(path.join(c.trash, orphan))}\\)\\.`));
+  const trashed = readdirSync(c.trash).sort();
+  assert.equal(trashed.length, 3, trashed.join(', '));
+  assert.ok(trashed.includes(path.basename(live)) && trashed.includes('Other.app'), 'the other entries stay');
+  const moved = trashed.find((name) => name.startsWith('Breaks '));
+  assert.equal(readFileSync(path.join(c.trash, moved, 'Contents', 'old-copy'), 'utf8'), '0.1.0', 'the whole app reached the Trash');
+  assert.deepEqual(readFileSync(path.join(c.trash, moved, 'Contents', 'Info.plist')), old.plist);
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false);
+});
+
+test('trash: removeLeftCopies removes only the app\'s copies of a subset that no longer runs, and names one it cannot remove', { skip }, async () => {
+  const c = setup();
+  const app = { name: 'Breaks', appName: 'Breaks' };
+  const dead = deadPid();
+  const orphan = path.join(c.trash, `.Breaks.app.subset-copy-${dead}-0123456789ab`);
+  makeApp(orphan, 'Breaks', { bundleId: BUNDLE_ID, version: '0.1.0' });
+  const kept = [`.Breaks.app.subset-copy-${process.pid}-0123456789ab`, `.Breaks.app.subset-copy-${process.ppid}-0123456789ab`, `.Timer.app.subset-copy-${dead}-0123456789ab`, `.Breaks.app.subset-trash-${dead}-0123456789ab`, 'Breaks 2026-11-14 12.00.00.app'];
+  for (const name of kept) mkdirSync(path.join(c.trash, name));
+  writeFileSync(path.join(c.trash, `.Breaks.app.subset-copy-${dead}-ba9876543210`), 'a file, not a copy');
+  kept.push(`.Breaks.app.subset-copy-${dead}-ba9876543210`);
+  assert.deepEqual(await removeLeftCopies(app, c.trash, { tools }), [`an incomplete copy of Breaks that an interrupted subset left in the Trash was removed (${orphan}).`]);
+  assert.deepEqual(readdirSync(c.trash).sort(), [...kept].sort());
+  assert.deepEqual(await removeLeftCopies(app, path.join(c.base, 'no-trash'), { tools }), [], 'no Trash, nothing to do');
+  if (process.getuid?.() !== 0) {
+    const stuck = path.join(c.trash, `.Breaks.app.subset-copy-${dead}-00000000000a`);
+    mkdirSync(path.join(stuck, 'Contents'), { recursive: true });
+    chmodSync(c.trash, 0o555);
+    try {
+      const [note] = await removeLeftCopies(app, c.trash, { tools });
+      assert.match(note, new RegExp(`left an incomplete copy of Breaks in the Trash at ${escapeRegExp(stuck)}, and it could not be removed \\(E[A-Z]+\\); remove it by hand\\.$`));
+    } finally {
+      chmodSync(c.trash, 0o755);
+    }
+  }
+});
+
+test('locks: the lock file name is bounded for any catalog bundle ID: a long one installs, updates and uninstalls', { skip }, async () => {
+  const c = setup();
+  // 250 characters, so its receipt name (`<bundleId>.json`) fits in 255 bytes; the lock name does too. A receipt's
+  // temporary name does not (the install below is into a --dir folder, which gets none, and the update warns: receipts
+  // are advisory).
+  const bundleId = `dev.subset.${'b'.repeat(239)}`;
+  assert.equal(bundleId.length, 250);
+  const doc = structuredClone(template);
+  doc.apps[0].bundleId = bundleId;
+  const live = breaksImage({ bundleId });
+  const next = breaksImage({ bundleId, version: '0.1.1' });
+  const write = (version, image) => {
+    Object.assign(doc.apps[0].channels.live, { version, sha256: sha256(image) });
+    delete doc.apps[0].channels.beta;
+    writeFileSync(c.feedFile, JSON.stringify(doc));
+  };
+  write('0.1.0', live);
+  const elsewhere = path.join(c.base, 'elsewhere');
+  mkdirSync(elsewhere);
+  const installs = await run(runInstall, c, ['breaks', '--dir', elsewhere], { fetch: fakeFetch({ [LIVE_URL]: live }) });
+  assert.equal(installs.code, 0, installs.stderr);
+  assert.equal(plistVersion(path.join(elsewhere, 'Breaks.app')), '0.1.0');
+  makeApp(c.system, 'Breaks', { bundleId, version: '0.1.0', build: '1' });
+  write('0.1.1', next);
+  const updates = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: next }), now: NOW + 600_000, clock: () => NOW + 600_000 });
+  assert.equal(updates.code, 0, updates.stderr);
+  assert.doesNotMatch(updates.stderr, /lock/);
+  assert.equal(plistVersion(c.app), '0.1.1');
+  const removed = await uninstall(c, ['breaks'], { now: NOW + 600_000, clock: () => NOW + 660_000 });
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.equal(readdirSync(c.trash).length, 2);
+  assert.equal(existsSync(receiptFile(c.home, bundleId)), false);
+  // Contention still holds for it, and the lock names stay short.
+  const release = lockApp({ name: 'Breaks', bundleId }, { home: c.home });
+  try {
+    assert.ok(readdirSync(locksFolder(c.home)).every((name) => Buffer.byteLength(name) < 100));
+    assert.throws(() => lockApp({ name: 'Breaks', bundleId }, { home: c.home }), /another subset \(pid \d+\)/);
+    lockApp({ name: 'Breaks', bundleId: `${bundleId}x` }, { home: c.home })();
+  } finally {
+    release();
+  }
+  assert.deepEqual(readdirSync(locksFolder(c.home)), []);
+});
+
+test('locks: a dead holder\'s lock that cannot be removed refuses only that app, naming it; the others update and every lock is released', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1' });
+  feed(c, { live: { version: '0.1.1', image } });
+  installed(c, { channel: 'live' });
+  // A lock rmSync cannot remove (a folder), of a Timer subset that no longer runs.
+  const stuck = path.join(locksFolder(c.home), `${lockKey('dev.subset.timer')}.${deadPid()}.0123456789ab.lock`);
+  mkdirSync(path.join(stuck, 'inside'), { recursive: true });
+  assert.throws(() => lockApp({ name: 'Timer', bundleId: 'dev.subset.timer' }, { home: c.home }), (error) => error instanceof LockError && error.message.includes(`the lock ${stuck} of a subset`) && /remove it by hand$/.test(error.message));
+  assert.deepEqual(readdirSync(locksFolder(c.home)), [path.basename(stuck)], 'its own claim is released');
+
+  const result = await update(c, [], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, new RegExp(`subset: Timer was not updated: the lock ${escapeRegExp(stuck)} of a subset \\(pid \\d+\\) that no longer runs cannot be removed \\([A-Z_]+\\); remove it by hand\\.`));
+  assert.match(result.stdout, /^Updated Breaks 0\.1\.0 to 0\.1\.1 in /m);
+  assertUpdated(c, '0.1.1', '0.1.0');
+  assert.deepEqual(readdirSync(locksFolder(c.home)), [path.basename(stuck)], 'every lock taken is released');
+  const timer = await uninstall(c, ['timer']);
+  assert.equal(timer.code, 1);
+  assert.match(timer.stderr, /subset: Timer was not uninstalled: the lock .* cannot be removed/);
+});
+
+test('uninstall --quit quits nothing when the copy was replaced after its processes were listed (by path)', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  const app = await fakeApp(c);
+  try {
+    // Another program replaces the bundle right after ps lists the processes running from its path.
+    const elsewhere = path.join(c.base, 'Breaks-old.app');
+    const replace = `"${process.execPath}" -e "const fs = require('node:fs'); fs.renameSync(process.argv[1], process.argv[2]); fs.mkdirSync(process.argv[1] + '/Contents', { recursive: true })" "${c.app}" "${elsewhere}"`;
+    const ps = wrapper(c, 'ps-replace', `"${tools.ps}" "$@"\nstatus=$?\n[ -e "${elsewhere}" ] || ${replace}\nexit $status`);
+    const result = await uninstall(c, ['breaks', '--quit'], { tools: { ...tools, ps }, extraEnv: app.env });
+    assert.equal(result.code, 1, result.stderr);
+    assert.equal(result.stderr, `subset: Breaks was not uninstalled: ${c.app} was replaced since it was checked (by another program?), so it was not quit or moved.\n`);
+    assert.equal(app.child.exitCode, null, 'not sent SIGTERM');
+    assert.equal(app.child.signalCode, null);
+    assert.equal(lstatSync(elsewhere).ino, old.ino);
+    assert.deepEqual(readdirSync(c.trash), []);
+    assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+  } finally {
+    app.child.kill('SIGKILL');
   }
 });

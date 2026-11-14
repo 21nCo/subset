@@ -7,12 +7,14 @@
 // removed from the Trash and the app is renamed back. An app is never removed without a copy of it in the Trash, what
 // is removed is the copy that was copied, even if something new is put at its path, a copy that is (even partly)
 // removed never carries a name recoverApps() (update.mjs) puts back, and nothing already in the Trash (an empty folder
-// included) is replaced or removed.
+// included) is replaced or removed. A private folder a SIGKILL or a power loss left in the Trash is removed by the next
+// subset update or uninstall of the app (removeLeftCopies()); the app it was copying is still beside its old path.
 import { randomBytes } from 'node:crypto';
-import { accessSync, chmodSync, constants, lstatSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { accessSync, chmodSync, constants, lstatSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { INSTALL_TOOLS, removeStaged } from './install.mjs';
+import { alive } from './lock.mjs';
 import { runTool } from './verify.mjs';
 
 const COPY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -79,6 +81,38 @@ const lstatOrUndefined = (file) => {
 };
 // Whether anything is at `file`, a broken link or an empty folder too (rename(2) would replace an empty folder).
 const taken = (file) => lstatOrUndefined(file) !== undefined;
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Removes the private folders (hiddenName() kind `copy`) of `app` ({ name, appName }) that a subset killed while it
+ * copied to the Trash `trash` on another volume left there. Such a copy is never the only one: until it is renamed to
+ * its Trash name, the app it copies is still beside its old path (recoverApps() in update.mjs handles that), so it is
+ * only an incomplete or unpublished duplicate. Only folders of a subset (their pid) that no longer runs are removed,
+ * never another entry of the Trash. To be called with the app's lock (lock.mjs) held. Resolves a note for each.
+ */
+export async function removeLeftCopies(app, trash, { tools = INSTALL_TOOLS, running = alive } = {}) {
+  let names;
+  try {
+    names = readdirSync(trash);
+  } catch {
+    return [];
+  }
+  const pattern = new RegExp(`^\\.${escapeRegExp(app.appName)}\\.app\\.subset-copy-(\\d+)-[0-9a-f]{12}$`);
+  const notes = [];
+  for (const name of names) {
+    const pid = Number(pattern.exec(name)?.[1]);
+    const file = path.join(trash, name);
+    if (!pid || pid === process.pid || running(pid) || !lstatOrUndefined(file)?.isDirectory()) continue;
+    try {
+      await removeStaged(file, tools);
+      notes.push(`an incomplete copy of ${app.name} that an interrupted subset left in the Trash was removed (${file}).`);
+    } catch (error) {
+      notes.push(`an interrupted subset left an incomplete copy of ${app.name} in the Trash at ${file}, and it could not be removed (${reason(error)}); remove it by hand.`);
+    }
+  }
+  return notes;
+}
 
 /**
  * Renames `bundle` into the Trash under the first free name (one where nothing is, not even an empty folder),

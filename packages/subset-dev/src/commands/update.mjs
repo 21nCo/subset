@@ -10,7 +10,7 @@ import { CatalogInvalidError, CatalogUnavailableError, download, loadCatalog, MA
 import { ApplicationsFoldersError, applicationsFolders, detectApps } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
 import { LockError, lockApp } from '../macos/lock.mjs';
-import { prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
+import { prepareTrash, removeLeftCopies, TrashError, trashFolder } from '../macos/trash.mjs';
 import { decideUpdate, pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, reopenApp, RunningError, runningProcesses, UPDATE_TOOLS, updateApp } from '../macos/update.mjs';
 import { compareVersions } from '../macos/verify.mjs';
 import { failure, receiptFor, SIGNALS } from './install.mjs';
@@ -111,20 +111,21 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
     fail(`there is no Subset Mac app "${printable(unknown)}"; subset list shows them.`);
     return 1;
   }
-  // No other subset install, update or uninstall of these apps runs until this one has finished.
+  // No other subset install, update or uninstall of these apps runs until this one has finished. An app whose lock
+  // cannot be taken is not updated; the others are, and every lock taken is released whatever happens.
   const unlocks = [];
-  const locked = apps.filter((app) => {
-    try {
-      unlocks.push(lockApp(app, { home }));
-      return true;
-    } catch (error) {
-      if (!(error instanceof LockError)) throw error;
-      fail(`${app.name} was not updated: ${error.message}.`);
-      return false;
-    }
-  });
   let code;
   try {
+    const locked = apps.filter((app) => {
+      try {
+        unlocks.push(lockApp(app, { home }));
+        return true;
+      } catch (error) {
+        if (!(error instanceof LockError)) throw error;
+        fail(`${app.name} was not updated: ${error.message}.`);
+        return false;
+      }
+    });
     code = await updateLocked({ apps: locked, all, options, folders, trash, home, now, clock, fetch, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, skip, busy: locked.length < apps.length });
   } finally {
     for (const unlock of unlocks) unlock();
@@ -138,6 +139,8 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
 async function updateLocked({ apps, all, options, folders, trash, home, now, clock, fetch, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, skip, busy }) {
   // A copy an interrupted update left under a hidden name is put back first.
   for (const note of recoverApps(apps, folders)) say(stderr, `subset: note: ${note}`);
+  // So is an incomplete copy a killed subset left in the Trash on another volume.
+  for (const app of apps) for (const note of await removeLeftCopies(app, trash, { tools })) say(stderr, `subset: note: ${note}`);
   // What to do with each installed copy, decided from its Info.plist and receipt before anything is downloaded. The
   // copy is identified (device and inode) before and after its Info.plist is read: when another subset install or
   // update replaced it in between, the version read may not be this copy's, so it is not updated.

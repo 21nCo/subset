@@ -154,13 +154,8 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
   if (!release) return fail(options.beta ? `${app.name} has no beta.` : `${app.name} has no live release yet; try subset install ${app.id} --beta`);
   const label = options.beta ? `${app.name} ${release.version}-beta.${release.build}` : `${app.name} ${release.version}`;
 
-  let where;
-  try {
-    where = destination(options, folders);
-  } catch (error) {
-    return fail(`${label} was not installed: ${failure(error)}`);
-  }
-  // No other subset install, update or uninstall of the app runs until this one has finished (macos/lock.mjs).
+  // No other subset install, update or uninstall of the app runs until this one has finished (macos/lock.mjs). The
+  // lock is taken before anything else is changed (destination() may create ~/Applications).
   let unlock;
   try {
     unlock = lockApp(app, { home });
@@ -169,6 +164,12 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
     return fail(`${label} was not installed: ${error.message}.`);
   }
   try {
+    let where;
+    try {
+      where = destination(options, folders);
+    } catch (error) {
+      return fail(`${label} was not installed: ${failure(error)}`);
+    }
     return await installLocked({ app, release, label, options, folders, where, home, now, clock, tools, fetch, signals, stdout, stderr, say, fail });
   } finally {
     unlock();
