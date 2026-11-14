@@ -249,6 +249,58 @@ test('refuses a helper that is not signed by the Subset team, an invalid or miss
   assert.deepEqual(calls('codesign'), []);
 });
 
+test('refuses an app whose helper path is a broken link or passes through a file, rather than treating it as absent', { skip }, () => {
+  // [label, tool, how the installed helper's path is broken, the part of the message after "its <helper> "]
+  const cases = [
+    ['a dangling native helper link', 'system', (file) => symlinkSync(path.join(path.dirname(file), 'gone'), file), 'is a broken link'],
+    ['a dangling node helper link', 'timer', (file) => symlinkSync(path.join(path.dirname(file), 'gone.mjs'), file), 'is a broken link'],
+    ['a dangling link in the node helper\'s folders', 'minutes', (file) => {
+      rmSync(path.dirname(path.dirname(file)), { recursive: true });
+      symlinkSync(path.join(root, 'gone'), path.dirname(path.dirname(file)));
+    }, 'is not a file inside the app (Contents/Resources/minutes-cli is a broken link)'],
+    ['a file where the node helper\'s folder should be', 'timer', (file) => {
+      rmSync(path.dirname(path.dirname(file)), { recursive: true });
+      writeFileSync(path.dirname(path.dirname(file)), 'not a folder');
+    }, 'is not a file inside the app (Contents/Resources/timer-cli is not a folder)'],
+    ['a file where the native helper\'s folder should be', 'point-in-time', (file) => {
+      rmSync(path.dirname(file), { recursive: true });
+      writeFileSync(path.dirname(file), 'not a folder');
+    }, 'is not a file inside the app (Contents/Helpers is not a folder)']
+  ];
+  for (const [label, name, breakPath, message] of cases) {
+    rmSync(log, { force: true });
+    const bundle = installApp(apps, name);
+    const file = path.join(bundle, TOOLS[name].app.helper);
+    rmSync(file);
+    breakPath(file);
+    const result = subset([name, 'status']);
+    assert.equal(result.status, 1, label);
+    assert.equal(result.stdout, '', `${label}: the helper did not run`);
+    assert.equal(result.stderr, `subset: ${bundle} was not run: its ${TOOLS[name].app.helper} ${message}.\n`, label);
+    // Not an older app: no update hint, and no npm package in its place.
+    assert.deepEqual(calls('npm'), [], label);
+    assert.deepEqual(calls('codesign'), [], label);
+    rmSync(bundle, { recursive: true });
+  }
+});
+
+test('an older app is one whose helper path is absent at any folder; a folder linked inside the app is followed', { skip }, async () => {
+  const lookup = () => findAppHelper(TOOLS.timer.app, { env: environment(), home: root, tools: { codesign, plutil } });
+  const bundle = installApp(apps, 'timer', { helper: null });
+  mkdirSync(path.join(bundle, 'Contents', 'Resources'));
+  assert.deepEqual(await lookup(), { status: 'missing', bundle });
+  mkdirSync(path.join(bundle, 'Contents', 'Resources', 'timer-cli'));
+  assert.deepEqual(await lookup(), { status: 'missing', bundle });
+  rmSync(path.join(bundle, 'Contents', 'Resources'), { recursive: true });
+  // Contents/Resources/timer-cli -> Contents/Shared/timer-cli, inside the app.
+  const shared = path.join(bundle, 'Contents', 'Shared', 'timer-cli', 'dist');
+  mkdirSync(shared, { recursive: true });
+  writeFileSync(path.join(shared, 'cli.mjs'), NODE);
+  mkdirSync(path.join(bundle, 'Contents', 'Resources'));
+  symlinkSync('../Shared/timer-cli', path.join(bundle, 'Contents', 'Resources', 'timer-cli'));
+  assert.deepEqual(await lookup(), { status: 'found', bundle, file: path.join(shared, 'cli.mjs'), kind: 'node' });
+});
+
 test('runs the app in /Applications before the one in ~/Applications', { skip }, async () => {
   installApp(userApps, 'system');
   const first = installApp(apps, 'system');

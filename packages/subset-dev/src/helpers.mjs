@@ -6,7 +6,7 @@
 // Developer ID: a native helper's own signature, or for a node helper (a resource with no signature of its own) the
 // app's, whose seal covers the file.
 import { spawn } from 'node:child_process';
-import { realpathSync, statSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { applicationsFolders, PLUTIL, readInfoPlist } from './macos/apps.mjs';
@@ -31,15 +31,39 @@ export const FORWARDED_SIGNALS = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']);
 const lastLine = (text) => text.trim().split('\n').at(-1)?.trim() || 'no output';
 
 // The helper's file with its links resolved, { file }, when it is a regular file inside the bundle's Contents folder
-// (a link may point only within it); undefined when it does not exist; { problem } otherwise.
+// (a link may point only within it); undefined when the app has no entry at the helper's path, or at one of its
+// folders, which are all folders inside Contents up to there (an older app); { problem } otherwise: a broken link or a
+// file where a folder should be is a damaged app, not an older one.
 function helperFile(bundle, relative) {
+  const notInside = (detail) => ({ problem: `its ${relative} is not a file inside the app${detail ? ` (${detail})` : ''}` });
   try {
-    const real = realpathSync(path.join(bundle, relative));
-    const contents = path.join(realpathSync(bundle), 'Contents') + path.sep;
-    if (!real.startsWith(contents) || !statSync(real).isFile()) return { problem: `its ${relative} is not a file inside the app` };
+    let real = realpathSync(bundle);
+    const contents = path.join(real, 'Contents') + path.sep;
+    const parts = relative.split('/');
+    for (const [index, part] of parts.entries()) {
+      const shown = parts.slice(0, index + 1).join('/');
+      const last = index === parts.length - 1;
+      const entry = path.join(real, part);
+      // Each folder before it is a real folder inside Contents, so only an absent entry gives ENOENT here.
+      try {
+        lstatSync(entry);
+      } catch (error) {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      }
+      // A link that leads nowhere, through a file or in a loop.
+      try {
+        real = realpathSync(entry);
+      } catch (error) {
+        if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR' && error.code !== 'ELOOP') throw error;
+        return last ? { problem: `its ${relative} is a broken link` } : notInside(`${shown} is a broken link`);
+      }
+      if (!`${real}${path.sep}`.startsWith(contents)) return notInside();
+      if (!last && !statSync(real).isDirectory()) return notInside(`${shown} is not a folder`);
+    }
+    if (!statSync(real).isFile()) return notInside();
     return { file: real };
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined;
     return { problem: `its ${relative} cannot be read (${error.code ?? error.message})` };
   }
 }
@@ -66,8 +90,9 @@ export async function signatureProblem(target, { codesign = HELPER_TOOLS.codesig
  * Looks for the installed app of a tool (`tool.app` from tools.mjs: { id, appName, bundleId, helper, kind }) and checks
  * its helper. Resolves one of:
  *   { status: 'none' }                              no such app in /Applications or ~/Applications
- *   { status: 'missing', bundle }                   the app has no file at the helper's path (an older version)
- *   { status: 'refused', bundle, reason }           the helper is not a file inside the app, or fails the signature check
+ *   { status: 'missing', bundle }                   nothing is at the helper's path or one of its folders (an older version)
+ *   { status: 'refused', bundle, reason }           the helper is not a file inside the app (a broken link, a file for a
+ *                                                   folder, a link out of the app), or fails the signature check
  *   { status: 'found', bundle, file, kind }         the helper to run (`file` with its links resolved)
  * Throws ApplicationsFoldersError when SUBSET_APPLICATIONS_DIRS is malformed.
  */
