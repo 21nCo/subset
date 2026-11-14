@@ -1,9 +1,9 @@
 // Moves an app bundle to the user's Trash (SET-231), as `<appName> <date> <time>.app` in ~/.Trash (SUBSET_TRASH_DIR,
-// an absolute folder, stands in for it in tests). The bundle is first renamed to a hidden name beside it (hiddenName(),
-// kind `trash`), and must then be the copy that was checked (the same device and inode), otherwise it is renamed back
-// and refused. On the same volume it is then renamed into the Trash. On another volume (rename fails with EXDEV) it is
-// copied with ditto into a private hidden folder in the Trash, which is renamed to its Trash name once complete; then
-// the hidden copy beside the app is renamed to kind `old` and only then removed. A copy that fails or is interrupted is
+// an absolute folder, stands in for it in tests). The copy moved must be the one that was checked (the same device and
+// inode), otherwise it is renamed back and refused. On the same volume the bundle is renamed into the Trash in one
+// step. On another volume (rename fails with EXDEV) it is renamed to a hidden name beside it (hiddenName(), kind
+// `trash`), copied with ditto into a private hidden folder in the Trash, which is renamed to its Trash name once
+// complete; then the hidden copy beside the app is renamed to kind `old` and only then removed. A copy that fails or is interrupted is
 // removed from the Trash and the app is renamed back. An app is never removed without a copy of it in the Trash, what
 // is removed is the copy that was copied, even if something new is put at its path, a copy that is (even partly)
 // removed never carries a name recoverApps() (update.mjs) puts back, and nothing already in the Trash (an empty folder
@@ -31,8 +31,7 @@ export class TrashError extends Error {}
  * with the pid of this process, so that recoverApps() (update.mjs) can tell a copy another subset is still working on
  * from one an interrupted subset left behind. `kind` says what the copy is:
  *   update  the installed copy, between the two renames of an update's swap;
- *   trash   the installed copy, set aside by an uninstall until it is in the Trash (on another volume, until its copy
- *           there is complete);
+ *   trash   the installed copy, set aside by an uninstall until its copy in the Trash on another volume is complete;
  *   old     a copy that is no longer the installed one: replaced by an update, or already copied to the Trash. It is
  *           never put back, only named, since it may be an old version or partly removed;
  *   copy    (in the Trash) a copy being made there with ditto, renamed to its Trash name once complete.
@@ -134,9 +133,9 @@ async function copyIntoTrash(bundle, { trash, appName, now, tools, signal }) {
 }
 
 /**
- * Moves `bundle` (an app) to the Trash `trash` as `<appName> <date> <time>.app`: it is renamed to a hidden name beside
- * it, which must be `identity` ({ dev, ino }, when given), then renamed into the Trash when it is on the same volume,
- * otherwise copied with ditto, renamed to an `old` hidden name and then removed. `setAside: false` is for a bundle that
+ * Moves `bundle` (an app), which must be `identity` ({ dev, ino }, when given), to the Trash `trash` as
+ * `<appName> <date> <time>.app`: renamed there when it is on the same volume, otherwise renamed to a hidden name beside
+ * it, copied with ditto, renamed to an `old` hidden name and then removed. `setAside: false` is for a bundle that
  * is already at a hidden `old` name of this process (an update's replaced copy): it is moved from where it is.
  * `signal` aborts a copy, which is then removed (and the app renamed back). Resolves the path in the Trash; rejects
  * with a TrashError (or the abort reason) leaving the app at `bundle`, or at the hidden name in `left` when it could
@@ -154,6 +153,19 @@ export async function moveToTrash(bundle, { trash, appName, identity, now = new 
     }
     return copied;
   }
+  const replaced = `${bundle} was replaced since it was checked (by another subset install or update?), so it was left in place`;
+  const same = (stat) => !identity || (stat !== undefined && stat.dev === identity.dev && stat.ino === identity.ino);
+  // On the Trash's volume, one rename: the copy taken must then be the one checked, otherwise it is renamed back.
+  const renamed = renameIntoTrash(bundle, { trash, appName, now, rename });
+  if (renamed !== undefined) {
+    if (same(lstatOrUndefined(renamed))) return renamed;
+    try {
+      renameSync(renamed, bundle);
+    } catch (error) {
+      throw Object.assign(new TrashError(`${replaced}, but it could not be renamed back from ${renamed} (${reason(error)})`), { left: renamed });
+    }
+    throw new TrashError(replaced);
+  }
   const aside = hiddenName(path.dirname(bundle), appName, 'trash');
   try {
     renameSync(bundle, aside);
@@ -170,14 +182,9 @@ export async function moveToTrash(bundle, { trash, appName, identity, now = new 
     }
     throw error;
   };
-  const moved = lstatOrUndefined(aside);
-  if (identity && !(moved && moved.dev === identity.dev && moved.ino === identity.ino)) {
-    giveBack(new TrashError(`${bundle} was replaced since it was checked (by another subset install or update?), so it was left in place`));
-  }
+  if (!same(lstatOrUndefined(aside))) giveBack(new TrashError(replaced));
   let copied;
   try {
-    copied = renameIntoTrash(aside, { trash, appName, now, rename });
-    if (copied !== undefined) return copied;
     copied = await copyIntoTrash(aside, { trash, appName, now, tools, signal });
   } catch (error) {
     giveBack(error);

@@ -133,7 +133,9 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
     }
   } catch (error) {
     if (error instanceof InterruptedError || controller.signal.aborted) {
-      const left = error?.left ? ` ${error.left} could not be renamed back to its place; rename it back by hand.` : '';
+      // A TrashError says itself what happened to the copy (its Trash copy may be complete); otherwise one left set aside is
+      // the installed copy, to be renamed back.
+      const left = error instanceof TrashError ? ` ${error.message}.` : error?.left ? ` ${error.left} could not be renamed back to its place; rename it back by hand.` : '';
       say(stderr, `subset: ${notMoved}: interrupted by ${controller.signal.reason.signal}.${left}`);
       return 128 + SIGNALS[controller.signal.reason.signal];
     }
