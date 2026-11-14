@@ -46,7 +46,9 @@ export const stubPlutilSkip = process.platform === 'win32' && 'the plutil stand-
  * prints the <key>/<string> pairs of an XML plist's top-level dict as JSON, and fails on anything else or other
  * arguments. For the install interruption tests (install-stubs.mjs), STUB_SIGNAL_AT=plutil makes it signal its parent
  * (or, with STUB_SIGNAL_GROUP=1, its parent's group) while it reads a staged copy's Info.plist, and with STUB_LINGER_MS
- * ignore SIGTERM and answer only that many milliseconds later.
+ * ignore SIGTERM and answer only that many milliseconds later. For subset update (SET-231), STUB_PLUTIL_REPLACE=<app>
+ * makes it, once it has read <app>'s Info.plist, replace <app> with a copy of itself (another inode) whose version is
+ * STUB_PLUTIL_REPLACE_VERSION, as a concurrent install or update would.
  */
 export function stubPlutil(dir) {
   const file = path.join(dir, 'plutil');
@@ -66,6 +68,15 @@ if (process.env.STUB_SIGNAL_AT === 'plutil' && args[4].includes('.subset-install
 }
 let text;
 try { text = readFileSync(args[4], 'utf8'); } catch (error) { console.error(error.message); process.exit(1); }
+const replace = process.env.STUB_PLUTIL_REPLACE;
+if (replace && args[4] === replace + '/Contents/Info.plist') {
+  const fs = require('node:fs');
+  fs.cpSync(replace, replace + '.replacement', { recursive: true });
+  const plist = replace + '.replacement/Contents/Info.plist';
+  fs.writeFileSync(plist, fs.readFileSync(plist, 'utf8').replace(/(CFBundleShortVersionString<\\/key>\\s*<string>)[^<]*/, '$1' + process.env.STUB_PLUTIL_REPLACE_VERSION));
+  fs.rmSync(replace, { recursive: true });
+  fs.renameSync(replace + '.replacement', replace);
+}
 const dict = /<plist[^>]*>\\s*<dict>([\\s\\S]*)<\\/dict>\\s*<\\/plist>/.exec(text);
 if (!dict) { console.error(args[4] + ': Property List error: Unexpected character'); process.exit(1); }
 const unescape = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');

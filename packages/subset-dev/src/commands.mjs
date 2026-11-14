@@ -1,6 +1,5 @@
 // The commands of `subset` other than its tools: `subset <verb> [arguments...]`. Their names are reserved, so no tool
-// can take one (test/cli.test.mjs). A verb marked `pending` is announced but not available in this version: it prints
-// that it is not available yet and exits 2 (SET-231 adds them). cli.mjs runs the others.
+// can take one (test/cli.test.mjs). cli.mjs runs them.
 export const VERBS = Object.freeze({
   list: Object.freeze({
     usage: 'subset list [--beta] [--json] [--refresh]',
@@ -13,16 +12,14 @@ export const VERBS = Object.freeze({
     details: 'Downloads the app, checks its checksum, signature, team, notarization, bundle ID and version, and installs it in\n/Applications (or ~/Applications when /Applications is not writable). --user installs it in ~/Applications,\n--dir in another folder, and --beta installs the beta. An app that is already there is left alone (subset update).'
   }),
   update: Object.freeze({
-    pending: true,
     usage: 'subset update [<app>...] [--beta] [--quit]',
     summary: 'Update the installed Subset Mac apps',
-    details: 'Updates the named apps, or every installed Subset Mac app, to the newest version of their channel.\n--beta updates to the beta and --quit quits a running app first and reopens it afterwards.'
+    details: 'Updates the named apps, or every installed Subset Mac app, to the newest version of the live channel, with the\nchecks of subset install; the old copy goes to the Trash. --beta updates to the beta. A running app is not\nreplaced: --quit quits it first and reopens it afterwards. With no apps, also says when a newer subset.dev is out.'
   }),
   uninstall: Object.freeze({
-    pending: true,
-    usage: 'subset uninstall <app>',
+    usage: 'subset uninstall <app> [--quit]',
     summary: 'Move a Subset Mac app to the Trash',
-    details: "Moves the app to the Trash and forgets it. The app's data stays."
+    details: "Moves the app to the Trash and deletes its receipt. The app's data stays. A running app is not moved: --quit\nquits it first."
   }),
   help: Object.freeze({
     usage: 'subset help [<command>]',
@@ -44,8 +41,7 @@ export const isVerb = (name) => Object.hasOwn(VERBS, name);
 /** The usage text of a verb, as `subset help <verb>` and `subset <verb> --help` print it. */
 export function verbHelp(name) {
   const verb = VERBS[name];
-  const status = verb.pending ? `\nNot available yet: a later version of subset.dev adds subset ${name}.\n` : '';
-  return `Usage: ${verb.usage}\n\n${verb.summary}.\n${verb.details}\n${status}`;
+  return `Usage: ${verb.usage}\n\n${verb.summary}.\n${verb.details}\n`;
 }
 
 /**
@@ -54,7 +50,6 @@ export function verbHelp(name) {
  *   { action: 'version' }                       the launcher's version
  *   { action: 'usage', verb }                   a verb's usage (`subset help <verb>`, `subset <verb> --help`)
  *   { action: 'tool-help', tool }               where a tool's help is (`subset help <tool>`)
- *   { action: 'unavailable', verb }             a verb this version does not have yet (exit 2)
  *   { action: 'command', verb, args }           run the verb (`subset list --json`) with `args`
  *   { action: 'tool', argument, args }          run the tool `argument` (`usage`, `usage@beta`) with `args`
  *   { action: 'error', message }                an unknown command (exit 2)
@@ -77,6 +72,5 @@ export function route(argv, { isTool }) {
   const options = end === -1 ? rest : rest.slice(0, end);
   if (options.includes('-h') || options.includes('--help')) return { action: 'usage', verb: first };
   if (first === 'version') return { action: 'version' };
-  if (VERBS[first].pending) return { action: 'unavailable', verb: first };
   return { action: 'command', verb: first, args: rest };
 }

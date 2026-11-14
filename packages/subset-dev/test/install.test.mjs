@@ -661,7 +661,8 @@ function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.syst
   let stderr = '';
   child.stdout.on('data', (chunk) => (stdout += chunk));
   child.stderr.on('data', (chunk) => (stderr += chunk));
-  return new Promise((resolve) => child.on('close', (status, signal) => resolve({ status, signal, stdout, stderr })));
+  // The child is on the promise, so a test can kill it when it fails before the child ends.
+  return Object.assign(new Promise((resolve) => child.on('close', (status, signal) => resolve({ status, signal, stdout, stderr }))), { child });
 }
 
 // Every point between two steps where a signal can arrive before the rename: during the download (between its chunks),
@@ -728,18 +729,35 @@ for (const boundary of ['hdiutil-attach', 'ditto']) {
   });
 }
 
-test('two installs of the same app into one --dir at once: exactly one succeeds', { skip }, async () => {
+test('two installs of the same app at once: the one holding the app\'s lock installs it, the other refuses', { skip }, async () => {
   const c = setup();
   const image = breaksImage();
   feed(c, { live: { image } });
   const barrier = path.join(c.base, 'barrier');
   mkdirSync(barrier);
-  // Both reach the last check before the rename together, so they race for it.
-  const env = { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' };
-  const results = await Promise.all([spawnInstall(c, image, env), spawnInstall(c, image, env)]);
-  assert.deepEqual(results.map((result) => result.status).sort(), [0, 1], results.map((result) => result.stderr).join('\n'));
-  const loser = results.find((result) => result.status === 1);
-  assert.match(loser.stderr, /the install step failed: .*Breaks\.app already exists; use subset update to change its version/);
+  // The first waits at its last check before the rename (sw_vers), holding the app's lock, until the second has run.
+  const first = spawnInstall(c, image, { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' });
+  let ended;
+  first.then((done) => (ended = done));
+  let second;
+  let result;
+  try {
+    // At most 60 seconds, and not after the first install has ended without reaching the barrier.
+    for (const deadline = Date.now() + 60_000; readdirSync(barrier).length === 0; ) {
+      if (ended) assert.fail(`the first install ended before the barrier: ${ended.stderr}`);
+      if (Date.now() > deadline) assert.fail('the first install did not reach the barrier within 60 seconds');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    second = await spawnInstall(c, image);
+  } finally {
+    writeFileSync(path.join(barrier, 'go'), '');
+    // When the test failed before the second install ran, the first is killed rather than awaited, so nothing hangs.
+    if (!second) first.child.kill('SIGKILL');
+    result = await first;
+  }
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(second.status, 1, second.stderr);
+  assert.match(second.stderr, /was not installed: another subset \(pid \d+\) is installing, updating or uninstalling Breaks; run this again once it has finished/);
   assert.deepEqual(readdirSync(c.system), ['Breaks.app'], 'one app and no staged copy');
   assert.deepEqual(readdirSync(c.tmp), []);
 });

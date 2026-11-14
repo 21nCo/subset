@@ -2,8 +2,7 @@
 // subset <tool>[@<version>] [arguments...] or subset <command> [arguments...]: the subset.dev package's command.
 // `npx subset.dev usage status` does what `npx @subset.dev/usage status` does: npm fetches the tool (the launcher
 // depends on none of them), and the launcher then loads the tool's bin module into this same process. The commands
-// (list, install and the others in commands.mjs) are the launcher's own; commands/list.mjs runs `subset list` and
-// commands/install.mjs `subset install`.
+// (list, install and the others in commands.mjs) are the launcher's own; commands/<verb>.mjs runs `subset <verb>`.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -24,7 +23,7 @@ function columns(rows) {
 
 function help() {
   const tools = columns(Object.entries(TOOLS).map(([name, tool]) => [name, `${tool.summary} (${tool.package})`]));
-  const commands = columns(Object.entries(VERBS).map(([name, verb]) => [name, `${verb.summary}${verb.pending ? ' (not available yet)' : ''}`]));
+  const commands = columns(Object.entries(VERBS).map(([name, verb]) => [name, verb.summary]));
   return `Usage: subset <tool>[@<version>] [arguments...]
        subset <command> [arguments...]
 
@@ -107,25 +106,22 @@ switch (command.action) {
   case 'tool-help':
     console.log(`"subset ${command.tool} --help" shows the help of ${command.tool} (${TOOLS[command.tool].package}).`);
     break;
-  case 'unavailable':
-    console.error(`subset ${command.verb} is not available yet.`);
-    process.exitCode = 2;
-    break;
   case 'error':
     console.error(`subset: ${command.message}`);
     process.exitCode = 2;
     break;
   case 'command': {
-    // list and install are the verbs route() runs in this version. Loaded only here, so running a tool never reads the
-    // catalog schemas.
+    // list, install, update and uninstall are the verbs route() runs. Loaded only here, so running a tool never reads
+    // the catalog schemas.
     const context = { env: process.env, platform: process.platform, home: homedir(), stdout: process.stdout, stderr: process.stderr };
-    if (command.verb === 'install') {
-      const { runInstall } = await import('./commands/install.mjs');
-      process.exitCode = await runInstall(command.args, context);
-    } else {
-      const { runList } = await import('./commands/list.mjs');
-      process.exitCode = await runList(command.args, context);
-    }
+    const runners = {
+      list: async () => (await import('./commands/list.mjs')).runList,
+      install: async () => (await import('./commands/install.mjs')).runInstall,
+      update: async () => (await import('./commands/update.mjs')).runUpdate,
+      uninstall: async () => (await import('./commands/uninstall.mjs')).runUninstall
+    };
+    const run = await runners[command.verb]();
+    process.exitCode = await run(command.args, context);
     break;
   }
   default: {

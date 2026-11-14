@@ -2,6 +2,7 @@
 // (Mac apps, on macOS only) and the live version of each, plus the beta with --beta. --json prints the subset.list@1
 // document described in the README, which always has both channels.
 import { ApplicationsFoldersError, applicationsFolders, detectApps, PLUTIL } from '../macos/apps.mjs';
+import { recoverApps } from '../macos/update.mjs';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
 
 export const LIST_SCHEMA = 'subset.list@1';
@@ -102,6 +103,8 @@ export async function runList(args, { env, platform, home, stdout, stderr, fetch
   }
   const installed = folders ? await detectApps(catalog.feed.apps, { folders, home, plutil }) : null;
   if (catalog.warning) stderr.write(`subset: ${catalog.warning}\n`);
+  // An app an interrupted subset update left under a hidden name is not listed; it is named, and left as it is.
+  if (folders) for (const note of recoverApps(catalog.feed.apps, folders, { restore: false })) stderr.write(`subset: note: ${printable(note)}\n`);
   const document = listDocument(catalog, installed, platform);
   stdout.write(options.json ? `${JSON.stringify(document, null, 2)}\n` : listText(document, options));
   return 0;

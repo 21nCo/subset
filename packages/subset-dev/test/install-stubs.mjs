@@ -11,6 +11,11 @@
 // does; the process must lead its group). With STUB_LINGER_MS the step signals before doing its work, then ignores
 // SIGTERM and does its work only after that many milliseconds, as a tool slow to stop would. sw_vers waits until
 // STUB_BARRIER_COUNT processes have reached it when STUB_BARRIER_DIR is set.
+// For subset update and uninstall (SET-231): ps lists the processes in the JSON file $STUB_PS_FILE
+// ([{ pid, path }], each listed while it runs) after two unrelated ones, and fails with STUB_PS_FAIL=1. With
+// STUB_PS_REPLACE=<app>, ps run while a staged copy is beside <app> replaces <app> with a copy of itself (another
+// inode), as a concurrent install or update would. open -b <bundle ID> only logs its call, and fails with
+// STUB_OPEN_FAIL=1.
 import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { stubPlutil } from './helpers.mjs';
@@ -119,6 +124,28 @@ if (tool === 'hdiutil' && args[0] === 'attach') {
     while (fs.readdirSync(barrier).length < Number(process.env.STUB_BARRIER_COUNT) && Date.now() < until) sleep(20);
   }
   console.log(process.env.STUB_MACOS_VERSION || '15.1');
+} else if (tool === 'ps') {
+  if (!same(['-axww', '-o', 'pid=,comm='])) usage();
+  log('ps');
+  hook('ps');
+  if (process.env.STUB_PS_FAIL) { console.error('ps: stub failure'); process.exit(1); }
+  const replace = process.env.STUB_PS_REPLACE;
+  if (replace && fs.readdirSync(path.dirname(replace)).some((name) => name.includes('.subset-install-'))) {
+    fs.cpSync(replace, replace + '.replacement', { recursive: true });
+    fs.rmSync(replace, { recursive: true });
+    fs.renameSync(replace + '.replacement', replace);
+  }
+  let out = '    1 /sbin/launchd\n' + String(process.pid).padStart(5) + ' /bin/ps\n';
+  for (const entry of process.env.STUB_PS_FILE ? JSON.parse(fs.readFileSync(process.env.STUB_PS_FILE, 'utf8')) : []) {
+    let alive = true;
+    try { process.kill(entry.pid, 0); } catch (error) { alive = error.code === 'EPERM'; }
+    if (alive) out += String(entry.pid).padStart(5) + ' ' + entry.path + '\n';
+  }
+  process.stdout.write(out);
+} else if (tool === 'open') {
+  if (!same(['-b', undefined])) usage();
+  log('open');
+  if (process.env.STUB_OPEN_FAIL) { console.error('LSOpenURLsWithRole() failed with error -10814'); process.exit(1); }
 } else if (tool === 'find') {
   // find -P <copy> -exec <chflags or chmod> -h <change> {} +: run by the real find on macOS (changing the real flags and
   // ACLs of the copy), and nothing to clear on Linux.
@@ -155,7 +182,9 @@ export function stubTools(dir) {
     plutil: stubPlutil(dir),
     find: tool('find', 'find'),
     chflags: '/usr/bin/chflags',
-    chmod: '/bin/chmod'
+    chmod: '/bin/chmod',
+    ps: tool('ps', 'ps'),
+    open: tool('open', 'open')
   };
 }
 

@@ -8,10 +8,13 @@ import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable, validateReceipt } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { INSTALL_TOOLS, InstallError, installApp, InterruptedError } from '../macos/install.mjs';
+import { LockError, lockApp } from '../macos/lock.mjs';
+import { recoverApps } from '../macos/update.mjs';
 import { compareNumbers, compareVersions, VerificationError } from '../macos/verify.mjs';
 
 const USAGE = 'Usage: subset install <app> [--beta] [--user] [--dir <folder>]';
-const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+/** The signals that stop `subset install` and `subset update`, with their numbers (exit code 128 + the number). */
+export const SIGNALS = Object.freeze({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 });
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 /** The arguments of `subset install`: { app, beta, user, dir }, or { error } for anything else. */
@@ -90,7 +93,8 @@ function downgrade(copies, release, beta) {
 // The subset.receipt@1 receipt for the install, { file, document() }, or null when the destination is not
 // /Applications or ~/Applications (or a path the receipt schema cannot hold, such as a home folder outside /Users).
 // document() stamps installedAt with `clock()` when it is called, just before the app is renamed into place.
-function receiptFor({ app, release, beta, folder, home, now, clock }) {
+// `subset update` writes its receipts with it too.
+export function receiptFor({ app, release, beta, folder, home, now, clock }) {
   if (folder === null) return null;
   const document = (at) => ({
     schema: 'subset.receipt@1',
@@ -104,7 +108,8 @@ function receiptFor({ app, release, beta, folder, home, now, clock }) {
   return validateReceipt(document(now)).length === 0 ? { file: receiptFile(home, app.bundleId), document: () => document(clock()) } : null;
 }
 
-const failure = (error) => {
+/** What a failed install or update says about `error`, or undefined for an unexpected error. */
+export const failure = (error) => {
   if (error instanceof VerificationError) return `the ${error.check} check failed: ${error.message}`;
   if (error instanceof InstallError) return `the ${error.check} step failed: ${error.message}`;
   return undefined;
@@ -149,12 +154,32 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
   if (!release) return fail(options.beta ? `${app.name} has no beta.` : `${app.name} has no live release yet; try subset install ${app.id} --beta`);
   const label = options.beta ? `${app.name} ${release.version}-beta.${release.build}` : `${app.name} ${release.version}`;
 
-  let where;
+  // No other subset install, update or uninstall of the app runs until this one has finished (macos/lock.mjs). The
+  // lock is taken before anything else is changed (destination() may create ~/Applications).
+  let unlock;
   try {
-    where = destination(options, folders);
+    unlock = lockApp(app, { home });
   } catch (error) {
-    return fail(`${label} was not installed: ${failure(error)}`);
+    if (!(error instanceof LockError)) throw error;
+    return fail(`${label} was not installed: ${error.message}.`);
   }
+  try {
+    let where;
+    try {
+      where = destination(options, folders);
+    } catch (error) {
+      return fail(`${label} was not installed: ${failure(error)}`);
+    }
+    return await installLocked({ app, release, label, options, folders, where, home, now, clock, tools, fetch, signals, stdout, stderr, say, fail });
+  } finally {
+    unlock();
+  }
+}
+
+// The rest of subset install, with the app's lock held.
+async function installLocked({ app, release, label, options, folders, where, home, now, clock, tools, fetch, signals, stdout, stderr, say, fail }) {
+  // A copy an interrupted subset update left under a hidden name is put back first: it is then already installed.
+  for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
   const target = path.join(where.dir, `${app.appName}.app`);
   if (existsSync(target) || isLink(target)) return fail(`${label} was not installed: ${target} already exists; use subset update to change its version.`);
   const [copies] = await detectApps([app], { folders, home, plutil: tools.plutil });
