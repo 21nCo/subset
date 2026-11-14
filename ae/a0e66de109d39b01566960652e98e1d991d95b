@@ -1,0 +1,43 @@
+.github/workflows/verify.yml
+  s_94785423c5dec8::t_faf3cde8fc304e 67-69,106-123
+packages/subset-dev/README.md
+  s_94785423c5dec8::t_45ab1f13829fde 37-38,103,143-186,213
+packages/subset-dev/src/cli.mjs
+  s_94785423c5dec8::t_0f33833484b476 5,26,114-115,117-124
+packages/subset-dev/src/commands.mjs
+  s_94785423c5dec8::t_1520da825075ef 2,17,20,22,44
+packages/subset-dev/src/commands/install.mjs
+  s_94785423c5dec8::t_e062e3e3b34aee 14-15,94-95,109-110
+packages/subset-dev/src/commands/uninstall.mjs
+  s_94785423c5dec8::t_d3753ca29bac9b 1-102
+packages/subset-dev/src/commands/update.mjs
+  s_94785423c5dec8::t_80d6b6536289e7 1-214
+packages/subset-dev/src/macos/install.mjs
+  s_94785423c5dec8::t_86464e104fa2c8 229-231,255-259,261,297,314,319,321-325
+packages/subset-dev/src/macos/trash.mjs
+  s_94785423c5dec8::t_108348ccadaebe 1-112
+packages/subset-dev/src/macos/update.mjs
+  s_94785423c5dec8::t_257a97647f8486 1-224
+packages/subset-dev/test/cli.test.mjs
+  s_94785423c5dec8::t_3fd1428345baf9 119-120,143-145,147-151,165,191-192
+packages/subset-dev/test/install-stubs.mjs
+  s_94785423c5dec8::t_9e9738aad35318 14-18,127-148,185-187
+packages/subset-dev/test/update.test.mjs
+  s_94785423c5dec8::t_b0a13a92c2ca5c 1-644
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aea0e66de109d39b01566960652e98e1d991d95b",
+  "prompts": {},
+  "sessions": {
+    "s_94785423c5dec8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_94785423c5dec8",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
