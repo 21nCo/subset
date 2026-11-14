@@ -198,6 +198,12 @@ async function updateLocked({ apps, all, options, folders, trash, home, now, clo
         const running = await runningProcesses(copy.path, { tools, signal: controller.signal });
         if (running.length === 0) return;
         if (!options.quit) throw new RunningError(`${app.name} is running (${pids(running)}); quit it, or use subset update --quit to quit and reopen it`);
+        // The processes were found by path: they are quit (and the app reopened) only while that path is still the copy
+        // checked.
+        const current = statOf(copy.path);
+        if (!current || current.dev !== identity.dev || current.ino !== identity.ino) {
+          throw new RunningError(`${copy.path} was replaced since it was checked (by another subset install or update?), so it was not quit or updated`);
+        }
         quit = true;
         say(stderr, `Quitting ${app.name} (${pids(running)})`);
         const left = await quitProcesses(copy.path, running, { tools, timeoutMs: quitTimeoutMs, signal: controller.signal });

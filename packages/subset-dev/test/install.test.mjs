@@ -661,7 +661,8 @@ function spawnInstall(c, image, extraEnv = {}, args = ['breaks', '--dir', c.syst
   let stderr = '';
   child.stdout.on('data', (chunk) => (stdout += chunk));
   child.stderr.on('data', (chunk) => (stderr += chunk));
-  return new Promise((resolve) => child.on('close', (status, signal) => resolve({ status, signal, stdout, stderr })));
+  // The child is on the promise, so a test can kill it when it fails before the child ends.
+  return Object.assign(new Promise((resolve) => child.on('close', (status, signal) => resolve({ status, signal, stdout, stderr }))), { child });
 }
 
 // Every point between two steps where a signal can arrive before the rename: during the download (between its chunks),
@@ -750,6 +751,8 @@ test('two installs of the same app at once: the one holding the app\'s lock inst
     second = await spawnInstall(c, image);
   } finally {
     writeFileSync(path.join(barrier, 'go'), '');
+    // When the test failed before the second install ran, the first is killed rather than awaited, so nothing hangs.
+    if (!second) first.child.kill('SIGKILL');
     result = await first;
   }
   assert.equal(result.status, 0, result.stderr);

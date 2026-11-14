@@ -2,7 +2,7 @@
 // to the user's Trash (macos/trash.mjs) and deletes its receipt. The app's data (preferences, Application Support,
 // containers) stays. A running app is not moved: the command refuses, or with --quit quits it first. It holds the app's
 // lock (macos/lock.mjs) throughout, and moves only the copies it checked (by device and inode).
-import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { lstatSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
@@ -151,8 +151,16 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   } finally {
     for (const [signal, handler] of handlers) signals.off(signal, handler);
   }
-  // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's).
-  const reinstalled = folders.map((folder) => path.join(folder.dir, `${app.appName}.app`)).find((bundle) => existsSync(bundle));
+  // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's): something now at
+  // a moved copy's path, or at a path that was empty or held another file or folder (device and inode) when the copies
+  // were identified. A bundle that was already there unchanged (another app of the same name) is not a reinstall.
+  const moved = new Set(copies.map((copy) => copy.path));
+  const reinstalled = bundles.find((bundle) => {
+    const current = statOf(bundle);
+    if (!current) return false;
+    const seen = before.get(bundle);
+    return moved.has(bundle) || !seen || seen.dev !== current.dev || seen.ino !== current.ino;
+  });
   if (reinstalled) {
     say(stderr, `subset: note: ${reinstalled} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
     return 0;

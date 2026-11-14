@@ -1363,3 +1363,51 @@ test('uninstall --quit quits nothing when the copy was replaced after its proces
     app.child.kill('SIGKILL');
   }
 });
+
+test('update --quit quits nothing and reopens nothing when the copy was replaced after its processes were listed (by path)', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1' });
+  feed(c, { live: { version: '0.1.1', image } });
+  const old = installed(c, { channel: 'live' });
+  const app = await fakeApp(c);
+  try {
+    // Another program replaces the bundle right after ps lists the processes running from its path.
+    const elsewhere = path.join(c.base, 'Breaks-old.app');
+    const replace = `"${process.execPath}" -e "const fs = require('node:fs'); fs.renameSync(process.argv[1], process.argv[2]); fs.mkdirSync(process.argv[1] + '/Contents', { recursive: true })" "${c.app}" "${elsewhere}"`;
+    const ps = wrapper(c, 'ps-replace', `"${tools.ps}" "$@"\nstatus=$?\n[ -e "${elsewhere}" ] || ${replace}\nexit $status`);
+    const result = await update(c, ['breaks', '--quit'], { fetch: fakeFetch({ [LIVE_URL]: image }), tools: { ...tools, ps }, extraEnv: app.env });
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, new RegExp(`subset: Breaks in /Applications was not updated to 0\\.1\\.1: ${escapeRegExp(c.app)} was replaced since it was checked \\(by another subset install or update\\?\\), so it was not quit or updated\\.\\n$`));
+    assert.doesNotMatch(result.stderr, /Quitting|could not be reopened/);
+    assert.equal(app.child.exitCode, null, 'not sent SIGTERM');
+    assert.equal(app.child.signalCode, null);
+    assert.equal(steps(c).some((entry) => entry.step === 'open'), false, 'not reopened');
+    // The replacement stays, the checked copy is where the other program put it, and the new copy is cleaned up.
+    assert.deepEqual(readdirSync(c.app), ['Contents']);
+    assert.deepEqual(readdirSync(path.join(c.app, 'Contents')), []);
+    assert.equal(lstatSync(elsewhere).ino, old.ino);
+    assert.deepEqual([readdirSync(c.system), readdirSync(c.trash), readdirSync(c.tmp)], [['Breaks.app'], [], []]);
+    assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+  } finally {
+    app.child.kill('SIGKILL');
+  }
+});
+
+test('uninstall deletes the receipt when another app of the same name was already in the other folder, and leaves that app', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  // Not Subset's Breaks: another bundle ID, there before the uninstall and unchanged by it.
+  const foreign = makeApp(c.user, 'Breaks', { bundleId: 'com.example.breaks', version: '2.0.0', build: '7' });
+  const foreignIno = lstatSync(foreign).ino;
+  const foreignPlist = readFileSync(path.join(foreign, 'Contents', 'Info.plist'));
+  const result = await uninstall(c, ['breaks']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.0 \(\/Applications\) to the Trash: .*\n$/);
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.deepEqual(readdirSync(c.trash).map((name) => lstatSync(path.join(c.trash, name)).ino), [old.ino]);
+  assert.equal(lstatSync(foreign).ino, foreignIno, 'the other app stays');
+  assert.deepEqual(readFileSync(path.join(foreign, 'Contents', 'Info.plist')), foreignPlist);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
+});
