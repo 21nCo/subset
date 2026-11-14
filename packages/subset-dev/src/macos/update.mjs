@@ -189,7 +189,7 @@ export function swapApp({ staged, target, identity, receipt, trash, appName, war
  * the swap, leaving the installed copy untouched. Resolves { path, trashed }, with `trashed` the old copy's path in the
  * Trash, or null when it could not be moved there (`warn` then names where it is).
  */
-export async function updateApp({ app, release, beta, target, identity, receipt, trash, signal, fetch, tools = UPDATE_TOOLS, log = () => {}, warn = () => {}, ready, now = () => new Date() }) {
+export async function updateApp({ app, release, beta, target, identity, receipt, trash, signal, fetch = globalThis.fetch, tools = UPDATE_TOOLS, log = () => {}, warn = () => {}, ready, now = () => new Date() }) {
   let swapped;
   await installApp({
     app,

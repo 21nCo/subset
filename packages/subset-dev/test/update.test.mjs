@@ -408,6 +408,24 @@ test('the subset.dev check: newer releases only, a release after its prerelease,
   assert.equal(await newerLauncher({ fetch: async () => Promise.reject(new TypeError('fetch failed')), current: '0.2.0' }), undefined);
 });
 
+// cli.mjs gives the command no fetch: the subset.dev check must use the global one. The real command runs here with a
+// global fetch that answers only the npm registry, on this platform (off macOS it still checks before refusing).
+test('the real subset update with no apps says when a newer subset.dev is on npm, with the global fetch', async () => {
+  const c = setup();
+  writeFileSync(c.feedFile, JSON.stringify(template));
+  const stub = `globalThis.fetch = async (url) => String(url) === ${JSON.stringify(NPM_LATEST_URL)} ? new Response('{"version":"99.0.0"}') : new Response('', { status: 404 });`;
+  const env = { ...process.env, ...c.env, HOME: c.home, XDG_CACHE_HOME: path.join(c.home, '.cache') };
+  const child = spawn(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(stub)}`, cli, 'update'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  const status = await new Promise((resolve) => child.on('close', resolve));
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.match(stdout, new RegExp(`subset\\.dev 99\\.0\\.0 is available \\(this is ${version.replaceAll('.', '\\.')}\\); update it with: npm install -g subset\\.dev@latest\\n$`), stderr);
+  assert.equal(status, process.platform === 'darwin' ? 0 : 1, stderr);
+});
+
 test('names an app that is not installed or unknown, a missing channel, and refuses off macOS', { skip }, async () => {
   const c = setup();
   feed(c, { live: { version: '0.1.1', image: breaksImage() } });

@@ -33,7 +33,7 @@ export function parseUpdateArgs(args) {
  * The version of subset.dev on npm when it is newer than `current` (a release is newer than a prerelease of the same
  * version), otherwise undefined. Best-effort: any failure (no network, an HTTP error, an odd answer) is undefined.
  */
-export async function newerLauncher({ fetch, current = LAUNCHER_VERSION }) {
+export async function newerLauncher({ fetch = globalThis.fetch, current = LAUNCHER_VERSION } = {}) {
   try {
     const bytes = await download(new URL(NPM_LATEST_URL), fetch);
     if (bytes.byteLength > MAX_FEED_BYTES) return undefined;
@@ -61,9 +61,10 @@ const copyLabel = (copy) => (copy.channel === 'beta' ? `${copy.version}-beta.${c
 /**
  * Runs `subset update <args>`, writing to `stdout` and `stderr`, and returns the exit code: 0 when every app asked for
  * is updated or up to date, 1 when one is not, 2 for a usage error, or 128 + the signal number when a SIGINT, SIGTERM
- * or SIGHUP (caught on `signals`) stopped it. `quitTimeoutMs` is how long --quit waits for an app to exit.
+ * or SIGHUP (caught on `signals`) stopped it. `quitTimeoutMs` is how long --quit waits for an app to exit. `fetch` is
+ * the global fetch unless given (cli.mjs gives none): the catalog, the images and the npm check all use it.
  */
-export async function runUpdate(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), clock = Date.now, tools = UPDATE_TOOLS, signals = process, quitTimeoutMs = QUIT_TIMEOUT_MS, launcherVersion = LAUNCHER_VERSION }) {
+export async function runUpdate(args, { env, platform, home, stdout, stderr, fetch = globalThis.fetch, now = Date.now(), clock = Date.now, tools = UPDATE_TOOLS, signals = process, quitTimeoutMs = QUIT_TIMEOUT_MS, launcherVersion = LAUNCHER_VERSION }) {
   const options = parseUpdateArgs(args);
   if (options.error) {
     stderr.write(`subset: ${options.error}\n`);
