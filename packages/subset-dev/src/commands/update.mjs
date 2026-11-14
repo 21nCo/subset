@@ -1,13 +1,15 @@
 // subset update [<app>...] [--beta] [--quit]: updates the named Subset Mac apps, or every one installed, to the newest
 // artifact of the live channel (the beta with --beta), with the download and checks of `subset install`
 // (macos/update.mjs). A running app is not replaced: the command refuses, or with --quit quits it first and reopens it
-// afterwards. With no apps named it also says when a newer subset.dev is on npm.
+// afterwards. With no apps named it also says when a newer subset.dev is on npm. It holds each app's lock
+// (macos/lock.mjs) throughout; an app another subset is installing, updating or uninstalling is not updated.
 import { lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, download, loadCatalog, MAX_FEED_BYTES, printable } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
+import { LockError, lockApp } from '../macos/lock.mjs';
 import { prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
 import { decideUpdate, pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, reopenApp, RunningError, runningProcesses, UPDATE_TOOLS, updateApp } from '../macos/update.mjs';
 import { compareVersions } from '../macos/verify.mjs';
@@ -109,7 +111,31 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
     fail(`there is no Subset Mac app "${printable(unknown)}"; subset list shows them.`);
     return 1;
   }
+  // No other subset install, update or uninstall of these apps runs until this one has finished.
+  const unlocks = [];
+  const locked = apps.filter((app) => {
+    try {
+      unlocks.push(lockApp(app, { home }));
+      return true;
+    } catch (error) {
+      if (!(error instanceof LockError)) throw error;
+      fail(`${app.name} was not updated: ${error.message}.`);
+      return false;
+    }
+  });
+  let code;
+  try {
+    code = await updateLocked({ apps: locked, all, options, folders, trash, home, now, clock, fetch, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, skip, busy: locked.length < apps.length });
+  } finally {
+    for (const unlock of unlocks) unlock();
+  }
+  if (code !== undefined) return code;
+  await launcher();
+  return failed ? 1 : 0;
+}
 
+// The rest of subset update, with the apps' locks held: resolves the exit code when a signal stopped it.
+async function updateLocked({ apps, all, options, folders, trash, home, now, clock, fetch, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, skip, busy }) {
   // A copy an interrupted update left under a hidden name is put back first.
   for (const note of recoverApps(apps, folders)) say(stderr, `subset: note: ${note}`);
   // What to do with each installed copy, decided from its Info.plist and receipt before anything is downloaded. The
@@ -141,13 +167,13 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
       }
     }
   });
-  if (all && installed.every((copies) => copies.length === 0)) say(stdout, 'No Subset Mac apps are installed.');
+  if (all && !busy && installed.every((copies) => copies.length === 0)) say(stdout, 'No Subset Mac apps are installed.');
   if (updates.length > 0) {
     try {
       prepareTrash(trash);
     } catch (error) {
       fail(`nothing was updated: ${error.message}.`);
-      updates.length = 0;
+      return undefined;
     }
   }
 
@@ -220,6 +246,5 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
   } finally {
     for (const [signal, handler] of handlers) signals.off(signal, handler);
   }
-  await launcher();
-  return failed ? 1 : 0;
+  return undefined;
 }

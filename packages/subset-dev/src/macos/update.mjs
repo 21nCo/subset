@@ -6,7 +6,7 @@
 //   2. the verified copy is renamed to <appName>.app (if that fails, the backup is renamed back);
 //   3. the backup, now a replaced copy, is renamed to a hidden `old` name (trash.mjs hiddenName()), which is never put
 //      back;
-//   4. the receipt is rewritten;
+//   4. the receipt is rewritten, when the new copy is still at <appName>.app;
 //   5. the old copy is renamed into the Trash (trash.mjs) when the Trash is on the same volume.
 // On another volume the old copy is copied to the Trash afterwards and then removed. So the old app or the new verified
 // one is always there: a signal before step 1 leaves the old app untouched, and the steps cannot be split by one. Only
@@ -16,13 +16,15 @@
 // left between steps 2 and 3) is never put back, so a later uninstall followed by an install cannot revive it.
 //
 // A running app is never replaced: runningProcesses() finds the processes whose executable is inside the bundle (from
-// ps), and quitProcesses() sends them SIGTERM and waits for them to exit.
+// ps), and quitProcesses() sends them SIGTERM and waits for them to exit. The commands hold the app's lock (lock.mjs)
+// throughout, so no other subset install, update or uninstall of the app runs meanwhile.
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { INSTALL_TOOLS, InstallError, installApp } from './install.mjs';
+import { alive } from './lock.mjs';
 import { hiddenName, moveToTrash, renameIntoTrash } from './trash.mjs';
 import { compareNumbers, compareVersions, runTool } from './verify.mjs';
 
@@ -110,21 +112,35 @@ export async function quitProcesses(bundle, processes, { tools = UPDATE_TOOLS, t
   }
 }
 
+const sameFile = (stat, identity) => stat.dev === identity.dev && stat.ino === identity.ino;
+
 /** The processes as `pid 123, 456`, for a message. */
 export const pids = (processes) => `pid ${processes.map((entry) => entry.pid).join(', ')}`;
 
 /**
- * Writes `receipt` ({ file, document() } or null) by renaming a temporary file over it. When it cannot be written, the
- * receipt there (now describing the replaced copy) is removed and `warn` says so: a receipt is advisory, and the
- * updated app stays.
+ * Writes `receipt` ({ file, document() } or null) for the copy at `target` by renaming a temporary file over it, only
+ * while that copy is still `identity` ({ dev, ino }); otherwise `warn` says it was not written. When it cannot be
+ * written, the receipt there (now describing the replaced copy) is removed and `warn` says so: a receipt is advisory,
+ * and the updated app stays.
  */
-export function writeReceipt(receipt, warn) {
+export function writeReceipt(receipt, warn, { target, identity }) {
   if (!receipt) return;
   let temporary;
   try {
     mkdirSync(path.dirname(receipt.file), { recursive: true });
     temporary = `${receipt.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(receipt.document(), null, 2)}\n`, { mode: 0o644, flag: 'wx' });
+    let current;
+    try {
+      current = lstatSync(target);
+    } catch {
+      current = undefined;
+    }
+    if (!current || !sameFile(current, identity)) {
+      rmSync(temporary, { force: true });
+      warn(`the receipt ${receipt.file} was not written: ${target} was replaced or removed after the update`);
+      return;
+    }
     renameSync(temporary, receipt.file);
   } catch (error) {
     try {
@@ -146,8 +162,6 @@ function putBack(from, to) {
     return `, and the previous copy could not be put back (${error.code ?? error.message}): it is at ${from}; rename it to ${to}`;
   }
 }
-
-const sameFile = (stat, identity) => stat.dev === identity.dev && stat.ino === identity.ino;
 
 /**
  * Steps 1 to 5 above, synchronously, for the verified `staged` copy and the installed `target`, which must still be
@@ -171,7 +185,9 @@ export function swapApp({ staged, target, identity, receipt, trash, appName, war
     moved = undefined;
   }
   if (!moved || !sameFile(moved, identity)) throw new InstallError('install', `${changed}${putBack(backup, target)}`);
+  let placed;
   try {
+    placed = lstatSync(staged);
     renameSync(staged, target);
   } catch (error) {
     throw new InstallError('install', `the new copy cannot be renamed into place (${error.code ?? error.message})${putBack(backup, target)}`);
@@ -184,7 +200,7 @@ export function swapApp({ staged, target, identity, receipt, trash, appName, war
   } catch {
     old = backup;
   }
-  writeReceipt(receipt, warn);
+  writeReceipt(receipt, warn, { target, identity: placed });
   let trashed;
   try {
     trashed = renameIntoTrash(old, { trash, appName, now });
@@ -229,16 +245,6 @@ export async function updateApp({ app, release, beta, target, identity, receipt,
   }
 }
 
-// Whether process `pid` still runs (a process of another user counts).
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
@@ -274,7 +280,11 @@ export function recoverApps(apps, folders, { restore = true, running = alive } =
       if (found.length === 0) continue;
       let present = true;
       try {
-        lstatSync(target);
+        if (!lstatSync(target).isDirectory()) {
+          // Not an app folder (a link or a file): nothing is put back over it or renamed beside it, only named.
+          notes.push(`${target} is not an app folder, and an interrupted subset update or uninstall left copies of ${app.name} beside it at ${found.map((entry) => entry.file).join(', ')}.`);
+          continue;
+        }
       } catch {
         present = false;
       }

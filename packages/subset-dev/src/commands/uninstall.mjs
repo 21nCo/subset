@@ -1,12 +1,14 @@
 // subset uninstall <app> [--quit]: moves every installed copy of a Subset Mac app (in /Applications and ~/Applications)
 // to the user's Trash (macos/trash.mjs) and deletes its receipt. The app's data (preferences, Application Support,
-// containers) stays. A running app is not moved: the command refuses, or with --quit quits it first.
-import { existsSync, rmSync } from 'node:fs';
+// containers) stays. A running app is not moved: the command refuses, or with --quit quits it first. It holds the app's
+// lock (macos/lock.mjs) throughout, and moves only the copies it checked (by device and inode).
+import { existsSync, lstatSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
+import { LockError, lockApp } from '../macos/lock.mjs';
 import { moveToTrash, prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
 import { pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, RunningError, runningProcesses, UPDATE_TOOLS } from '../macos/update.mjs';
 import { SIGNALS } from './install.mjs';
@@ -26,10 +28,19 @@ export function parseUninstallArgs(args) {
   return options;
 }
 
+const statOf = (file) => {
+  try {
+    return lstatSync(file);
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Runs `subset uninstall <args>`, writing to `stdout` and `stderr`, and returns the exit code: 0 when every copy is in
- * the Trash and the receipt is gone, 1 when the app is not installed or a copy could not be moved (the receipt then
- * stays), 2 for a usage error, or 128 + the signal number when a signal stopped a copy to another volume's Trash.
+ * the Trash and the receipt is gone, 1 when the app is not installed, another subset is working on it, a copy could not
+ * be moved (the receipt then stays) or the receipt could not be removed, 2 for a usage error, or 128 + the signal
+ * number when a signal stopped it.
  */
 export async function runUninstall(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), clock = Date.now, tools = UPDATE_TOOLS, signals = process, quitTimeoutMs = QUIT_TIMEOUT_MS }) {
   const options = parseUninstallArgs(args);
@@ -59,11 +70,38 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
   if (catalog.warning) say(stderr, `subset: ${catalog.warning}`);
   const app = catalog.feed.apps.find((candidate) => candidate.id === options.app);
   if (!app) return fail(`there is no Subset Mac app "${printable(options.app)}"; subset list shows them.`);
+  const notMoved = `${app.name} was not uninstalled`;
+  // No other subset install, update or uninstall of the app runs until this one has finished.
+  let unlock;
+  try {
+    unlock = lockApp(app, { home });
+  } catch (error) {
+    if (!(error instanceof LockError)) throw error;
+    return fail(`${notMoved}: ${error.message}.`);
+  }
+  try {
+    return await uninstallLocked({ app, options, folders, trash, home, clock, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, notMoved });
+  } finally {
+    unlock();
+  }
+}
+
+// The rest of subset uninstall, with the app's lock held.
+async function uninstallLocked({ app, options, folders, trash, home, clock, tools, signals, quitTimeoutMs, stdout, stderr, say, fail, notMoved }) {
   // A copy an interrupted update or uninstall left under a hidden name is put back first, and so uninstalled too.
   for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
+  // Each copy is identified (device and inode) before and after its Info.plist is read; only that copy is moved.
+  const bundles = folders.map((folder) => path.join(folder.dir, `${app.appName}.app`));
+  const before = new Map(bundles.map((bundle) => [bundle, statOf(bundle)]));
   const [copies] = await detectApps([app], { folders, home, plutil: tools.plutil });
   if (copies.length === 0) return fail(`${app.name} is not installed in /Applications or ~/Applications.`);
-  const notMoved = `${app.name} was not uninstalled`;
+  for (const copy of copies) {
+    const seen = before.get(copy.path);
+    copy.identity = statOf(copy.path);
+    if (!seen || !copy.identity || seen.dev !== copy.identity.dev || seen.ino !== copy.identity.ino) {
+      return fail(`${notMoved}: ${copy.path} was replaced while its version was read (by another program?); run subset uninstall ${app.id} again.`);
+    }
+  }
 
   const controller = new AbortController();
   const stop = (signal) => {
@@ -71,23 +109,26 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
   };
   const handlers = Object.keys(SIGNALS).map((signal) => [signal, () => stop(signal)]);
   for (const [signal, handler] of handlers) signals.on(signal, handler);
+  // Refuses when the copy runs, or with --quit quits it (SIGTERM, then waits up to quitTimeoutMs).
+  const quitOrRefuse = async (copy, again) => {
+    const running = await runningProcesses(copy.path, { tools, signal: controller.signal });
+    if (running.length === 0) return;
+    if (!options.quit) {
+      throw new RunningError(again ? `${app.name} is running from ${copy.path} again (${pids(running)}); quit it and run subset uninstall ${app.id} again` : `${app.name} is running from ${copy.path} (${pids(running)}); quit it, or use subset uninstall ${app.id} --quit`);
+    }
+    say(stderr, `Quitting ${app.name} (${pids(running)})`);
+    const left = await quitProcesses(copy.path, running, { tools, timeoutMs: quitTimeoutMs, signal: controller.signal });
+    if (left.length > 0) throw new RunningError(`${app.name} is still running ${quitTimeoutMs / 1000} seconds after it was asked to quit (${pids(left)})`);
+  };
   try {
     prepareTrash(trash);
     // Every copy is checked, and quit with --quit, before any is moved.
-    for (const copy of copies) {
-      const running = await runningProcesses(copy.path, { tools, signal: controller.signal });
-      if (running.length === 0) continue;
-      if (!options.quit) throw new RunningError(`${app.name} is running from ${copy.path} (${pids(running)}); quit it, or use subset uninstall ${app.id} --quit`);
-      say(stderr, `Quitting ${app.name} (${pids(running)})`);
-      const left = await quitProcesses(copy.path, running, { tools, timeoutMs: quitTimeoutMs, signal: controller.signal });
-      if (left.length > 0) throw new RunningError(`${app.name} is still running ${quitTimeoutMs / 1000} seconds after it was asked to quit (${pids(left)})`);
-    }
+    for (const copy of copies) await quitOrRefuse(copy, false);
     for (const copy of copies) {
       // Checked again just before the copy is moved: it may have been started since, and a signal stops here.
       controller.signal.throwIfAborted();
-      const running = await runningProcesses(copy.path, { tools, signal: controller.signal });
-      if (running.length > 0) throw new RunningError(`${app.name} is running from ${copy.path} again (${pids(running)}); quit it and run subset uninstall ${app.id} again`);
-      const trashed = await moveToTrash(copy.path, { trash, appName: app.appName, now: new Date(clock()), tools, signal: controller.signal });
+      await quitOrRefuse(copy, true);
+      const trashed = await moveToTrash(copy.path, { trash, appName: app.appName, identity: copy.identity, now: new Date(clock()), tools, signal: controller.signal });
       say(stdout, `Moved ${app.name}${copy.version ? ` ${copy.version}` : ''} (${copy.folder}) to the Trash: ${trashed}`);
     }
   } catch (error) {
@@ -110,7 +151,7 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
   try {
     rmSync(receiptFile(home, app.bundleId), { force: true });
   } catch (error) {
-    say(stderr, `subset: warning: the receipt ${receiptFile(home, app.bundleId)} could not be removed (${error.code ?? error.message})`);
+    return fail(`${app.name} was moved to the Trash, but its receipt ${receiptFile(home, app.bundleId)} could not be removed (${error.code ?? error.message}); remove it by hand.`);
   }
   return 0;
 }

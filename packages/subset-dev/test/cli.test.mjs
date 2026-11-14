@@ -144,11 +144,18 @@ test('reserves the command names: no tool takes one, and resolving one as a tool
 // test/update.test.mjs; here, only that a usage error starts no npm.
 test('runs update and uninstall as commands: a usage error exits 2, starting no npm', () => {
   npmCalls();
-  for (const args of [['update', '--force'], ['uninstall'], ['uninstall', 'breaks', 'timer'], ['update', '--', '--help']]) {
+  const update = 'Usage: subset update [<app>...] [--beta] [--quit]';
+  const uninstall = 'Usage: subset uninstall <app> [--quit]';
+  for (const [args, message] of [
+    [['update', '--force'], `subset update does not take the option "--force". ${update}`],
+    [['uninstall'], `subset uninstall needs an app; subset list shows them. ${uninstall}`],
+    [['uninstall', 'breaks', 'timer'], `subset uninstall takes one app, not "breaks" and "timer". ${uninstall}`],
+    [['update', '--', '--help'], `subset update does not take the option "--". ${update}`]
+  ]) {
     const result = subset(args);
     assert.equal(result.status, 2, args.join(' '));
     assert.equal(result.stdout, '', args.join(' '));
-    assert.match(result.stderr, new RegExp(`^subset: subset ${args[0]} `), args.join(' '));
+    assert.equal(result.stderr, `subset: ${message}\n`, args.join(' '));
   }
   assert.deepEqual(npmCalls(), []);
 });

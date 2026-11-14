@@ -8,6 +8,7 @@ import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable, validateReceipt } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { INSTALL_TOOLS, InstallError, installApp, InterruptedError } from '../macos/install.mjs';
+import { LockError, lockApp } from '../macos/lock.mjs';
 import { recoverApps } from '../macos/update.mjs';
 import { compareNumbers, compareVersions, VerificationError } from '../macos/verify.mjs';
 
@@ -159,6 +160,23 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
   } catch (error) {
     return fail(`${label} was not installed: ${failure(error)}`);
   }
+  // No other subset install, update or uninstall of the app runs until this one has finished (macos/lock.mjs).
+  let unlock;
+  try {
+    unlock = lockApp(app, { home });
+  } catch (error) {
+    if (!(error instanceof LockError)) throw error;
+    return fail(`${label} was not installed: ${error.message}.`);
+  }
+  try {
+    return await installLocked({ app, release, label, options, folders, where, home, now, clock, tools, fetch, signals, stdout, stderr, say, fail });
+  } finally {
+    unlock();
+  }
+}
+
+// The rest of subset install, with the app's lock held.
+async function installLocked({ app, release, label, options, folders, where, home, now, clock, tools, fetch, signals, stdout, stderr, say, fail }) {
   // A copy an interrupted subset update left under a hidden name is put back first: it is then already installed.
   for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
   const target = path.join(where.dir, `${app.appName}.app`);

@@ -728,18 +728,21 @@ for (const boundary of ['hdiutil-attach', 'ditto']) {
   });
 }
 
-test('two installs of the same app into one --dir at once: exactly one succeeds', { skip }, async () => {
+test('two installs of the same app at once: the one holding the app\'s lock installs it, the other refuses', { skip }, async () => {
   const c = setup();
   const image = breaksImage();
   feed(c, { live: { image } });
   const barrier = path.join(c.base, 'barrier');
   mkdirSync(barrier);
-  // Both reach the last check before the rename together, so they race for it.
-  const env = { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' };
-  const results = await Promise.all([spawnInstall(c, image, env), spawnInstall(c, image, env)]);
-  assert.deepEqual(results.map((result) => result.status).sort(), [0, 1], results.map((result) => result.stderr).join('\n'));
-  const loser = results.find((result) => result.status === 1);
-  assert.match(loser.stderr, /the install step failed: .*Breaks\.app already exists; use subset update to change its version/);
+  // The first waits at its last check before the rename (sw_vers), holding the app's lock, until the second has run.
+  const first = spawnInstall(c, image, { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' });
+  while (readdirSync(barrier).length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  const second = await spawnInstall(c, image);
+  writeFileSync(path.join(barrier, 'go'), '');
+  const result = await first;
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(second.status, 1, second.stderr);
+  assert.match(second.stderr, /was not installed: another subset \(pid \d+\) is installing, updating or uninstalling Breaks; run this again once it has finished/);
   assert.deepEqual(readdirSync(c.system), ['Breaks.app'], 'one app and no staged copy');
   assert.deepEqual(readdirSync(c.tmp), []);
 });

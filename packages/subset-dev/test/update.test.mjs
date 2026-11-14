@@ -9,6 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInstall } from '../src/commands/install.mjs';
 import { runList } from '../src/commands/list.mjs';
@@ -16,6 +17,7 @@ import { parseUninstallArgs, runUninstall } from '../src/commands/uninstall.mjs'
 import { NPM_LATEST_URL, newerLauncher, parseUpdateArgs, runUpdate } from '../src/commands/update.mjs';
 import { receiptFile } from '../src/macos/apps.mjs';
 import { moveToTrash, prepareTrash, renameIntoTrash, trashFolder, trashName } from '../src/macos/trash.mjs';
+import { lockApp, locksFolder } from '../src/macos/lock.mjs';
 import { decideUpdate, recoverApps, swapApp, UPDATE_TOOLS } from '../src/macos/update.mjs';
 import { makeApp, writeReceipt } from './helpers.mjs';
 import { appFiles, attachedImages, makeImage, stubTools, stubToolsSkip } from './install-stubs.mjs';
@@ -31,6 +33,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 mkdirSync(path.join(root, 'tools'));
 const tools = stubToolsSkip ? undefined : stubTools(path.join(root, 'tools'));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const skip = stubToolsSkip;
 const BUNDLE_ID = 'dev.subset.breaks';
 
@@ -83,7 +86,7 @@ function installed(c, { version = '0.1.0', build = '1', channel, dir = c.system 
       path: '/Applications/Breaks.app'
     });
   }
-  return { bundle, ino: lstatSync(bundle).ino, receipt: channel ? readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8') : undefined };
+  return { bundle, ino: lstatSync(bundle).ino, plist: readFileSync(path.join(bundle, 'Contents', 'Info.plist')), receipt: channel ? readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8') : undefined };
 }
 
 // A fetch serving `images` ({ url: bytes }) and the npm registry's `latest` of subset.dev as `registry` (a version, or
@@ -144,6 +147,7 @@ function assertOldUntouched(c, old) {
   assert.deepEqual(readdirSync(c.system), ['Breaks.app'], 'nothing staged or backed up beside the app');
   assert.equal(lstatSync(c.app).ino, old.ino, 'the same copy');
   assert.equal(readFileSync(path.join(c.app, 'Contents', 'old-copy'), 'utf8'), plistVersion(c.app));
+  assert.deepEqual(readFileSync(path.join(c.app, 'Contents', 'Info.plist')), old.plist, 'the same Info.plist');
   assert.deepEqual(readdirSync(c.trash), [], 'nothing in the Trash');
   if (old.receipt === undefined) assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'no receipt');
   else assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt, 'the receipt is unchanged');
@@ -292,8 +296,15 @@ test('a new copy that fails verification leaves the old app in place, untouched'
 
 // A process standing in for the app: it exits on SIGTERM unless `ignoreTerm`. Listed by the stand-in ps as running
 // from inside the bundle.
+const fakeApps = new Set();
+after(() => {
+  for (const child of fakeApps) child.kill('SIGKILL');
+});
 async function fakeApp(c, { ignoreTerm = false, executable = path.join(c.app, 'Contents', 'MacOS', 'Breaks') } = {}) {
   const child = spawn(process.execPath, ['-e', `${ignoreTerm ? "process.on('SIGTERM', () => {});" : ''} console.log('ready'); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  // Killed when the tests end, whatever happened.
+  fakeApps.add(child);
+  child.once('exit', () => fakeApps.delete(child));
   await new Promise((resolve) => child.stdout.once('data', resolve));
   const file = path.join(c.base, 'ps.json');
   const table = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [];
@@ -424,7 +435,7 @@ test('the real subset update with no apps says when a newer subset.dev is on npm
   child.stderr.on('data', (chunk) => (stderr += chunk));
   const status = await new Promise((resolve) => child.on('close', resolve));
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.match(stdout, new RegExp(`subset\\.dev 99\\.0\\.0 is available \\(this is ${version.replaceAll('.', '\\.')}\\); update it with: npm install -g subset\\.dev@latest\\n$`), stderr);
+  assert.match(stdout, new RegExp(`subset\\.dev 99\\.0\\.0 is available \\(this is ${escapeRegExp(version)}\\); update it with: npm install -g subset\\.dev@latest\\n$`), stderr);
   assert.equal(status, process.platform === 'darwin' ? 0 : 1, stderr);
 });
 
@@ -635,32 +646,59 @@ test('a SIGINT to the process group after the swap, while the image is detached,
   assert.equal(receipt(c).version, '0.1.1');
 });
 
-test('two updates of the same app at once: one updates it, the other refuses, and one old copy is in the Trash', { skip }, async () => {
+// While a spawned command holds the app's lock (it waits at its first ps), another subset install, update or uninstall
+// of the app refuses, naming that command's pid.
+const BUSY = /another subset \(pid \d+\) is installing, updating or uninstalling Breaks; run this again once it has finished \(if no subset runs, remove .*\.lock\)\.\n$/;
+
+test('one subset at a time per app: while an update runs, another update, an install and an uninstall refuse; list works', { skip }, async () => {
   const c = setup();
   const image = breaksImage({ version: '0.1.1' });
   feed(c, { live: { version: '0.1.1', image } });
-  installed(c, { channel: 'live' });
-  const barrier = path.join(c.base, 'barrier');
-  mkdirSync(barrier);
-  // Both reach the last check before the swap together, so they race for it.
-  const env = { STUB_BARRIER_DIR: barrier, STUB_BARRIER_COUNT: '2' };
-  const results = await Promise.all([spawnCommand(c, image, ['update', 'breaks'], env), spawnCommand(c, image, ['update', 'breaks'], env)]);
-  assert.deepEqual(results.map((result) => result.status).sort(), [0, 1], results.map((result) => result.stderr).join('\n'));
-  assert.match(results.find((result) => result.status === 1).stderr, /was changed or removed while it was being updated/);
+  const old = installed(c, { channel: 'live' });
+  const gate = psGate(c);
+  const first = spawnCommand(c, image, ['update', 'breaks'], gate.env);
+  await gate.held(first);
+  const fetch = fakeFetch({ [LIVE_URL]: image });
+  const again = await update(c, ['breaks'], { fetch });
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /^subset: Breaks was not updated: another subset/);
+  assert.match(again.stderr, BUSY);
+  const removed = await uninstall(c, ['breaks']);
+  assert.equal(removed.code, 1);
+  assert.match(removed.stderr, /^subset: Breaks was not uninstalled: another subset/);
+  const install = await run(runInstall, c, ['breaks', '--user'], { fetch });
+  assert.equal(install.code, 1);
+  assert.match(install.stderr, /^subset: Breaks 0\.1\.1 was not installed: another subset/);
+  assert.deepEqual(fetch.calls, [], 'nothing downloaded');
+  assert.deepEqual([readdirSync(c.user), readdirSync(c.trash)], [[], []]);
+  assert.equal(lstatSync(c.app).ino, old.ino);
+  assert.equal((await run(runList, c, [], { plutil: tools.plutil })).code, 0, 'list takes no lock');
+
+  gate.release();
+  const result = await first;
+  assert.equal(result.status, 0, result.stderr);
   assertUpdated(c, '0.1.1', '0.1.0');
   assert.equal(receipt(c).version, '0.1.1');
+  assert.deepEqual(readdirSync(locksFolder(c.home)), [], 'every lock is released');
 });
 
-test('an install and an update of the same app at once: the install refuses, the update succeeds', { skip }, async () => {
+test('an install while an uninstall runs refuses: the uninstall then removes the receipt, which no install wrote meanwhile', { skip }, async () => {
   const c = setup();
-  const image = breaksImage({ version: '0.1.1' });
-  feed(c, { live: { version: '0.1.1', image } });
+  const image = breaksImage();
+  feed(c, { live: { version: '0.1.0', image } });
   installed(c, { channel: 'live' });
-  const [updated, install] = await Promise.all([spawnCommand(c, image, ['update', 'breaks']), spawnCommand(c, image, ['install', 'breaks', '--dir', c.system])]);
-  assert.equal(updated.status, 0, updated.stderr);
-  assert.equal(install.status, 1, install.stderr);
-  assert.match(install.stderr, /already exists; use subset update to change its version/);
-  assertUpdated(c, '0.1.1', '0.1.0');
+  const gate = psGate(c);
+  const first = spawnCommand(c, image, ['uninstall', 'breaks'], gate.env);
+  await gate.held(first);
+  const install = await run(runInstall, c, ['breaks', '--user'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(install.code, 1);
+  assert.match(install.stderr, BUSY);
+  assert.deepEqual(readdirSync(c.user), []);
+  gate.release();
+  const result = await first;
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual([readdirSync(c.system), readdirSync(c.trash).length], [[], 1]);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false);
 });
 
 test('a copy replaced between reading its version and identifying it is not updated (no downgrade of the replacement)', { skip }, async () => {
@@ -942,4 +980,214 @@ test('trash on another volume, a SIGTERM while uninstall copies to the Trash: th
   assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
   assert.deepEqual(readdirSync(c.trash), []);
   assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+});
+
+// A stand-in ps for a spawned command that, once called, waits until release(): the command holds the app's lock
+// meanwhile. held(child) waits until it is waiting (and fails if the command ends first).
+function psGate(c) {
+  const dir = mkdtempSync(path.join(c.base, 'gate-'));
+  const ps = wrapper(c, `ps-${path.basename(dir)}`, `touch "${dir}/held"\nwhile [ ! -f "${dir}/go" ]; do sleep 0.05; done\nexec "${tools.ps}" "$@"`);
+  return {
+    env: { STUB_TOOL_MAP: toolMap(c, { ps }) },
+    async held(child) {
+      let ended;
+      child.then((result) => (ended = result));
+      while (!existsSync(path.join(dir, 'held'))) {
+        if (ended) assert.fail(`the command ended before it was held: ${ended.stderr}`);
+        await sleep(20);
+      }
+    },
+    release: () => writeFileSync(path.join(dir, 'go'), '')
+  };
+}
+
+const exdev = () => {
+  throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' });
+};
+
+for (const outcome of ['fails', 'succeeds', 'is aborted']) {
+  test(`trash: a copy to another volume that ${outcome} never replaces or removes what a same-volume move put in the Trash meanwhile`, { skip }, async () => {
+    const c = setup();
+    const date = new Date(2026, 10, 14, 9, 5, 7);
+    const first = path.join(c.trash, trashName('Breaks', date));
+    const old = installed(c, {});
+    // While the copy of /Applications/Breaks.app runs, another Breaks (in ~/Applications) is renamed into the Trash under
+    // the first name, as a same-volume move at the same second does.
+    const other = makeApp(c.user, 'Breaks', { bundleId: BUNDLE_ID, version: '0.2.0' });
+    writeFileSync(path.join(other, 'Contents', 'other-copy'), 'B');
+    const moveOther = `"${process.execPath}" -e "require('node:fs').renameSync(process.argv[1], process.argv[2])" "${other}" "${first}"`;
+    const body = { fails: 'exit 1', succeeds: 'cp -R "$1/." "$2"', 'is aborted': 'sleep 30' }[outcome];
+    const ditto = wrapper(c, 'ditto-meanwhile', `mkdir -p "$2/Contents" && echo partial > "$2/Contents/partial" && ${moveOther} && ${body}`);
+    const controller = new AbortController();
+    const moving = moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date, tools: { ...tools, ditto }, rename: exdev, signal: controller.signal });
+    if (outcome === 'is aborted') {
+      while (!existsSync(first)) await sleep(20);
+      controller.abort(new Error('stopped'));
+    }
+    const result = await moving.catch((error) => error);
+    assert.equal(readFileSync(path.join(first, 'Contents', 'other-copy'), 'utf8'), 'B', 'the other copy stays in the Trash');
+    assert.equal(plistVersion(first), '0.2.0');
+    if (outcome === 'succeeds') {
+      assert.equal(result, path.join(c.trash, trashName('Breaks', date, 2)));
+      assert.equal(readFileSync(path.join(result, 'Contents', 'old-copy'), 'utf8'), '0.1.0');
+      assert.equal(existsSync(path.join(result, 'Contents', 'other-copy')), false);
+      assert.deepEqual(readdirSync(c.system), []);
+    } else {
+      assert.ok(result instanceof Error);
+      assert.equal(lstatSync(c.app).ino, old.ino, 'the app is back, the same copy');
+      assert.deepEqual(readdirSync(c.trash), [path.basename(first)], 'only the incomplete copy is removed');
+    }
+  });
+}
+
+test('trash: an empty folder already at a Trash name stays; the app goes to the next name, on either volume', { skip }, async () => {
+  const c = setup();
+  const date = new Date(2026, 10, 14, 9, 5, 7);
+  const empty = path.join(c.trash, trashName('Breaks', date));
+  mkdirSync(empty);
+  const same = installed(c, {});
+  assert.equal(await moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date }), path.join(c.trash, trashName('Breaks', date, 2)));
+  assert.equal(lstatSync(path.join(c.trash, trashName('Breaks', date, 2))).ino, same.ino);
+  installed(c, {});
+  const copied = await moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date, tools, rename: exdev });
+  assert.equal(copied, path.join(c.trash, trashName('Breaks', date, 3)));
+  assert.deepEqual(readdirSync(empty), [], 'the empty folder is still there');
+  assert.equal(readdirSync(c.trash).length, 3);
+});
+
+test('trash: a copy replaced since it was checked is put back and refused, on either volume', { skip }, async () => {
+  const c = setup();
+  installed(c, {});
+  const checked = lstatSync(c.app);
+  for (const [index, rename] of [renameSync, exdev].entries()) {
+    // What is at the path is moved away (not removed, so that no inode is reused) and another copy put in its place.
+    renameSync(c.app, path.join(c.base, `away-${index}.app`));
+    const replacement = installed(c, { version: '0.3.0' });
+    const error = await moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', identity: checked, tools, rename }).catch((caught) => caught);
+    assert.match(error.message, /Breaks\.app was replaced since it was checked .*, so it was left in place$/);
+    assert.equal(lstatSync(c.app).ino, replacement.ino, 'the replacement is back in place');
+    assert.deepEqual([readdirSync(c.system), readdirSync(c.trash)], [['Breaks.app'], []]);
+  }
+});
+
+test('uninstall moves only the copy it checked: one replaced while its version is read, or before its move, stays with the receipt', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  const read = await uninstall(c, ['breaks'], { extraEnv: { STUB_PLUTIL_REPLACE: c.app, STUB_PLUTIL_REPLACE_VERSION: '0.3.0' } });
+  assert.equal(read.code, 1);
+  assert.match(read.stderr, /^subset: Breaks was not uninstalled: .*Breaks\.app was replaced while its version was read .*; run subset uninstall breaks again\.\n$/);
+  assert.equal(plistVersion(c.app), '0.3.0', 'the replacement stays');
+  assert.deepEqual(readdirSync(c.trash), []);
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+
+  // Replaced after the last running check (the second ps), just before the move.
+  const seen = path.join(c.base, 'ps-seen');
+  const ps = wrapper(c, 'ps-replace', `if [ -f "${seen}" ]; then mv "${c.app}" "${c.base}/checked.app" && mkdir -p "${c.app}/Contents" && echo new > "${c.app}/Contents/new-copy"; else touch "${seen}"; fi\nexec "${tools.ps}" "$@"`);
+  const moved = await uninstall(c, ['breaks'], { tools: { ...tools, ps } });
+  assert.equal(moved.code, 1);
+  assert.match(moved.stderr, /^subset: Breaks was not uninstalled: .*Breaks\.app was replaced since it was checked .*, so it was left in place\.\n$/);
+  assert.equal(readFileSync(path.join(c.app, 'Contents', 'new-copy'), 'utf8'), 'new\n');
+  assert.deepEqual([readdirSync(c.system), readdirSync(c.trash)], [['Breaks.app'], []]);
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt);
+});
+
+test('locks: a live holder refuses another command, which changes nothing; a dead holder\'s lock is removed', { skip }, async () => {
+  const c = setup();
+  const app = { name: 'Breaks', bundleId: BUNDLE_ID };
+  const release = lockApp(app, { home: c.home });
+  assert.throws(() => lockApp(app, { home: c.home }), /another subset \(pid \d+\) is installing, updating or uninstalling Breaks/, 'held in this process');
+  release();
+  // A subset that runs (this test's parent) holds the lock, with its update's backup set aside and Breaks.app missing.
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  installed(c, { channel: 'live' });
+  const live = path.join(locksFolder(c.home), `${BUNDLE_ID}.${process.ppid}.0123456789ab.lock`);
+  writeFileSync(live, '');
+  const backup = path.join(c.system, `.Breaks.app.subset-update-${process.ppid}-0123456789ab`);
+  renameSync(c.app, backup);
+  for (const [runner, args] of [[runInstall, ['breaks']], [runUpdate, ['breaks']], [runUninstall, ['breaks']]]) {
+    const result = await run(runner, c, args);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, new RegExp(`another subset \\(pid ${process.ppid}\\)`));
+    assert.deepEqual(readdirSync(c.system), [path.basename(backup)], 'neither put back nor renamed');
+  }
+  // Once that subset is gone, its lock is removed and the backup put back.
+  const dead = path.join(locksFolder(c.home), `${BUNDLE_ID}.${deadPid()}.0123456789ab.lock`);
+  renameSync(live, dead);
+  const dying = path.join(c.system, `.Breaks.app.subset-update-${deadPid()}-0123456789ab`);
+  renameSync(backup, dying);
+  const updated = await update(c, ['breaks']);
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.match(updated.stderr, /note: Breaks was put back/);
+  assert.deepEqual(readdirSync(locksFolder(c.home)), []);
+});
+
+test('an update killed between its swap and renaming its backup: the next uninstall takes over its lock, and no install revives the backup', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1' });
+  feed(c, { live: { version: '0.1.1', image } });
+  // What a SIGKILL right after step 2 leaves: the new 0.1.1 in place, the old 0.1.0 under the backup name, and the lock.
+  const pid = deadPid();
+  installed(c, { channel: 'live' });
+  renameSync(c.app, path.join(c.system, `.Breaks.app.subset-update-${pid}-0123456789ab`));
+  makeApp(c.system, 'Breaks', { bundleId: BUNDLE_ID, version: '0.1.1' });
+  mkdirSync(locksFolder(c.home), { recursive: true });
+  writeFileSync(path.join(locksFolder(c.home), `${BUNDLE_ID}.${pid}.0123456789ab.lock`), '');
+  const removed = await uninstall(c, ['breaks']);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.match(removed.stderr, /note: a previous copy of Breaks that subset did not move to the Trash is at .*subset-old-/);
+  const install = await run(runInstall, c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }), clock: () => NOW + 60_000 });
+  assert.equal(install.code, 0, install.stderr);
+  assert.doesNotMatch(install.stderr, /put back/);
+  assert.equal(existsSync(path.join(c.app, 'Contents', 'old-copy')), false, 'the release, not the old 0.1.0');
+});
+
+test('swap: the receipt is written only while the new copy is still in place', { skip }, () => {
+  const c = setup();
+  installed(c, {});
+  const checked = lstatSync(c.app);
+  const staged = makeApp(c.system, '.Breaks.app.subset-install-0', { bundleId: BUNDLE_ID, version: '0.1.1' });
+  const file = receiptFile(c.home, BUNDLE_ID);
+  const elsewhere = path.join(c.base, 'moved-away.app');
+  // Something moves the new copy away while the receipt is made.
+  const receiptDoc = { file, document: () => (renameSync(c.app, elsewhere), { schema: 'subset.receipt@1' }) };
+  const warnings = [];
+  swapApp({ staged, target: c.app, identity: checked, receipt: receiptDoc, trash: c.trash, appName: 'Breaks', warn: (line) => warnings.push(line), now: new Date(NOW) });
+  assert.equal(existsSync(file), false, 'no receipt for a copy that is not there');
+  assert.match(warnings.join('\n'), /the receipt .* was not written: .*Breaks\.app was replaced or removed after the update/);
+  assert.deepEqual(readdirSync(path.dirname(file)), [], 'no temporary file is left');
+});
+
+test('uninstall --quit quits an app started after the first check, at the check just before the move', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  installed(c, { channel: 'live' });
+  const app = await fakeApp(c);
+  try {
+    const seen = path.join(c.base, 'ps-late-seen');
+    const ps = wrapper(c, 'ps-late', `if [ -f "${seen}" ]; then exec "${tools.ps}" "$@"; fi\ntouch "${seen}"`);
+    const result = await uninstall(c, ['breaks', '--quit'], { tools: { ...tools, ps }, extraEnv: app.env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, `Quitting Breaks (pid ${app.child.pid})\n`);
+    assert.equal(await app.exited, 'SIGTERM');
+    assert.deepEqual(readdirSync(c.system), []);
+  } finally {
+    app.child.kill('SIGKILL');
+  }
+});
+
+test('uninstall exits 1 naming the receipt when it cannot be removed; the app stays in the Trash', { skip: skip || (process.getuid?.() === 0 && 'root ignores permissions') }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  installed(c, { channel: 'live' });
+  const receipts = path.dirname(receiptFile(c.home, BUNDLE_ID));
+  chmodSync(receipts, 0o500);
+  try {
+    const result = await uninstall(c, ['breaks']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, new RegExp(`^subset: Breaks was moved to the Trash, but its receipt ${escapeRegExp(receiptFile(c.home, BUNDLE_ID))} could not be removed \\(EACCES\\); remove it by hand\\.\\n$`));
+    assert.deepEqual([readdirSync(c.system), readdirSync(c.trash).length], [[], 1]);
+  } finally {
+    chmodSync(receipts, 0o755);
+  }
 });
