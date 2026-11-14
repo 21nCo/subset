@@ -1460,3 +1460,30 @@ for (const [kind, make] of Object.entries(notTheApp)) {
     assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
   });
 }
+
+test('uninstall keeps the receipt of a copy it cannot look into: it may be the app, and its beta stays known', { skip: skip || (process.getuid?.() === 0 && 'root ignores permissions') }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1', build: '5' });
+  feed(c, { live: { version: '0.1.1', image } });
+  // The beta in /Applications is what the receipt describes; its Contents cannot be searched, so it is not detected.
+  const beta = installed(c, { version: '0.1.1', build: '4', channel: 'beta' });
+  installed(c, { version: '0.1.1', build: '4', dir: c.user });
+  const contents = path.join(c.app, 'Contents');
+  chmodSync(contents, 0o000);
+  let result;
+  try {
+    result = await uninstall(c, ['breaks']);
+  } finally {
+    chmodSync(contents, 0o755);
+  }
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
+  assert.match(result.stderr, new RegExp(`^subset: ${escapeRegExp(c.app)} was not uninstalled: its Info\\.plist could not be read when it was checked, so it may be Breaks`));
+  assert.equal(lstatSync(c.app).ino, beta.ino, 'the copy stays');
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
+
+  const updated = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.equal(updated.stdout, `Updated Breaks 0.1.1-beta.4 to 0.1.1 in ${c.app}\n`);
+  assert.equal(receipt(c).channel, 'live');
+});

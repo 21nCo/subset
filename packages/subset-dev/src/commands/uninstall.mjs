@@ -155,10 +155,18 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   // a moved copy's path, or at a path that was empty or held another file or folder (device and inode) when the copies
   // were identified. An entry that was already there unchanged keeps it only when it may be this app: a bundle folder
   // (not a link) with a Contents/Info.plist file that cannot be read now or names this bundle ID. Anything else (another
-  // app of the same name, a link, a file, a folder without an Info.plist) is not this app, as detectApps() decided.
-  const mayBeApp = async (bundle) => {
-    const kinds = [[bundle, 'isDirectory'], [path.join(bundle, 'Contents'), 'isDirectory'], [path.join(bundle, 'Contents', 'Info.plist'), 'isFile']];
-    if (!kinds.every(([file, kind]) => statOf(file)?.[kind]())) return false;
+  // app of the same name, a link, a file, a folder without an Info.plist) is not this app, as detectApps() decided. One
+  // that cannot be looked into (its Contents not searchable, say) may be this app too.
+  const mayBeApp = async (bundle, stat) => {
+    if (!stat.isDirectory()) return false;
+    for (const [file, kind] of [[path.join(bundle, 'Contents'), 'isDirectory'], [path.join(bundle, 'Contents', 'Info.plist'), 'isFile']]) {
+      try {
+        if (!lstatSync(file)[kind]()) return false;
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
+        return true;
+      }
+    }
     const info = await readInfoPlist(bundle, tools.plutil);
     return info === undefined || info.CFBundleIdentifier === app.bundleId;
   };
@@ -171,7 +179,7 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
       say(stderr, `subset: note: ${bundle} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
       return 0;
     }
-    if (await mayBeApp(bundle)) {
+    if (await mayBeApp(bundle, current)) {
       return fail(`${bundle} was not uninstalled: its Info.plist could not be read when it was checked, so it may be ${app.name}, and the receipt ${receiptFile(home, app.bundleId)} stays; remove it by hand if that is not ${app.name}.`);
     }
   }
