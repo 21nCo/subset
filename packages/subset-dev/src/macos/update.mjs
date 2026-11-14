@@ -128,7 +128,8 @@ export function writeReceipt(receipt, warn, { target, identity }) {
   let temporary;
   try {
     mkdirSync(path.dirname(receipt.file), { recursive: true });
-    temporary = `${receipt.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    // Named apart from the bundle ID, so it fits whenever the receipt's own name does.
+    temporary = path.join(path.dirname(receipt.file), `.receipt.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
     writeFileSync(temporary, `${JSON.stringify(receipt.document(), null, 2)}\n`, { mode: 0o644, flag: 'wx' });
     let current;
     try {

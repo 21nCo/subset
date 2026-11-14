@@ -88,8 +88,8 @@ const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * Removes the private folders (hiddenName() kind `copy`) of `app` ({ name, appName }) that a subset killed while it
  * copied to the Trash `trash` on another volume left there. Such a copy is never the only one: until it is renamed to
  * its Trash name, the app it copies is still beside its old path (recoverApps() in update.mjs handles that), so it is
- * only an incomplete or unpublished duplicate. Only folders of a subset (their pid) that no longer runs are removed,
- * never another entry of the Trash. To be called with the app's lock (lock.mjs) held. Resolves a note for each.
+ * only an incomplete or unpublished duplicate. Only folders of a subset (their pid) that no longer runs are removed
+ * (one whose pid runs is only named), never another entry of the Trash. To be called with the app's lock (lock.mjs) held. Resolves a note for each.
  */
 export async function removeLeftCopies(app, trash, { tools = INSTALL_TOOLS, running = alive } = {}) {
   let names;
@@ -103,7 +103,12 @@ export async function removeLeftCopies(app, trash, { tools = INSTALL_TOOLS, runn
   for (const name of names) {
     const pid = Number(pattern.exec(name)?.[1]);
     const file = path.join(trash, name);
-    if (!pid || pid === process.pid || running(pid) || !lstatOrUndefined(file)?.isDirectory()) continue;
+    if (!pid || pid === process.pid || !lstatOrUndefined(file)?.isDirectory()) continue;
+    if (running(pid)) {
+      // With the app's lock held, no subset of this user is copying it: the pid was probably reused, so it is only named.
+      notes.push(`an incomplete copy of ${app.name} is in the Trash at ${file}, left by a subset (pid ${pid}) that seems to run still; remove it by hand once no subset runs.`);
+      continue;
+    }
     try {
       await removeStaged(file, tools);
       notes.push(`an incomplete copy of ${app.name} that an interrupted subset left in the Trash was removed (${file}).`);

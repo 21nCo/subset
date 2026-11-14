@@ -1247,7 +1247,9 @@ test('trash: removeLeftCopies removes only the app\'s copies of a subset that no
   for (const name of kept) mkdirSync(path.join(c.trash, name));
   writeFileSync(path.join(c.trash, `.Breaks.app.subset-copy-${dead}-ba9876543210`), 'a file, not a copy');
   kept.push(`.Breaks.app.subset-copy-${dead}-ba9876543210`);
-  assert.deepEqual(await removeLeftCopies(app, c.trash, { tools }), [`an incomplete copy of Breaks that an interrupted subset left in the Trash was removed (${orphan}).`]);
+  const reused = path.join(c.trash, `.Breaks.app.subset-copy-${process.ppid}-0123456789ab`);
+  const notes = await removeLeftCopies(app, c.trash, { tools });
+  assert.deepEqual(notes.sort(), [`an incomplete copy of Breaks is in the Trash at ${reused}, left by a subset (pid ${process.ppid}) that seems to run still; remove it by hand once no subset runs.`, `an incomplete copy of Breaks that an interrupted subset left in the Trash was removed (${orphan}).`].sort());
   assert.deepEqual(readdirSync(c.trash).sort(), [...kept].sort());
   assert.deepEqual(await removeLeftCopies(app, path.join(c.base, 'no-trash'), { tools }), [], 'no Trash, nothing to do');
   if (process.getuid?.() !== 0) {
@@ -1255,7 +1257,7 @@ test('trash: removeLeftCopies removes only the app\'s copies of a subset that no
     mkdirSync(path.join(stuck, 'Contents'), { recursive: true });
     chmodSync(c.trash, 0o555);
     try {
-      const [note] = await removeLeftCopies(app, c.trash, { tools });
+      const note = (await removeLeftCopies(app, c.trash, { tools })).find((text) => text.includes(stuck));
       assert.match(note, new RegExp(`left an incomplete copy of Breaks in the Trash at ${escapeRegExp(stuck)}, and it could not be removed \\(E[A-Z]+\\); remove it by hand\\.$`));
     } finally {
       chmodSync(c.trash, 0o755);
@@ -1263,50 +1265,56 @@ test('trash: removeLeftCopies removes only the app\'s copies of a subset that no
   }
 });
 
-test('locks: the lock file name is bounded for any catalog bundle ID: a long one installs, updates and uninstalls', { skip }, async () => {
-  const c = setup();
-  // 250 characters, so its receipt name (`<bundleId>.json`) fits in 255 bytes; the lock name does too. A receipt's
-  // temporary name does not (the install below is into a --dir folder, which gets none, and the update warns: receipts
-  // are advisory).
-  const bundleId = `dev.subset.${'b'.repeat(239)}`;
-  assert.equal(bundleId.length, 250);
-  const doc = structuredClone(template);
-  doc.apps[0].bundleId = bundleId;
-  const live = breaksImage({ bundleId });
-  const next = breaksImage({ bundleId, version: '0.1.1' });
-  const write = (version, image) => {
-    Object.assign(doc.apps[0].channels.live, { version, sha256: sha256(image) });
-    delete doc.apps[0].channels.beta;
-    writeFileSync(c.feedFile, JSON.stringify(doc));
-  };
-  write('0.1.0', live);
-  const elsewhere = path.join(c.base, 'elsewhere');
-  mkdirSync(elsewhere);
-  const installs = await run(runInstall, c, ['breaks', '--dir', elsewhere], { fetch: fakeFetch({ [LIVE_URL]: live }) });
-  assert.equal(installs.code, 0, installs.stderr);
-  assert.equal(plistVersion(path.join(elsewhere, 'Breaks.app')), '0.1.0');
-  makeApp(c.system, 'Breaks', { bundleId, version: '0.1.0', build: '1' });
-  write('0.1.1', next);
-  const updates = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: next }), now: NOW + 600_000, clock: () => NOW + 600_000 });
-  assert.equal(updates.code, 0, updates.stderr);
-  assert.doesNotMatch(updates.stderr, /lock/);
-  assert.equal(plistVersion(c.app), '0.1.1');
-  const removed = await uninstall(c, ['breaks'], { now: NOW + 600_000, clock: () => NOW + 660_000 });
-  assert.equal(removed.code, 0, removed.stderr);
-  assert.deepEqual(readdirSync(c.system), []);
-  assert.equal(readdirSync(c.trash).length, 2);
-  assert.equal(existsSync(receiptFile(c.home, bundleId)), false);
-  // Contention still holds for it, and the lock names stay short.
-  const release = lockApp({ name: 'Breaks', bundleId }, { home: c.home });
-  try {
-    assert.ok(readdirSync(locksFolder(c.home)).every((name) => Buffer.byteLength(name) < 100));
-    assert.throws(() => lockApp({ name: 'Breaks', bundleId }, { home: c.home }), /another subset \(pid \d+\)/);
-    lockApp({ name: 'Breaks', bundleId: `${bundleId}x` }, { home: c.home })();
-  } finally {
-    release();
-  }
-  assert.deepEqual(readdirSync(locksFolder(c.home)), []);
-});
+for (const length of [250, 255]) {
+  test(`locks: the lock file name is bounded for any catalog bundle ID: one of ${length} characters installs, updates and uninstalls`, { skip }, async () => {
+    const c = setup();
+    // At 250 characters the receipt's name (`<bundleId>.json`) fits in 255 bytes; at 255 it cannot exist, which the update
+    // warns about (receipts are advisory) and the uninstall takes as no receipt. The install is into a --dir folder,
+    // which gets no receipt.
+    const bundleId = `dev.subset.${'b'.repeat(length - 11)}`;
+    const doc = structuredClone(template);
+    doc.apps[0].bundleId = bundleId;
+    const live = breaksImage({ bundleId });
+    const next = breaksImage({ bundleId, version: '0.1.1' });
+    const write = (version, image) => {
+      Object.assign(doc.apps[0].channels.live, { version, sha256: sha256(image) });
+      delete doc.apps[0].channels.beta;
+      writeFileSync(c.feedFile, JSON.stringify(doc));
+    };
+    write('0.1.0', live);
+    const elsewhere = path.join(c.base, 'elsewhere');
+    mkdirSync(elsewhere);
+    const installs = await run(runInstall, c, ['breaks', '--dir', elsewhere], { fetch: fakeFetch({ [LIVE_URL]: live }) });
+    assert.equal(installs.code, 0, installs.stderr);
+    assert.equal(plistVersion(path.join(elsewhere, 'Breaks.app')), '0.1.0');
+    makeApp(c.system, 'Breaks', { bundleId, version: '0.1.0', build: '1' });
+    write('0.1.1', next);
+    const updates = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: next }), now: NOW + 600_000, clock: () => NOW + 600_000 });
+    assert.equal(updates.code, 0, updates.stderr);
+    assert.equal(plistVersion(c.app), '0.1.1');
+    if (length === 250) {
+      assert.doesNotMatch(updates.stderr, /warning/);
+      assert.equal(JSON.parse(readFileSync(receiptFile(c.home, bundleId), 'utf8')).version, '0.1.1', 'the receipt is written');
+    } else assert.match(updates.stderr, /warning: the receipt .* cannot be written \(ENAMETOOLONG\); the app is updated without one/);
+    const removed = await uninstall(c, ['breaks'], { now: NOW + 600_000, clock: () => NOW + 660_000 });
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.doesNotMatch(removed.stderr, /receipt/);
+    assert.deepEqual(readdirSync(c.system), []);
+    assert.equal(readdirSync(c.trash).length, 2);
+    if (length === 250) assert.equal(existsSync(receiptFile(c.home, bundleId)), false);
+    assert.deepEqual(readdirSync(path.dirname(receiptFile(c.home, bundleId))), [], 'no receipt or temporary file is left');
+    // Contention still holds for it, and the lock names stay short.
+    const release = lockApp({ name: 'Breaks', bundleId }, { home: c.home });
+    try {
+      assert.ok(readdirSync(locksFolder(c.home)).every((name) => Buffer.byteLength(name) < 100));
+      assert.throws(() => lockApp({ name: 'Breaks', bundleId }, { home: c.home }), /another subset \(pid \d+\)/);
+      lockApp({ name: 'Breaks', bundleId: `${bundleId.slice(0, -1)}c` }, { home: c.home })();
+    } finally {
+      release();
+    }
+    assert.deepEqual(readdirSync(locksFolder(c.home)), []);
+  });
+}
 
 test('locks: a dead holder\'s lock that cannot be removed refuses only that app, naming it; the others update and every lock is released', { skip }, async () => {
   const c = setup();

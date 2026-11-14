@@ -160,6 +160,8 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   try {
     rmSync(receiptFile(home, app.bundleId), { force: true });
   } catch (error) {
+    // A name too long for the file system (a bundle ID near the catalog's 255 characters) is a receipt that cannot exist.
+    if (error.code === 'ENAMETOOLONG') return 0;
     return fail(`${app.name} was moved to the Trash, but its receipt ${receiptFile(home, app.bundleId)} could not be removed (${error.code ?? error.message}); remove it by hand.`);
   }
   return 0;
