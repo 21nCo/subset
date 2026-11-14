@@ -8,6 +8,7 @@ import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable, validateReceipt } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { INSTALL_TOOLS, InstallError, installApp, InterruptedError } from '../macos/install.mjs';
+import { recoverApps } from '../macos/update.mjs';
 import { compareNumbers, compareVersions, VerificationError } from '../macos/verify.mjs';
 
 const USAGE = 'Usage: subset install <app> [--beta] [--user] [--dir <folder>]';
@@ -158,6 +159,8 @@ export async function runInstall(args, { env, platform, home, stdout, stderr, fe
   } catch (error) {
     return fail(`${label} was not installed: ${failure(error)}`);
   }
+  // A copy an interrupted subset update left under a hidden name is put back first: it is then already installed.
+  for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
   const target = path.join(where.dir, `${app.appName}.app`);
   if (existsSync(target) || isLink(target)) return fail(`${label} was not installed: ${target} already exists; use subset update to change its version.`);
   const [copies] = await detectApps([app], { folders, home, plutil: tools.plutil });

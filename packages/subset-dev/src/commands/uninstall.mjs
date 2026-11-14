@@ -7,7 +7,7 @@ import { CatalogInvalidError, CatalogUnavailableError, loadCatalog, printable } 
 import { ApplicationsFoldersError, applicationsFolders, detectApps, receiptFile } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
 import { moveToTrash, prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
-import { pids, QUIT_TIMEOUT_MS, quitProcesses, RunningError, runningProcesses, UPDATE_TOOLS } from '../macos/update.mjs';
+import { pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, RunningError, runningProcesses, UPDATE_TOOLS } from '../macos/update.mjs';
 import { SIGNALS } from './install.mjs';
 
 const USAGE = 'Usage: subset uninstall <app> [--quit]';
@@ -58,6 +58,8 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
   if (catalog.warning) say(stderr, `subset: ${catalog.warning}`);
   const app = catalog.feed.apps.find((candidate) => candidate.id === options.app);
   if (!app) return fail(`there is no Subset Mac app "${printable(options.app)}"; subset list shows them.`);
+  // A copy an interrupted update or uninstall left under a hidden name is put back first, and so uninstalled too.
+  for (const note of recoverApps([app], folders)) say(stderr, `subset: note: ${note}`);
   const [copies] = await detectApps([app], { folders, home, plutil: tools.plutil });
   if (copies.length === 0) return fail(`${app.name} is not installed in /Applications or ~/Applications.`);
   const notMoved = `${app.name} was not uninstalled`;
@@ -85,7 +87,8 @@ export async function runUninstall(args, { env, platform, home, stdout, stderr, 
     }
   } catch (error) {
     if (error instanceof InterruptedError || controller.signal.aborted) {
-      say(stderr, `subset: ${notMoved}: interrupted by ${controller.signal.reason.signal}.`);
+      const left = error?.left ? ` ${error.left} could not be renamed back to its place; rename it back by hand.` : '';
+      say(stderr, `subset: ${notMoved}: interrupted by ${controller.signal.reason.signal}.${left}`);
       return 128 + SIGNALS[controller.signal.reason.signal];
     }
     if (error instanceof RunningError || error instanceof TrashError) return fail(`${notMoved}: ${error.message}.`);

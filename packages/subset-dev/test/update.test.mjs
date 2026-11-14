@@ -2,19 +2,21 @@
 // Every refusal, failure and interruption is checked against the invariant: the installed app is the old copy,
 // untouched (same inode and Info.plist), or the new verified one, never neither, and nothing staged is left behind.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInstall } from '../src/commands/install.mjs';
+import { runList } from '../src/commands/list.mjs';
 import { parseUninstallArgs, runUninstall } from '../src/commands/uninstall.mjs';
 import { NPM_LATEST_URL, newerLauncher, parseUpdateArgs, runUpdate } from '../src/commands/update.mjs';
 import { receiptFile } from '../src/macos/apps.mjs';
 import { moveToTrash, prepareTrash, renameIntoTrash, trashFolder, trashName } from '../src/macos/trash.mjs';
-import { decideUpdate, UPDATE_TOOLS } from '../src/macos/update.mjs';
+import { decideUpdate, recoverApps, swapApp, UPDATE_TOOLS } from '../src/macos/update.mjs';
 import { makeApp, writeReceipt } from './helpers.mjs';
 import { appFiles, attachedImages, makeImage, stubTools, stubToolsSkip } from './install-stubs.mjs';
 
@@ -659,4 +661,126 @@ test('an install and an update of the same app at once: the install refuses, the
   assert.equal(install.status, 1, install.stderr);
   assert.match(install.stderr, /already exists; use subset update to change its version/);
   assertUpdated(c, '0.1.1', '0.1.0');
+});
+
+test('a copy replaced between reading its version and identifying it is not updated (no downgrade of the replacement)', { skip }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.2.0' });
+  feed(c, { live: { version: '0.2.0', image } });
+  installed(c, { channel: 'live' });
+  // While its 0.1.0 Info.plist is read, a concurrent update puts 0.3.0 in its place.
+  const fetch = fakeFetch({ [LIVE_URL]: image });
+  const result = await update(c, ['breaks'], { fetch, extraEnv: { STUB_PLUTIL_REPLACE: c.app, STUB_PLUTIL_REPLACE_VERSION: '0.3.0' } });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Breaks in \/Applications was not updated: .*Breaks\.app was replaced while its version was read .*; run subset update again\./);
+  assert.equal(plistVersion(c.app), '0.3.0', 'the replacement stays');
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
+  assert.deepEqual(readdirSync(c.trash), []);
+  assert.deepEqual(fetch.calls, [], 'nothing downloaded');
+});
+
+test('swap: an installed copy removed before the swap is reported, and the staged copy stays where it was', { skip }, () => {
+  const c = setup();
+  const staged = makeApp(c.system, '.Breaks.app.subset-install-0', { bundleId: BUNDLE_ID, version: '0.1.1' });
+  const identity = lstatSync(staged);
+  assert.throws(() => swapApp({ staged, target: c.app, identity, receipt: null, trash: c.trash, appName: 'Breaks', warn: () => {} }), /Breaks\.app was changed or removed while it was being updated/);
+  assert.deepEqual(readdirSync(c.system), ['.Breaks.app.subset-install-0.app']);
+});
+
+test('trash on another volume: the copy in the Trash and the removal concern the app copied, not a new one put at its path', { skip }, async () => {
+  const c = setup();
+  const date = new Date(2026, 10, 14, 9, 5, 7);
+  const exdev = () => {
+    throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' });
+  };
+  const script = (name, body) => {
+    const file = path.join(c.base, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`);
+    chmodSync(file, 0o755);
+    return { ...tools, ditto: file };
+  };
+  // While the copy runs, a concurrent install or update puts a new Breaks.app at the path.
+  const newCopy = `mkdir -p "${c.app}/Contents" && echo new > "${c.app}/Contents/new-copy"`;
+  const old = installed(c, {});
+  const copied = await moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date, tools: script('ditto-replaced', `${newCopy} && cp -R "$1/." "$2"`), rename: exdev });
+  assert.equal(readFileSync(path.join(copied, 'Contents', 'old-copy'), 'utf8'), '0.1.0', 'the old copy is in the Trash');
+  assert.equal(readFileSync(path.join(c.app, 'Contents', 'new-copy'), 'utf8'), 'new\n', 'the new copy stays');
+  assert.notEqual(lstatSync(c.app).ino, old.ino);
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app'], 'nothing set aside is left');
+
+  // The copy fails, and the app cannot be renamed back because a new one took its place: the message says where it is.
+  rmSync(c.app, { recursive: true });
+  rmSync(c.trash, { recursive: true });
+  mkdirSync(c.trash);
+  installed(c, {});
+  const failed = await moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date, tools: script('ditto-replaced-fails', `${newCopy} && echo "ditto: No space left on device" >&2 && exit 1`), rename: exdev }).catch((error) => error);
+  assert.match(failed.message, /ditto could not copy .*, and it could not be renamed back \(\w+\): it is at .*\/\.Breaks\.app\.subset-trash-\d+-[0-9a-f]{12}$/);
+  assert.equal(readFileSync(path.join(failed.left, 'Contents', 'old-copy'), 'utf8'), '0.1.0', 'the old copy is kept, set aside');
+  assert.deepEqual(readdirSync(c.trash), []);
+
+  // An interrupted copy: the incomplete copy is removed from the Trash and the app is renamed back, the same copy.
+  rmSync(c.system, { recursive: true });
+  mkdirSync(c.system);
+  const before = installed(c, {});
+  const controller = new AbortController();
+  const interrupted = moveToTrash(c.app, { trash: c.trash, appName: 'Breaks', now: date, tools: script('ditto-slow', 'mkdir -p "$2/Contents" && echo partial > "$2/Contents/partial" && sleep 30'), rename: exdev, signal: controller.signal });
+  setTimeout(() => controller.abort(new Error('stopped')), 300);
+  await assert.rejects(interrupted, /stopped/);
+  assert.equal(lstatSync(c.app).ino, before.ino, 'the app is back, untouched');
+  assert.deepEqual(readdirSync(c.system), ['Breaks.app']);
+  assert.deepEqual(readdirSync(c.trash), [], 'the incomplete copy is removed');
+});
+
+// A pid that no process has any more.
+function deadPid() {
+  return spawnSync(process.execPath, ['-e', '']).pid;
+}
+
+test('an app an interrupted update left under a hidden name is put back by update and install, and named by list', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  // A SIGKILL between the two renames of a swap: the old copy under its backup name, from a subset no longer running.
+  const backup = path.join(c.system, `.Breaks.app.subset-update-${deadPid()}-0123456789ab`);
+  renameSync(c.app, backup);
+
+  const listed = await run(runList, c, [], { plutil: tools.plutil });
+  assert.equal(listed.code, 0);
+  assert.match(listed.stderr, new RegExp(`subset: note: Breaks is missing from /Applications, and an interrupted subset update or uninstall left it at ${backup.replaceAll('.', '\\.')}; subset update breaks puts it back\\.`));
+  assert.equal(existsSync(backup), true, 'list changes nothing');
+
+  const updated = await update(c, ['breaks']);
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.match(updated.stderr, new RegExp(`^subset: note: Breaks was put back at ${c.app.replaceAll('.', '\\.')}: an interrupted subset update or uninstall had left it at ${backup.replaceAll('.', '\\.')}\\.\n`));
+  assert.equal(updated.stdout, 'Breaks 0.1.0 is up to date (/Applications).\n');
+  assertOldUntouched(c, old);
+
+  renameSync(c.app, backup);
+  const install = await run(runInstall, c, ['breaks']);
+  assert.equal(install.code, 1);
+  assert.match(install.stderr, /note: Breaks was put back at .*\nsubset: Breaks 0\.1\.0 was not installed: .*Breaks\.app already exists; use subset update/);
+  assertOldUntouched(c, old);
+});
+
+test('recovery leaves a copy alone while the subset that set it aside runs, and when there are several', { skip }, async () => {
+  const c = setup();
+  const app = { id: 'breaks', name: 'Breaks', appName: 'Breaks' };
+  const folders = [{ label: '/Applications', dir: c.system }];
+  installed(c, {});
+  const busy = path.join(c.system, '.Breaks.app.subset-trash-4242-0123456789ab');
+  renameSync(c.app, busy);
+  assert.deepEqual(recoverApps([app], folders, { running: (pid) => pid === 4242 }), [
+    `Breaks is missing from /Applications, and an interrupted subset update or uninstall left it at ${busy}; subset (pid 4242) is still updating or uninstalling it.`
+  ]);
+  const second = path.join(c.system, '.Breaks.app.subset-update-4243-0123456789ab');
+  mkdirSync(second);
+  const notes = recoverApps([app], folders, { running: () => false });
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], new RegExp(`; rename the copy to keep to ${c.app.replaceAll('.', '\\.')}\\.$`));
+  assert.deepEqual(readdirSync(c.system).sort(), [path.basename(busy), path.basename(second)].sort(), 'nothing is renamed');
+  // A staged (unverified) copy alone is never put back.
+  rmSync(c.system, { recursive: true });
+  mkdirSync(c.system);
+  mkdirSync(path.join(c.system, '.Breaks.app.subset-install-0123456789ab'));
+  assert.deepEqual(recoverApps([app], folders, { running: () => false }), []);
 });

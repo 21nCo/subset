@@ -9,17 +9,18 @@
 // On another volume the backup is copied to the Trash afterwards and then removed. So the old app or the new verified
 // one is always there: a signal before step 1 leaves the old app untouched, and the steps cannot be split by one. Only
 // a SIGKILL or a power loss between steps 1 and 2 can leave <appName>.app missing, and then both copies are still in
-// the folder under hidden names.
+// the folder under hidden names; recoverApps(), which the next subset install, update or uninstall runs first, renames
+// the old one back.
 //
 // A running app is never replaced: runningProcesses() finds the processes whose executable is inside the bundle (from
 // ps), and quitProcesses() sends them SIGTERM and waits for them to exit.
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { INSTALL_TOOLS, InstallError, installApp } from './install.mjs';
-import { moveToTrash, renameIntoTrash } from './trash.mjs';
+import { hiddenName, moveToTrash, renameIntoTrash } from './trash.mjs';
 import { compareNumbers, compareVersions, runTool } from './verify.mjs';
 
 export const UPDATE_TOOLS = Object.freeze({ ...INSTALL_TOOLS, ps: '/bin/ps', open: '/usr/bin/open' });
@@ -152,7 +153,7 @@ const sameFile = (stat, identity) => stat.dev === identity.dev && stat.ino === i
  * was and `staged` where it was.
  */
 export function swapApp({ staged, target, identity, receipt, trash, appName, warn, now = new Date() }) {
-  const backup = path.join(path.dirname(target), `.${path.basename(target)}.subset-update-${randomBytes(6).toString('hex')}`);
+  const backup = hiddenName(path.dirname(target), appName, 'update');
   const changed = `${target} was changed or removed while it was being updated (by another subset install, update or uninstall?)`;
   try {
     renameSync(target, backup);
@@ -212,9 +213,73 @@ export async function updateApp({ app, release, beta, target, identity, receipt,
   try {
     return { path: target, trashed: await moveToTrash(swapped.backup, { trash, appName: app.appName, now: now(), tools }) };
   } catch (error) {
-    warn(`the previous copy could not be moved to the Trash (${error.message}); it is at ${swapped.backup}`);
+    warn(`the previous copy could not be moved to the Trash (${error.message}); it is at ${error.left ?? swapped.backup}`);
     return { path: target, trashed: null };
   }
+}
+
+// Whether process `pid` still runs (a process of another user counts).
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Finds each app of `apps` whose `<appName>.app` is missing from one of `folders` while a copy set aside by a subset
+ * update or a cross-volume uninstall (`.<appName>.app.subset-update-<pid>-*` or `.subset-trash-<pid>-*`, trash.mjs) is
+ * still beside it: what a SIGKILL or a power loss between two renames leaves. When there is one such copy and the
+ * subset that set it aside (its pid) is no longer running, it is renamed back to `<appName>.app` (unless `restore` is
+ * false, for subset list). Returns a note for each app put back or found missing. A staged copy
+ * (`.subset-install-*`) is never put back: it may not have been verified.
+ */
+export function recoverApps(apps, folders, { restore = true, running = alive } = {}) {
+  const notes = [];
+  for (const app of apps) {
+    const pattern = new RegExp(`^\\.${escapeRegExp(app.appName)}\\.app\\.subset-(?:update|trash)-(\\d+)-[0-9a-f]{12}$`);
+    for (const folder of folders) {
+      const target = path.join(folder.dir, `${app.appName}.app`);
+      let names;
+      try {
+        lstatSync(target);
+        continue;
+      } catch {
+        try {
+          names = readdirSync(folder.dir);
+        } catch {
+          continue;
+        }
+      }
+      const left = names.flatMap((name) => {
+        const match = pattern.exec(name);
+        return match ? [{ file: path.join(folder.dir, name), pid: Number(match[1]) }] : [];
+      });
+      if (left.length === 0) continue;
+      const where = left.map((entry) => entry.file).join(', ');
+      const busy = left.find((entry) => entry.pid !== process.pid && running(entry.pid));
+      let why;
+      if (busy) why = `subset (pid ${busy.pid}) is still updating or uninstalling it`;
+      else if (left.length > 1) why = `rename the copy to keep to ${target}`;
+      else if (!restore) why = `subset update ${app.id} puts it back`;
+      else {
+        try {
+          if (!lstatSync(left[0].file).isDirectory()) throw Object.assign(new Error('not a folder'), { code: 'ENOTDIR' });
+          renameSync(left[0].file, target);
+          notes.push(`${app.name} was put back at ${target}: an interrupted subset update or uninstall had left it at ${left[0].file}.`);
+          continue;
+        } catch (error) {
+          why = `it could not be renamed back (${error.code ?? error.message}); rename it to ${target}`;
+        }
+      }
+      notes.push(`${app.name} is missing from ${folder.label}, and an interrupted subset update or uninstall left it at ${where}; ${why}.`);
+    }
+  }
+  return notes;
 }
 
 /** Opens the app by its bundle ID (`open -b`), after it was quit for an update. Resolves why it failed, or undefined. */

@@ -3,12 +3,13 @@
 // (macos/update.mjs). A running app is not replaced: the command refuses, or with --quit quits it first and reopens it
 // afterwards. With no apps named it also says when a newer subset.dev is on npm.
 import { lstatSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import process from 'node:process';
 import { CatalogInvalidError, CatalogUnavailableError, download, loadCatalog, MAX_FEED_BYTES, printable } from '../feed.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps } from '../macos/apps.mjs';
 import { InterruptedError } from '../macos/install.mjs';
 import { prepareTrash, TrashError, trashFolder } from '../macos/trash.mjs';
-import { decideUpdate, pids, QUIT_TIMEOUT_MS, quitProcesses, reopenApp, RunningError, runningProcesses, UPDATE_TOOLS, updateApp } from '../macos/update.mjs';
+import { decideUpdate, pids, QUIT_TIMEOUT_MS, quitProcesses, recoverApps, reopenApp, RunningError, runningProcesses, UPDATE_TOOLS, updateApp } from '../macos/update.mjs';
 import { compareVersions } from '../macos/verify.mjs';
 import { failure, receiptFor, SIGNALS } from './install.mjs';
 
@@ -109,7 +110,13 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
     return 1;
   }
 
-  // What to do with each installed copy, decided from its Info.plist and receipt before anything is downloaded.
+  // A copy an interrupted update left under a hidden name is put back first.
+  for (const note of recoverApps(apps, folders)) say(stderr, `subset: note: ${note}`);
+  // What to do with each installed copy, decided from its Info.plist and receipt before anything is downloaded. The
+  // copy is identified (device and inode) before and after its Info.plist is read: when another subset install or
+  // update replaced it in between, the version read may not be this copy's, so it is not updated.
+  const bundles = apps.flatMap((app) => folders.map((folder) => path.join(folder.dir, `${app.appName}.app`)));
+  const before = new Map(bundles.map((bundle) => [bundle, statOf(bundle)]));
   const installed = await detectApps(apps, { folders, home, plutil: tools.plutil });
   const channel = options.beta ? 'beta' : 'live';
   const updates = [];
@@ -126,8 +133,11 @@ export async function runUpdate(args, { env, platform, home, stdout, stderr, fet
       } else {
         // The copy checked, by device and inode: the swap refuses to replace anything else.
         const identity = statOf(copy.path);
-        if (identity) updates.push({ app, copy, release: decision.release, identity });
-        else fail(`${app.name} in ${where} was not updated: ${copy.path} is gone.`);
+        const seen = before.get(copy.path);
+        if (!identity) fail(`${app.name} in ${where} was not updated: ${copy.path} is gone.`);
+        else if (!seen || seen.dev !== identity.dev || seen.ino !== identity.ino) {
+          fail(`${app.name} in ${where} was not updated: ${copy.path} was replaced while its version was read (by another subset install or update?); run subset update again.`);
+        } else updates.push({ app, copy, release: decision.release, identity });
       }
     }
   });
