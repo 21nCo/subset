@@ -1,6 +1,6 @@
 // The commands of `subset` other than its tools: `subset <verb> [arguments...]`. Their names are reserved, so no tool
 // can take one (test/cli.test.mjs). A verb marked `pending` is announced but not available in this version: it prints
-// that it is not available yet and exits 2 (SET-230 and SET-231 add them). cli.mjs runs the others.
+// that it is not available yet and exits 2 (SET-231 adds them). cli.mjs runs the others.
 export const VERBS = Object.freeze({
   list: Object.freeze({
     usage: 'subset list [--beta] [--json] [--refresh]',
@@ -8,10 +8,9 @@ export const VERBS = Object.freeze({
     details: 'Shows each Subset Mac app with its installed and live versions, and each tool with its live version.\n--beta adds the beta versions, --json prints JSON and --refresh skips the cached catalog.\nInstalled apps are found on macOS only, in /Applications and ~/Applications.'
   }),
   install: Object.freeze({
-    pending: true,
-    usage: 'subset install <app> [--beta] [--user]',
+    usage: 'subset install <app> [--beta] [--user] [--dir <folder>]',
     summary: 'Install a Subset Mac app',
-    details: 'Downloads the app, checks its checksum, signature and notarization, and installs it in /Applications\n(or ~/Applications when /Applications is not writable). --user installs it in ~/Applications and --beta\ninstalls the beta.'
+    details: 'Downloads the app, checks its checksum, signature, team, notarization, bundle ID and version, and installs it in\n/Applications (or ~/Applications when /Applications is not writable). --user installs it in ~/Applications,\n--dir in another folder, and --beta installs the beta. An app that is already there is left alone (subset update).'
   }),
   update: Object.freeze({
     pending: true,

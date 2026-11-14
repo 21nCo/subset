@@ -33,13 +33,13 @@ Besides the tools, `subset` has its own commands. Their names are reserved: no t
 | Command | Does |
 | --- | --- |
 | `subset list [--beta] [--json] [--refresh]` | Lists the Subset tools and Mac apps, installed and available ([below](#subset-list)) |
-| `subset install <app> [--beta] [--user]` | Installs a Subset Mac app after checking its checksum, signature and notarization (not available yet) |
+| `subset install <app> [--beta] [--user] [--dir <folder>]` | Installs a Subset Mac app after checking its checksum, signature, team and notarization ([below](#subset-install)) |
 | `subset update [<app>...] [--beta] [--quit]` | Updates the installed Subset Mac apps (not available yet) |
 | `subset uninstall <app>` | Moves a Subset Mac app to the Trash (not available yet) |
 | `subset help [<command>]` | Shows the help, or a command's usage (also `subset <command> --help`) |
 | `subset version` | Shows the subset.dev version |
 
-In this version, `install`, `update` and `uninstall` only print `subset <command> is not available yet.` and exit with code 2; later versions add them.
+In this version, `update` and `uninstall` only print `subset <command> is not available yet.` and exit with code 2; a later version adds them.
 
 ## subset list
 
@@ -102,7 +102,45 @@ A valid feed is cached in `~/Library/Caches/Subset/catalog.json` (Linux: `$XDG_C
 
 Every key is always present. `platform` is Node.js's `process.platform`. `appDetection` is `supported` on macOS and `unsupported` elsewhere, where every `installed` is `null`; on macOS `installed` lists the copies found (`[]` for none), with `folder` `/Applications` or `~/Applications`, `version` and `build` from `Info.plist` (`null` when missing) and `channel` `live`, `beta` or `null` (no matching receipt). `live` and `beta` are `null` when the feed has no such channel; the document always has both, whatever `--beta` says. A tool's `live` and `beta` are its `latest` and `beta` dist-tags, or `null`. `cached` is true when the cached copy was used, and `fetchedAt` is when that copy was fetched.
 
-`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, searched instead of `/Applications` and `~/Applications` (receipts still name the real folders).
+`SUBSET_APPLICATIONS_DIRS` is for tests only: two absolute folders, separated by `:`, that stand in for `/Applications` and `~/Applications`. `subset list` searches them and `subset install` installs into them instead; receipts still name the real folders.
+
+## subset install
+
+`subset install <app>` installs a Subset Mac app from the [catalog feed](#the-catalog-feed-and-its-cache), and only after proving that it is ours:
+
+```console
+$ subset install breaks
+Downloading Breaks 0.1.0 from https://github.com/21nCo/subset/releases/download/macos/breaks/v0.1.0/Breaks-0.1.0.dmg
+Verifying Breaks.app
+Installed Breaks 0.1.0 in /Applications/Breaks.app
+```
+
+1. It downloads the channel's disk image over HTTPS (following at most 5 redirects, each to an `https:` URL) into a new private folder (`mkdtemp`, mode 0700), and checks that its SHA-256 is the feed's. The feed's download URL must start with `https://github.com/21nCo/subset/releases/download/`; the feed schema enforces this, and `subset install` checks it again.
+2. It attaches the image read-only and hidden (`hdiutil attach -readonly -nobrowse -noautoopen -mountrandom <private folder>`) and requires one volume with exactly one `.app` at its root, named `<appName>.app`.
+3. It copies the app with `ditto` to a hidden staging name in the destination folder (`.<appName>.app.subset-install-<random>`), and clears the user file flags (`uchg`, `uappnd`) and ACLs `ditto` copied from the image (`find -P <copy> -exec chflags -h nouchg,nouappnd {} +`, then `chmod -h -N`), so nothing in the copy is protected against removal. Symbolic links are never followed: a link in the app to a file elsewhere leaves that file as it is.
+4. It verifies the **staged copy**, so nothing changes between the checks and the install but the final rename:
+   - `codesign --verify --deep --strict` accepts it (the *signature* check);
+   - `codesign -d --verbose=2` reports `TeamIdentifier=SAZVPX4CAA` (the *team* check);
+   - `spctl --assess --type execute -vv` accepts it with `source=Notarized Developer ID` (the *notarization* check);
+   - its `Info.plist` (read with `plutil`) has the feed's `bundleId` as `CFBundleIdentifier` (the *bundle ID* check), the channel's version as `CFBundleShortVersionString` and, for a beta, its build as `CFBundleVersion` (the *version* check), and an `LSMinimumSystemVersion` no higher than the running macOS (`sw_vers -productVersion`, the *macOS version* check).
+5. It renames the staged copy to `<appName>.app` (giving it the image's permissions, never group- or world-writable) and writes the [receipt](#installed-apps-macos) (its `installedAt` is that moment), then detaches the image by its device (`hdiutil detach /dev/diskN`, then forced, up to 3 times until `hdiutil info` no longer lists it) and removes the private folder. If the image cannot be detached, it stays attached with the private folder, and `subset install` prints a warning naming them; a staged copy or private folder that cannot be removed gets a warning too.
+
+Signature, team and notarization are what `codesign` and `spctl` report; `subset install` never parses the binary itself. It never uses `sudo` or asks for an administrator password.
+
+**Destination.** `/Applications` when you can write to it, otherwise `~/Applications` (created if missing). `--user` always uses `~/Applications`; `--dir <folder>` installs into an existing folder (used by tests). `--beta` installs the beta channel. The receipt (`~/Library/Application Support/Subset/receipts/<bundleId>.json`, `subset.receipt@1`) is written for `/Applications` and `~/Applications` only: a `--dir` elsewhere, or a home folder outside `/Users` that the receipt schema cannot name, gets none. There is one receipt per app, so installing next to a copy in the other Applications folder moves the receipt to the new copy, and `subset install` says so (`subset: note: Breaks 0.1.0 is also installed in ~/Applications; the receipt now describes the copy in /Applications.`).
+
+**Refusals.** It exits with code 1, installs nothing and writes no receipt when:
+
+- `<appName>.app` already exists in the destination (changing its version is `subset update`), or a copy in `/Applications` or `~/Applications` is newer than the channel's version (or, for a beta of the same version, has a higher build): `subset install` never downgrades;
+- any step or check fails. The message names it, for example `subset: Breaks 0.1.0 was not installed: the team check failed: it is not signed by the Subset team SAZVPX4CAA (TeamIdentifier: not set)`. The steps are *destination*, *download*, *checksum*, *image*, *copy*, *verify*, *install* and *receipt*, and the checks are *signature*, *team*, *notarization*, *bundle ID*, *version* and *macOS version*. A failed step removes the staged copy (clearing its flags and ACLs again, for a copy stopped part-way, and making its read-only folders writable first), detaches the image and removes the private folder, warning about anything it could not remove or detach.
+
+Versions and builds are compared as whole numbers, whatever their size. In every message, a control character in the feed's app name, an installed copy's version, a path or a tool's output is shown as a `\xNN` or `\uNNNN` escape, as in `subset list`.
+
+On Linux and Windows it exits with code 1 (`Mac apps can be installed only on macOS.`); an unknown option or a missing app is a usage error (exit code 2).
+
+**Interruptions and concurrent installs.** A Ctrl-C, SIGTERM or hangup before the rename stops the install, removes the staged copy and the private folder, detaches the image and exits with 128 plus the signal number (130, 143 or 129), leaving the destination as it was. The tools (`plutil` too) run in their own process group, so a Ctrl-C reaches only `subset install`, which stops the running tool's whole process group (also when the tool has exited and a process it started still runs), with SIGTERM and then SIGKILL 5 seconds later, and starts cleaning up only once no process is left in that group (if one is still there 5 seconds after the SIGKILL, it goes on and the tool's output says so); the cleanup itself is not interrupted, and further signals are ignored until it ends. A signal after the rename changes nothing: the app and its receipt stay, the image is detached, and the install succeeds. The rename and the receipt happen together, without giving a signal handler a chance to run in between: the app is renamed only when its receipt is ready, and taken back out if the receipt cannot be put in place; if it cannot be taken back out either, it stays and the message tells you to remove it by hand. Of two `subset install` runs for the same app at once, the first to rename wins; `rename(2)` does not replace a folder that is not empty, so the other fails with `already exists` and removes its staged copy.
+
+**Not covered.** Another program or local user replacing files in the staging folder between the checks and the rename, a compromised Developer ID key and a malicious root user are outside what `subset install` defends against (SET-240).
 
 ## How it works
 
@@ -130,4 +168,4 @@ Add the published package and its bin to `src/tools.mjs`. `npm run check` fails 
 
 ## Superfunctions packages evaluated
 
-None apply: the launcher is a dispatcher with no auth, storage, MCP or UI. `subset list` reads one static JSON feed with Node.js's `fetch` and keeps one cache file; it validates the feed with its own small validator for the keywords the catalog schemas use, so the launcher keeps no dependencies.
+None apply: the launcher is a dispatcher with no auth, storage, MCP or UI. `subset list` reads one static JSON feed with Node.js's `fetch` and keeps one cache file; it validates the feed with its own small validator for the keywords the catalog schemas use, so the launcher keeps no dependencies. `subset install` downloads one file with `fetch` and asks the macOS tools (`hdiutil`, `ditto`, `find`, `chflags`, `chmod`, `codesign`, `spctl`, `plutil`, `sw_vers`) for everything else; `filefn` (uploads and storage adapters) does not cover verifying a signed macOS app.

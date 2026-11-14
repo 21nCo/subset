@@ -10,7 +10,12 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { readBounded, validateReceipt } from '../feed.mjs';
 
-const run = promisify(execFile);
+const execFileAsync = promisify(execFile);
+// plutil for `subset list`: { code: 0, stdout }, or rejects when it fails, takes too long or writes too much.
+const runPlutil = async (file, args, { timeout }) => ({
+  code: 0,
+  stdout: (await execFileAsync(file, args, { encoding: 'utf8', timeout, maxBuffer: MAX_PLIST_JSON_BYTES })).stdout
+});
 export const PLUTIL = '/usr/bin/plutil';
 const PLUTIL_TIMEOUT_MS = 10_000;
 const MAX_PLIST_JSON_BYTES = 1024 * 1024;
@@ -60,20 +65,26 @@ function channelOf(receipt, logicalPath, copy) {
   return receipt.channel;
 }
 
-// The Info.plist of an app bundle as JSON, or undefined when the bundle, its Contents folder or its Info.plist is not a
-// plain directory, directory and file (a symbolic link at any of them could name a plist outside the bundle), or plutil
-// cannot read it.
-async function readInfoPlist(bundle, plutil) {
+/**
+ * The Info.plist of an app bundle as JSON, or undefined when the bundle, its Contents folder or its Info.plist is not a
+ * plain directory, directory and file (a symbolic link at any of them could name a plist outside the bundle), or plutil
+ * cannot read it. `subset install` reads the staged copy's with it too (verify.mjs), passing `runTool` as `run` and its
+ * AbortSignal as `signal`: plutil then runs like every other install tool, and an abort rejects with its reason instead of
+ * resolving undefined. `run(file, args, { signal, timeout })` resolves { code, stdout }.
+ */
+export async function readInfoPlist(bundle, plutil, { run = runPlutil, signal } = {}) {
   try {
     if (!(await lstat(bundle)).isDirectory()) return undefined;
     const contents = path.join(bundle, 'Contents');
     if (!(await lstat(contents)).isDirectory()) return undefined;
     const file = path.join(contents, 'Info.plist');
     if (!(await lstat(file)).isFile()) return undefined;
-    const { stdout } = await run(plutil, ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', timeout: PLUTIL_TIMEOUT_MS, maxBuffer: MAX_PLIST_JSON_BYTES });
+    const { code, stdout } = await run(plutil, ['-convert', 'json', '-o', '-', file], { signal, timeout: PLUTIL_TIMEOUT_MS });
+    if (code !== 0 || stdout.length > MAX_PLIST_JSON_BYTES) return undefined;
     const info = JSON.parse(stdout);
     return typeof info === 'object' && info !== null && !Array.isArray(info) ? info : undefined;
   } catch {
+    if (signal?.aborted) throw signal.reason;
     return undefined;
   }
 }
