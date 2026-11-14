@@ -1,7 +1,9 @@
 // subset <tool> runs the command bundled in an installed Subset Mac app (SET-232). The launcher runs as its own process
 // with install-preload.mjs, which makes it report darwin and runs stand-ins for plutil and codesign. Apps are folders
 // standing in for /Applications and ~/Applications (SUBSET_APPLICATIONS_DIRS). The codesign stand-in judges the file
-// it is given by `<file>.signature.json` beside it ({ valid, team }; none means unsigned) and logs each call.
+// it is given by `<file>.signature.json` beside it ({ valid, team, developerId }; none means unsigned) and logs each call.
+// `team` is the TeamIdentifier the signature claims (an ad-hoc signature may claim any); `developerId` is the team of
+// the Apple-issued Developer ID certificate that signed it, if any, which a code requirement checks.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -10,7 +12,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, beforeEach, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { findAppHelper, helperDeclarationProblems } from '../src/helpers.mjs';
+import { DEVELOPER_ID_REQUIREMENT, findAppHelper, helperDeclarationProblems } from '../src/helpers.mjs';
 import { readMacosReleaseManifests } from '../../../scripts/release-macos.mjs';
 import { resolveTool, TOOLS } from '../src/tools.mjs';
 import { makeApp, stubPlutil } from './helpers.mjs';
@@ -38,6 +40,15 @@ try { signature = JSON.parse(fs.readFileSync(target + '.signature.json', 'utf8')
 if (args.length === 3 && args[0] === '--verify' && args[1] === '--strict') {
   if (!signature) { console.error(target + ': code object is not signed at all'); process.exit(1); }
   if (signature.valid === false) { console.error(target + ': invalid signature (code or signature have been modified)'); process.exit(1); }
+} else if (args.length === 4 && args[0] === '--verify' && args[1] === '--strict' && args[2].startsWith('-R=')) {
+  // Models the requirement: a certificate chain to Apple's Developer ID CA, ending in a Developer ID Application
+  // certificate whose subject OU is the team the requirement names.
+  const requirement = args[2].slice(3);
+  const prefix = 'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = ';
+  const team = requirement.startsWith(prefix) ? /^"([A-Z0-9]+)"$/.exec(requirement.slice(prefix.length))?.[1] : undefined;
+  if (!team) { console.error('stub codesign: unexpected requirement ' + requirement); process.exit(64); }
+  if (!signature) { console.error(target + ': code object is not signed at all'); process.exit(1); }
+  if (signature.developerId !== team) { console.error('test-requirement: code failed to satisfy specified code requirement(s)'); process.exit(3); }
 } else if (args.length === 3 && args[0] === '-d' && args[1] === '--verbose=2') {
   if (!signature) { console.error(target + ': code object is not signed at all'); process.exit(1); }
   console.error('Executable=' + target + '\\nTeamIdentifier=' + (signature.team || 'not set'));
@@ -56,7 +67,13 @@ writeFileSync(
   `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ tool: 'npm', args: process.argv.slice(2) }) + '\\n'); process.exit(7);`
 );
 
-const SUBSET = { valid: true, team: 'SAZVPX4CAA' };
+const SUBSET = { valid: true, team: 'SAZVPX4CAA', developerId: 'SAZVPX4CAA' };
+// The codesign calls that check `target`'s signature, in order.
+const signatureChecks = (target) => [
+  ['--verify', '--strict', target],
+  ['-d', '--verbose=2', target],
+  ['--verify', '--strict', `-R=${DEVELOPER_ID_REQUIREMENT}`, target]
+];
 // A native helper: prints its arguments, SUBSET_COMMAND and process ID as JSON and exits with HELPER_EXIT. With
 // HELPER_WAIT it prints `ready <pid>`, then reports each signal it gets and exits 0 a moment after the first; with
 // HELPER_DIE it prints `ready <pid>` and waits to be killed.
@@ -126,7 +143,7 @@ test('runs an installed app\'s native helper with the arguments unchanged, after
   assert.deepEqual(report.args, ['status', '--json', 'two words', '--help']);
   assert.equal(report.command, 'subset system');
   const helper = path.join(bundle, 'Contents', 'Helpers', 'subset-system');
-  assert.deepEqual(calls('codesign'), [['--verify', '--strict', helper], ['-d', '--verbose=2', helper]]);
+  assert.deepEqual(calls('codesign'), signatureChecks(helper));
   assert.deepEqual(calls('npm'), []);
 });
 
@@ -144,7 +161,7 @@ test('loads a node helper into its own process, as it loads an npm tool, without
   assert.equal(report.command, 'subset timer');
   assert.equal(report.file, path.join(bundle, 'Contents', 'Resources', 'timer-cli', 'dist', 'cli.mjs'));
   // A node helper has no signature of its own: the app's signature seals it.
-  assert.deepEqual(calls('codesign'), [['--verify', '--strict', bundle], ['-d', '--verbose=2', bundle]]);
+  assert.deepEqual(calls('codesign'), signatureChecks(bundle));
   assert.deepEqual(calls('npm'), []);
 });
 
@@ -197,7 +214,11 @@ test('refuses a helper that is not signed by the Subset team, an invalid or miss
     ['an ad-hoc signature', 'system', { signature: { valid: true } }, /it is not signed by the Subset team SAZVPX4CAA \(TeamIdentifier: not set\)/],
     ['an invalid signature', 'point-in-time', { signature: { valid: false, team: 'SAZVPX4CAA' } }, /its code signature is not valid \(codesign: .*modified\)/],
     ['no signature', 'system', { signature: null }, /its code signature is not valid \(codesign: .*not signed at all\)/],
-    ['a node helper in an app of another team', 'timer', { appSignature: { valid: true, team: 'ABCDE12345' } }, /the app: it is not signed by the Subset team SAZVPX4CAA \(TeamIdentifier: ABCDE12345\)/]
+    ['a node helper in an app of another team', 'timer', { appSignature: { valid: true, team: 'ABCDE12345' } }, /the app: it is not signed by the Subset team SAZVPX4CAA \(TeamIdentifier: ABCDE12345\)/],
+    // codesign --sign - --team-identifier SAZVPX4CAA: the claimed team without a Subset Developer ID certificate.
+    ['an ad-hoc signature claiming the Subset team', 'system', { signature: { valid: true, team: 'SAZVPX4CAA' } }, /Contents\/Helpers\/subset-system: it is not signed with the Subset team's Developer ID certificate \(codesign: test-requirement: code failed to satisfy specified code requirement\(s\)\)/],
+    ['a Developer ID certificate of another team claiming the Subset team', 'point-in-time', { signature: { valid: true, team: 'SAZVPX4CAA', developerId: 'ABCDE12345' } }, /it is not signed with the Subset team's Developer ID certificate/],
+    ['a node helper in an ad-hoc app claiming the Subset team', 'minutes', { appSignature: { valid: true, team: 'SAZVPX4CAA' } }, /the app: it is not signed with the Subset team's Developer ID certificate \(codesign: test-requirement: code failed to satisfy specified code requirement\(s\)\)/]
   ];
   for (const [label, name, options, message] of cases) {
     rmSync(log, { force: true });
@@ -307,18 +328,33 @@ test('the launcher tools and the helper declarations must agree', () => {
 });
 
 // On macOS, with the real codesign and plutil: a helper ad-hoc signed (as a local build is) is refused at the team
-// check and does not run.
-test('with the real codesign, refuses an ad-hoc signed native helper at the team check', { skip: process.platform !== 'darwin' && 'needs macOS' }, () => {
+// check, and one ad-hoc signed claiming the Subset team (--team-identifier) is refused at the Developer ID requirement,
+// which codesign parses and evaluates (a requirement it could not parse would fail with another message). Neither runs.
+test('with the real codesign, refuses ad-hoc signed native helpers at the team and Developer ID checks', { skip: process.platform !== 'darwin' && 'needs macOS' }, () => {
   const bundle = makeApp(apps, 'Subset System', { bundleId: 'dev.subset.system', version: '1.0.0', build: '1' });
   const helper = path.join(bundle, 'Contents', 'Helpers', 'subset-system');
   mkdirSync(path.dirname(helper), { recursive: true });
   copyFileSync('/usr/bin/true', helper);
+  const run = () =>
+    spawnSync(process.execPath, [cli, 'system', 'status'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: root, SUBSET_APPLICATIONS_DIRS: `${apps}${path.delimiter}${userApps}` }
+    });
+
   execFileSync('/usr/bin/codesign', ['--sign', '-', '--force', helper]);
   execFileSync('/usr/bin/codesign', ['--verify', '--strict', helper]);
-  const result = spawnSync(process.execPath, [cli, 'system', 'status'], {
-    encoding: 'utf8',
-    env: { ...process.env, HOME: root, SUBSET_APPLICATIONS_DIRS: `${apps}${path.delimiter}${userApps}` }
-  });
-  assert.equal(result.status, 1);
-  assert.equal(result.stderr, `subset: ${bundle} was not run: Contents/Helpers/subset-system: it is not signed by the Subset team SAZVPX4CAA (TeamIdentifier: not set).\n`);
+  const adHoc = run();
+  assert.equal(adHoc.status, 1);
+  assert.equal(adHoc.stderr, `subset: ${bundle} was not run: Contents/Helpers/subset-system: it is not signed by the Subset team SAZVPX4CAA (TeamIdentifier: not set).\n`);
+
+  execFileSync('/usr/bin/codesign', ['--sign', '-', '--force', '--team-identifier', 'SAZVPX4CAA', helper]);
+  execFileSync('/usr/bin/codesign', ['--verify', '--strict', helper]);
+  // The forged team passes the TeamIdentifier check; only the requirement refuses it.
+  assert.match(spawnSync('/usr/bin/codesign', ['-d', '--verbose=2', helper], { encoding: 'utf8' }).stderr, /^TeamIdentifier=SAZVPX4CAA$/m);
+  const claimed = run();
+  assert.equal(claimed.status, 1);
+  assert.equal(
+    claimed.stderr,
+    `subset: ${bundle} was not run: Contents/Helpers/subset-system: it is not signed with the Subset team's Developer ID certificate (codesign: test-requirement: code failed to satisfy specified code requirement(s)).\n`
+  );
 });

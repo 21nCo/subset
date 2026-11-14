@@ -2,8 +2,9 @@
 // from the installed app when there is one: `subset system status` runs Subset System.app/Contents/Helpers/subset-system,
 // and `subset timer` loads Timer.app's embedded cli.mjs. The app is the first `<appName>.app` at the top level of
 // /Applications, then ~/Applications, whose Info.plist has the tool's bundle ID (decision D2 of SET-224). The helper
-// runs only when codesign accepts its signature and reports the Subset team: a native helper's own signature, or for a
-// node helper (a resource with no signature of its own) the app's, whose seal covers the file.
+// runs only when codesign accepts its signature, reports the Subset team and finds it issued by Apple to that team as a
+// Developer ID: a native helper's own signature, or for a node helper (a resource with no signature of its own) the
+// app's, whose seal covers the file.
 import { spawn } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -14,6 +15,14 @@ import { runTool, TEAM_ID } from './macos/verify.mjs';
 /** The tools the lookup asks. Tests replace them with stand-ins. */
 export const HELPER_TOOLS = Object.freeze({ codesign: '/usr/bin/codesign', plutil: PLUTIL });
 const CODESIGN_TIMEOUT_MS = 60_000;
+
+/**
+ * The code requirement a helper's signature must satisfy: a Developer ID Application certificate (leaf marker
+ * 1.2.840.113635.100.6.1.13) issued by Apple's Developer ID CA (intermediate marker 1.2.840.113635.100.6.2.6) to the
+ * Subset team. An ad-hoc signature can claim any TeamIdentifier (codesign --team-identifier), so the team alone is not
+ * enough.
+ */
+export const DEVELOPER_ID_REQUIREMENT = `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "${TEAM_ID}"`;
 
 /** The signals `subset` passes on to a native helper. */
 export const FORWARDED_SIGNALS = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP']);
@@ -36,8 +45,9 @@ function helperFile(bundle, relative) {
 }
 
 /**
- * Why codesign refuses `target`, or undefined when it accepts its signature and reports the Subset team:
- * `codesign --verify --strict` must pass, then `codesign -d --verbose=2` must report TeamIdentifier=SAZVPX4CAA.
+ * Why codesign refuses `target`, or undefined when it accepts its signature as the Subset team's:
+ * `codesign --verify --strict` must pass, `codesign -d --verbose=2` must report TeamIdentifier=SAZVPX4CAA, and
+ * `codesign --verify --strict -R=<DEVELOPER_ID_REQUIREMENT>` must pass.
  */
 export async function signatureProblem(target, { codesign = HELPER_TOOLS.codesign } = {}) {
   const verify = await runTool(codesign, ['--verify', '--strict', target], { timeout: CODESIGN_TIMEOUT_MS });
@@ -47,6 +57,8 @@ export async function signatureProblem(target, { codesign = HELPER_TOOLS.codesig
   if (details.code !== 0 || teams.length !== 1 || teams[0] !== TEAM_ID) {
     return `it is not signed by the Subset team ${TEAM_ID} (TeamIdentifier: ${teams.length === 1 ? teams[0] : 'not reported'})`;
   }
+  const anchored = await runTool(codesign, ['--verify', '--strict', `-R=${DEVELOPER_ID_REQUIREMENT}`, target], { timeout: CODESIGN_TIMEOUT_MS });
+  if (anchored.code !== 0) return `it is not signed with the Subset team's Developer ID certificate (codesign: ${lastLine(anchored.stderr)})`;
   return undefined;
 }
 
