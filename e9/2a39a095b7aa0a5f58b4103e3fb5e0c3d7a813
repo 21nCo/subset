@@ -1,0 +1,25 @@
+packages/subset-dev/src/commands/uninstall.mjs
+  s_46724ab27b1e05::t_ca601c6cfba171 163-164
+packages/subset-dev/src/macos/trash.mjs
+  s_46724ab27b1e05::t_71f9968e8ad4bf 91-92,106-111
+packages/subset-dev/src/macos/update.mjs
+  s_46724ab27b1e05::t_199b9dad0f2eb8 131-132
+packages/subset-dev/test/update.test.mjs
+  s_46724ab27b1e05::t_4e00bfb6e5a232 1250-1252,1260,1268-1317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e92a39a095b7aa0a5f58b4103e3fb5e0c3d7a813",
+  "prompts": {},
+  "sessions": {
+    "s_46724ab27b1e05": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_46724ab27b1e05",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
