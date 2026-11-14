@@ -1424,7 +1424,7 @@ test('uninstall keeps the receipt of a copy whose Info.plist could not be read: 
   const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
-  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: its Info.plist could not be read when it was checked, so it may be Breaks, and the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove it by hand if that is not Breaks.\n`);
+  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: it may be Breaks (its Info.plist could not be read), so the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove the receipt by hand if that is not Breaks.\n`);
   assert.deepEqual(readdirSync(c.user), []);
   assert.equal(lstatSync(c.app).ino, beta.ino, 'the unread copy stays');
   assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
@@ -1478,7 +1478,7 @@ test('uninstall keeps the receipt of a copy it cannot look into: it may be the a
   }
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
-  assert.match(result.stderr, new RegExp(`^subset: ${escapeRegExp(c.app)} was not uninstalled: its Info\\.plist could not be read when it was checked, so it may be Breaks`));
+  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: it may be Breaks (${path.join(contents, 'Info.plist')} could not be looked into: EACCES), so the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove the receipt by hand if that is not Breaks.\n`);
   assert.equal(lstatSync(c.app).ino, beta.ino, 'the copy stays');
   assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
 
@@ -1486,4 +1486,79 @@ test('uninstall keeps the receipt of a copy it cannot look into: it may be the a
   assert.equal(updated.code, 0, updated.stderr);
   assert.equal(updated.stdout, `Updated Breaks 0.1.1-beta.4 to 0.1.1 in ${c.app}\n`);
   assert.equal(receipt(c).channel, 'live');
+});
+
+test('uninstall keeps the receipt of a copy in an Applications folder it cannot search: it may be the app, and its beta stays known', { skip: skip || (process.getuid?.() === 0 && 'root ignores permissions') }, async () => {
+  const c = setup();
+  const image = breaksImage({ version: '0.1.1', build: '5' });
+  feed(c, { live: { version: '0.1.1', image } });
+  // The beta in /Applications is what the receipt describes; /Applications cannot be searched, so it is not detected.
+  const beta = installed(c, { version: '0.1.1', build: '4', channel: 'beta' });
+  installed(c, { version: '0.1.1', build: '4', dir: c.user });
+  chmodSync(c.system, 0o000);
+  let result;
+  try {
+    result = await uninstall(c, ['breaks']);
+  } finally {
+    chmodSync(c.system, 0o755);
+  }
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
+  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: it may be Breaks (it could not be looked into: EACCES), so the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove the receipt by hand if that is not Breaks.\n`);
+  assert.deepEqual(readdirSync(c.user), []);
+  assert.equal(lstatSync(c.app).ino, beta.ino, 'the copy stays');
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
+
+  const updated = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: image }) });
+  assert.equal(updated.code, 0, updated.stderr);
+  assert.equal(updated.stdout, `Updated Breaks 0.1.1-beta.4 to 0.1.1 in ${c.app}\n`);
+  assert.equal(receipt(c).channel, 'live');
+});
+
+test('uninstall looks at every folder: a moved copy installed again does not hide a copy in a later folder that may be the app', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.1', image: breaksImage({ version: '0.1.1', build: '5' }) } });
+  const old = installed(c, { version: '0.1.1', build: '4', channel: 'beta' });
+  // The copy in ~/Applications cannot be read by plutil, so it is not detected or moved.
+  const unread = installed(c, { version: '0.1.1', build: '4', dir: c.user });
+  const unreadable = path.join(unread.bundle, 'Contents', 'Info.plist');
+  const plutil = wrapper(c, 'plutil-fails', `[ "$5" = "${unreadable}" ] && exit 1\nexec "${tools.plutil}" "$@"`);
+  // Another subset (another user's: locks are per home) installs a new copy just after this one moved the old copy.
+  let refill;
+  let out = '';
+  const stdout = {
+    write: (text) => {
+      out += text;
+      if (!refill && text.startsWith('Moved ')) refill = makeApp(c.system, 'Breaks', { bundleId: BUNDLE_ID, version: '0.1.1', build: '5' });
+    }
+  };
+  const { code, stderr: err } = await uninstall(c, ['breaks'], { tools: { ...tools, plutil }, stdout });
+  assert.equal(code, 1, err);
+  assert.match(out, /^Moved Breaks 0\.1\.1 \(\/Applications\) to the Trash: .*\n$/);
+  assert.equal(err, `subset: note: ${c.app} was installed again while Breaks was uninstalled, so its receipt stays.\nsubset: ${unread.bundle} was not uninstalled: it may be Breaks (its Info.plist could not be read), so the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove the receipt by hand if that is not Breaks.\n`);
+  assert.notEqual(lstatSync(c.app).ino, old.ino);
+  assert.equal(lstatSync(refill).ino, lstatSync(c.app).ino, 'the new copy stays');
+  assert.equal(lstatSync(unread.bundle).ino, unread.ino, 'the unread copy stays');
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt, 'the receipt stays');
+});
+
+test('uninstall keeps the receipt when another app of the same name is replaced while its Info.plist is read', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  const foreign = makeApp(c.user, 'Breaks', { bundleId: 'com.example.breaks', version: '2.0.0', build: '7' });
+  // plutil reads the other app's Info.plist after detectApps did; as it reads it, a new copy takes its place.
+  const plist = path.join(foreign, 'Contents', 'Info.plist');
+  const seen = path.join(c.base, 'plist-seen');
+  const staged = path.join(c.base, 'staged');
+  mkdirSync(staged);
+  const replacement = makeApp(staged, 'Breaks', { bundleId: BUNDLE_ID, version: '0.1.0', build: '1' });
+  const plutil = wrapper(c, 'plutil-swaps', `if [ "$5" = "${plist}" ]; then\n  if [ -f "${seen}" ]; then "${tools.plutil}" "$@"; status=$?; mv "${foreign}" "${c.base}/foreign-old.app"; mv "${replacement}" "${foreign}"; exit $status; fi\n  touch "${seen}"\nfi\nexec "${tools.plutil}" "$@"`);
+  const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.0 \(\/Applications\) to the Trash: .*\n$/);
+  assert.equal(result.stderr, `subset: note: ${foreign} was installed again while Breaks was uninstalled, so its receipt stays.\n`);
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.match(readFileSync(path.join(foreign, 'Contents', 'Info.plist'), 'utf8'), new RegExp(escapeRegExp(BUNDLE_ID)), 'the replacement stays');
+  assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt, 'the receipt stays');
 });

@@ -38,9 +38,9 @@ const statOf = (file) => {
 
 /**
  * Runs `subset uninstall <args>`, writing to `stdout` and `stderr`, and returns the exit code: 0 when every copy is in
- * the Trash and the receipt is gone, 1 when the app is not installed, another subset is working on it, a copy could not
- * be moved or read (the receipt then stays) or the receipt could not be removed, 2 for a usage error, or 128 + the signal
- * number when a signal stopped it.
+ * the Trash and the receipt is gone (or a copy installed meanwhile keeps it), 1 when the app is not installed, another
+ * subset is working on it, a copy could not be moved or one left in place may be the app (the receipt then stays) or the
+ * receipt could not be removed, 2 for a usage error, or 128 + the signal number when a signal stopped it.
  */
 export async function runUninstall(args, { env, platform, home, stdout, stderr, fetch, now = Date.now(), clock = Date.now, tools = UPDATE_TOOLS, signals = process, quitTimeoutMs = QUIT_TIMEOUT_MS }) {
   const options = parseUninstallArgs(args);
@@ -151,38 +151,65 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   } finally {
     for (const [signal, handler] of handlers) signals.off(signal, handler);
   }
-  // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's): something now at
-  // a moved copy's path, or at a path that was empty or held another file or folder (device and inode) when the copies
-  // were identified. An entry that was already there unchanged keeps it only when it may be this app: a bundle folder
-  // (not a link) with a Contents/Info.plist file that cannot be read now or names this bundle ID. Anything else (another
-  // app of the same name, a link, a file, a folder without an Info.plist) is not this app, as detectApps() decided. One
-  // that cannot be looked into (its Contents not searchable, say) may be this app too.
+  // The receipt is decided from every folder's <appName>.app, each looked at once after the moves:
+  // - absent (nothing there), or not this app: an entry there unchanged (device and inode) since the copies were
+  //   identified that is another app of the same name, a link, a file, or a folder without a Contents/Info.plist, as
+  //   detectApps() decided;
+  // - installed again: something now at a moved copy's path, or new or changed there since the copies were identified,
+  //   or replaced while it was looked into (it may be another subset install's copy);
+  // - maybe this app: an unchanged bundle folder (not a link) that cannot be looked into (its folder or Contents not
+  //   searchable, its Info.plist not readable) or whose Info.plist names this bundle ID.
+  // The receipt is deleted only when every entry is absent or not this app. One that may be the app keeps it and exits 1
+  // naming each; otherwise one installed again keeps it with a note and exits 0.
+  const look = (file) => {
+    try {
+      return { stat: lstatSync(file) };
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return {};
+      return { error: error.code ?? error.message };
+    }
+  };
+  // Why an unchanged entry may be this app, or undefined when it is not.
   const mayBeApp = async (bundle, stat) => {
-    if (!stat.isDirectory()) return false;
+    if (!stat.isDirectory()) return undefined;
     for (const [file, kind] of [[path.join(bundle, 'Contents'), 'isDirectory'], [path.join(bundle, 'Contents', 'Info.plist'), 'isFile']]) {
-      try {
-        if (!lstatSync(file)[kind]()) return false;
-      } catch (error) {
-        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
-        return true;
-      }
+      const { stat: found, error } = look(file);
+      if (error) return `${file} could not be looked into: ${error}`;
+      if (!found?.[kind]()) return undefined;
     }
     const info = await readInfoPlist(bundle, tools.plutil);
-    return info === undefined || info.CFBundleIdentifier === app.bundleId;
+    if (info === undefined) return 'its Info.plist could not be read';
+    return info.CFBundleIdentifier === app.bundleId ? `its Info.plist names ${app.bundleId}` : undefined;
   };
+  const changed = (seen, now) => !seen !== !now || (seen && (seen.dev !== now.dev || seen.ino !== now.ino));
   const moved = new Set(copies.map((copy) => copy.path));
+  const again = [];
+  const maybe = [];
   for (const bundle of bundles) {
-    const current = statOf(bundle);
+    const { stat: current, error } = look(bundle);
+    if (error) {
+      maybe.push({ bundle, reason: `it could not be looked into: ${error}` });
+      continue;
+    }
     if (!current) continue;
     const seen = before.get(bundle);
-    if (moved.has(bundle) || !seen || seen.dev !== current.dev || seen.ino !== current.ino) {
-      say(stderr, `subset: note: ${bundle} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
-      return 0;
+    if (moved.has(bundle) || changed(seen, current)) {
+      again.push(bundle);
+      continue;
     }
-    if (await mayBeApp(bundle, current)) {
-      return fail(`${bundle} was not uninstalled: its Info.plist could not be read when it was checked, so it may be ${app.name}, and the receipt ${receiptFile(home, app.bundleId)} stays; remove it by hand if that is not ${app.name}.`);
-    }
+    const reason = await mayBeApp(bundle, current);
+    // Replaced while it was looked into: what is there now was not looked into.
+    const after = look(bundle);
+    if (after.error) maybe.push({ bundle, reason: `it could not be looked into: ${after.error}` });
+    else if (changed(current, after.stat)) again.push(bundle);
+    else if (reason) maybe.push({ bundle, reason });
   }
+  for (const bundle of again) say(stderr, `subset: note: ${bundle} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
+  for (const { bundle, reason } of maybe) {
+    say(stderr, `subset: ${bundle} was not uninstalled: it may be ${app.name} (${reason}), so the receipt ${receiptFile(home, app.bundleId)} stays; remove the receipt by hand if that is not ${app.name}.`);
+  }
+  if (maybe.length > 0) return 1;
+  if (again.length > 0) return 0;
   try {
     rmSync(receiptFile(home, app.bundleId), { force: true });
   } catch (error) {
