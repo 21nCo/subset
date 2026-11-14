@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -1424,7 +1424,7 @@ test('uninstall keeps the receipt of a copy whose Info.plist could not be read: 
   const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
-  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: its Info.plist could not be read when it was checked, so it may be Breaks and its receipt stays; run subset uninstall breaks again.\n`);
+  assert.equal(result.stderr, `subset: ${c.app} was not uninstalled: its Info.plist could not be read when it was checked, so it may be Breaks, and the receipt ${receiptFile(c.home, BUNDLE_ID)} stays; remove it by hand if that is not Breaks.\n`);
   assert.deepEqual(readdirSync(c.user), []);
   assert.equal(lstatSync(c.app).ino, beta.ino, 'the unread copy stays');
   assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), beta.receipt, 'the receipt stays');
@@ -1435,3 +1435,28 @@ test('uninstall keeps the receipt of a copy whose Info.plist could not be read: 
   assert.equal(updated.stdout, `Updated Breaks 0.1.1-beta.4 to 0.1.1 in ${c.app}\n`);
   assert.equal(receipt(c).channel, 'live');
 });
+
+// Entries already in the other folder, unchanged, that cannot be the app: none keeps the receipt.
+const notTheApp = {
+  'a symbolic link to the uninstalled copy': (bundle, c) => symlinkSync(c.app, bundle),
+  'a file': (bundle) => writeFileSync(bundle, 'alias'),
+  'an empty folder': (bundle) => mkdirSync(bundle),
+  'a folder without an Info.plist': (bundle) => mkdirSync(path.join(bundle, 'Contents'), { recursive: true }),
+  'a bundle whose Info.plist has no bundle ID': (bundle, c) => makeApp(c.user, 'Breaks', { version: '1.0.0' })
+};
+for (const [kind, make] of Object.entries(notTheApp)) {
+  test(`uninstall deletes the receipt when ${kind} was already in the other folder, and leaves it`, { skip }, async () => {
+    const c = setup();
+    feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+    installed(c, { channel: 'live' });
+    const entry = path.join(c.user, 'Breaks.app');
+    make(entry, c);
+    const ino = lstatSync(entry).ino;
+    const result = await uninstall(c, ['breaks']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.deepEqual(readdirSync(c.system), []);
+    assert.equal(lstatSync(entry).ino, ino, 'it stays');
+    assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
+  });
+}

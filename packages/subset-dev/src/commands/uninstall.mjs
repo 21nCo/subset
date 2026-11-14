@@ -153,8 +153,15 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
   }
   // A copy another subset install put in place meanwhile keeps the receipt (it may be that install's): something now at
   // a moved copy's path, or at a path that was empty or held another file or folder (device and inode) when the copies
-  // were identified. A bundle that was already there unchanged keeps it too, unless its Info.plist names another bundle
-  // ID (another app of the same name): one whose Info.plist could not be read may be this app.
+  // were identified. An entry that was already there unchanged keeps it only when it may be this app: a bundle folder
+  // (not a link) with a Contents/Info.plist file that cannot be read now or names this bundle ID. Anything else (another
+  // app of the same name, a link, a file, a folder without an Info.plist) is not this app, as detectApps() decided.
+  const mayBeApp = async (bundle) => {
+    const kinds = [[bundle, 'isDirectory'], [path.join(bundle, 'Contents'), 'isDirectory'], [path.join(bundle, 'Contents', 'Info.plist'), 'isFile']];
+    if (!kinds.every(([file, kind]) => statOf(file)?.[kind]())) return false;
+    const info = await readInfoPlist(bundle, tools.plutil);
+    return info === undefined || info.CFBundleIdentifier === app.bundleId;
+  };
   const moved = new Set(copies.map((copy) => copy.path));
   for (const bundle of bundles) {
     const current = statOf(bundle);
@@ -164,9 +171,8 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
       say(stderr, `subset: note: ${bundle} was installed again while ${app.name} was uninstalled, so its receipt stays.`);
       return 0;
     }
-    const info = await readInfoPlist(bundle, tools.plutil);
-    if (typeof info?.CFBundleIdentifier !== 'string' || info.CFBundleIdentifier === app.bundleId) {
-      return fail(`${bundle} was not uninstalled: its Info.plist could not be read when it was checked, so it may be ${app.name} and its receipt stays; run subset uninstall ${app.id} again.`);
+    if (await mayBeApp(bundle)) {
+      return fail(`${bundle} was not uninstalled: its Info.plist could not be read when it was checked, so it may be ${app.name}, and the receipt ${receiptFile(home, app.bundleId)} stays; remove it by hand if that is not ${app.name}.`);
     }
   }
   try {
