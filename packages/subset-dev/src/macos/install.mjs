@@ -327,7 +327,8 @@ export async function installApp({ app, release, beta, dir, receipt, signal, fet
     if (receipt) {
       try {
         mkdirSync(path.dirname(receipt.file), { recursive: true });
-        receiptTemporary = `${receipt.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+        // Named apart from the bundle ID, so it fits whenever the receipt's own name does.
+        receiptTemporary = path.join(path.dirname(receipt.file), `.receipt.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
         writeFileSync(receiptTemporary, `${JSON.stringify(receipt.document(), null, 2)}\n`, { mode: 0o644, flag: 'wx' });
       } catch (error) {
         if (receiptTemporary) rmSync(receiptTemporary, { force: true });

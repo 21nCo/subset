@@ -1268,9 +1268,9 @@ test('trash: removeLeftCopies removes only the app\'s copies of a subset that no
 for (const length of [250, 255]) {
   test(`locks: the lock file name is bounded for any catalog bundle ID: one of ${length} characters installs, updates and uninstalls`, { skip }, async () => {
     const c = setup();
-    // At 250 characters the receipt's name (`<bundleId>.json`) fits in 255 bytes; at 255 it cannot exist, which the update
-    // warns about (receipts are advisory) and the uninstall takes as no receipt. The install is into a --dir folder,
-    // which gets no receipt.
+    // At 250 characters the receipt's name (`<bundleId>.json`) fits in 255 bytes, so a default install writes it; at 255
+    // it cannot exist, which the update warns about (receipts are advisory) and the uninstall takes as no receipt (that
+    // install, which refuses without its receipt, as it did before, is into a --dir folder, which gets none).
     const bundleId = `dev.subset.${'b'.repeat(length - 11)}`;
     const doc = structuredClone(template);
     doc.apps[0].bundleId = bundleId;
@@ -1284,10 +1284,13 @@ for (const length of [250, 255]) {
     write('0.1.0', live);
     const elsewhere = path.join(c.base, 'elsewhere');
     mkdirSync(elsewhere);
-    const installs = await run(runInstall, c, ['breaks', '--dir', elsewhere], { fetch: fakeFetch({ [LIVE_URL]: live }) });
+    const installs = await run(runInstall, c, ['breaks', ...(length === 250 ? [] : ['--dir', elsewhere])], { fetch: fakeFetch({ [LIVE_URL]: live }) });
     assert.equal(installs.code, 0, installs.stderr);
-    assert.equal(plistVersion(path.join(elsewhere, 'Breaks.app')), '0.1.0');
-    makeApp(c.system, 'Breaks', { bundleId, version: '0.1.0', build: '1' });
+    if (length === 250) assert.equal(JSON.parse(readFileSync(receiptFile(c.home, bundleId), 'utf8')).version, '0.1.0', 'the install writes its receipt');
+    else {
+      assert.equal(plistVersion(path.join(elsewhere, 'Breaks.app')), '0.1.0');
+      makeApp(c.system, 'Breaks', { bundleId, version: '0.1.0', build: '1' });
+    }
     write('0.1.1', next);
     const updates = await update(c, ['breaks'], { fetch: fakeFetch({ [LIVE_URL]: next }), now: NOW + 600_000, clock: () => NOW + 600_000 });
     assert.equal(updates.code, 0, updates.stderr);
