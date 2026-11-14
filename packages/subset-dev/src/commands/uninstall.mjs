@@ -152,13 +152,13 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
     for (const [signal, handler] of handlers) signals.off(signal, handler);
   }
   // The receipt is decided from every folder's <appName>.app, each looked at once after the moves:
-  // - absent (nothing there), or not this app: an entry there unchanged (device and inode) since the copies were
-  //   identified that is another app of the same name, a link, a file, or a folder without a Contents/Info.plist, as
-  //   detectApps() decided;
-  // - installed again: something now at a moved copy's path, or new or changed there since the copies were identified,
-  //   or replaced while it was looked into (it may be another subset install's copy);
-  // - maybe this app: an unchanged bundle folder (not a link) that cannot be looked into (its folder or Contents not
-  //   searchable, its Info.plist not readable) or whose Info.plist names this bundle ID.
+  // - absent: nothing there when last looked at, including an entry removed while its Info.plist was read;
+  // - not this app: an entry there unchanged (device and inode) since the copies were identified that is another app of
+  //   the same name, a link, a file, or a folder without a Contents/Info.plist, as detectApps() decided;
+  // - installed again: something there now, at a moved copy's path, or new or changed there since the copies were
+  //   identified, or replaced by another while it was looked into (it may be another subset install's copy);
+  // - maybe this app: an unchanged bundle folder (not a link), still the one looked into, that cannot be looked into
+  //   (its folder or Contents not searchable, its Info.plist not readable) or whose Info.plist names this bundle ID.
   // The receipt is deleted only when every entry is absent or not this app. One that may be the app keeps it and exits 1
   // naming each; otherwise one installed again keeps it with a note and exits 0.
   const look = (file) => {
@@ -198,9 +198,10 @@ async function uninstallLocked({ app, options, folders, trash, home, clock, tool
       continue;
     }
     const reason = await mayBeApp(bundle, current);
-    // Replaced while it was looked into: what is there now was not looked into.
+    // Looked at again: removed while it was looked into, it is absent; replaced, what is there now was not looked into.
     const after = look(bundle);
     if (after.error) maybe.push({ bundle, reason: `it could not be looked into: ${after.error}` });
+    else if (!after.stat) continue;
     else if (changed(current, after.stat)) again.push(bundle);
     else if (reason) maybe.push({ bundle, reason });
   }

@@ -1562,3 +1562,45 @@ test('uninstall keeps the receipt when another app of the same name is replaced 
   assert.match(readFileSync(path.join(foreign, 'Contents', 'Info.plist'), 'utf8'), new RegExp(escapeRegExp(BUNDLE_ID)), 'the replacement stays');
   assert.equal(readFileSync(receiptFile(c.home, BUNDLE_ID), 'utf8'), old.receipt, 'the receipt stays');
 });
+
+test('uninstall deletes the receipt when another app of the same name is removed while its Info.plist is read', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.0', image: breaksImage() } });
+  const old = installed(c, { channel: 'live' });
+  const foreign = makeApp(c.user, 'Breaks', { bundleId: 'com.example.breaks', version: '2.0.0', build: '7' });
+  // plutil reads the other app's Info.plist after detectApps did; as it reads it, the app is removed, nothing in its place.
+  const plist = path.join(foreign, 'Contents', 'Info.plist');
+  const seen = path.join(c.base, 'plist-seen');
+  const gone = path.join(c.base, 'foreign-gone.app');
+  const plutil = wrapper(c, 'plutil-removes', `if [ "$5" = "${plist}" ]; then\n  if [ -f "${seen}" ]; then "${tools.plutil}" "$@"; status=$?; mv "${foreign}" "${gone}"; exit $status; fi\n  touch "${seen}"\nfi\nexec "${tools.plutil}" "$@"`);
+  const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.0 \(\/Applications\) to the Trash: .*\n$/);
+  assert.equal(result.stderr, '', 'no note: nothing is at the path');
+  assert.ok(existsSync(gone), 'the plist read removed the other app');
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.deepEqual(readdirSync(c.user), []);
+  assert.deepEqual(readdirSync(c.trash).map((name) => lstatSync(path.join(c.trash, name)).ino), [old.ino]);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
+});
+
+test('uninstall deletes the receipt when a copy whose Info.plist could not be read is removed during that read', { skip }, async () => {
+  const c = setup();
+  feed(c, { live: { version: '0.1.1', image: breaksImage({ version: '0.1.1', build: '5' }) } });
+  // plutil fails on the /Applications copy's Info.plist, so it is not detected or moved; the second read also removes it.
+  const beta = installed(c, { version: '0.1.1', build: '4', channel: 'beta' });
+  const other = installed(c, { version: '0.1.1', build: '4', dir: c.user });
+  const unreadable = path.join(c.app, 'Contents', 'Info.plist');
+  const seen = path.join(c.base, 'plist-seen');
+  const gone = path.join(c.base, 'unread-gone.app');
+  const plutil = wrapper(c, 'plutil-fails-removes', `if [ "$5" = "${unreadable}" ]; then\n  if [ -f "${seen}" ]; then mv "${c.app}" "${gone}"; fi\n  touch "${seen}"\n  exit 1\nfi\nexec "${tools.plutil}" "$@"`);
+  const result = await uninstall(c, ['breaks'], { tools: { ...tools, plutil } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Moved Breaks 0\.1\.1 \(~\/Applications\) to the Trash: .*\n$/);
+  assert.equal(result.stderr, '', 'no note and no may-be-the-app line: nothing is at the path');
+  assert.equal(lstatSync(gone).ino, beta.ino, 'the plist read removed the unread copy');
+  assert.deepEqual(readdirSync(c.system), []);
+  assert.deepEqual(readdirSync(c.user), []);
+  assert.deepEqual(readdirSync(c.trash).map((name) => lstatSync(path.join(c.trash, name)).ino), [other.ino]);
+  assert.equal(existsSync(receiptFile(c.home, BUNDLE_ID)), false, 'the receipt is deleted');
+});
