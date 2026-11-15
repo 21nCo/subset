@@ -1,0 +1,23 @@
+native/subset/Core/Installed/InstalledApps.swift
+  s_2435293e5274ed::t_3bdc748102e9c5 42-43,51,56-57
+native/subset/README.md
+  s_2435293e5274ed::t_29c0b4276f53ce 37
+native/subset/Tests/CoreTests/InstalledAppsTests.swift
+  s_2435293e5274ed::t_5b5e76616e5764 94,101-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "92b5854fc1d55372866ba2ca67b9ccb8fe2f9c80",
+  "prompts": {},
+  "sessions": {
+    "s_2435293e5274ed": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_2435293e5274ed",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
