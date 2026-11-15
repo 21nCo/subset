@@ -39,7 +39,8 @@ public struct InstalledCopy: Equatable, Sendable {
 
     /// The copy as `subset list` shows it, for display only: 0.1.0, or 0.1.1-beta.4 for a beta by its receipt. The
     /// version and build come from the app's own Info.plist, so control characters in them (C0, DEL, C1, and the line
-    /// and paragraph separators U+2028 and U+2029) are shown as U+FFFD and cannot break the line. Comparisons and
+    /// and paragraph separators U+2028 and U+2029) and bidirectional formatting characters (U+061C, U+200E, U+200F,
+    /// U+202A to U+202E, U+2066 to U+2069) are shown as U+FFFD and cannot break or reorder the line. Comparisons and
     /// receipt matching use the raw `version` and `build`.
     public var versionLabel: String {
         guard let version else { return "unknown version" }
@@ -47,12 +48,13 @@ public struct InstalledCopy: Equatable, Sendable {
         return Self.displayable(version)
     }
 
-    /// `text` with each control character (C0, DEL, C1, U+2028, U+2029) replaced by U+FFFD.
+    /// `text` with each control or bidirectional formatting character named in `versionLabel` replaced by U+FFFD.
     static func displayable(_ text: String) -> String {
         var scalars = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {
             switch scalar.value {
-            case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029: scalars.append("\u{FFFD}")
+            case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029, 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+                scalars.append("\u{FFFD}")
             default: scalars.append(scalar)
             }
         }

@@ -91,15 +91,20 @@ final class InstalledAppsTests: XCTestCase {
         XCTAssertEqual(copy.versionLabel, "0.1.1-beta.4")
     }
 
-    func testControlCharactersInTheVersionAreNotShownButAreKeptForComparisons() {
+    func testControlAndBidiCharactersInTheVersionAreNotShownButAreKeptForComparisons() {
         let replaced = "\u{FFFD}"
         let cases: [(String, String)] = [
             ("1.0\n2", "1.0\(replaced)2"), ("1.0\r", "1.0\(replaced)"), ("\u{0}1.0", "\(replaced)1.0"),
             ("1.0\t\u{1B}[31m", "1.0\(replaced)\(replaced)[31m"), ("1.0\u{7F}", "1.0\(replaced)"),
             ("1.0\u{85}", "1.0\(replaced)"), ("1.0\u{9F}", "1.0\(replaced)"),
             ("1.0\u{2028}x", "1.0\(replaced)x"), ("1.0\u{2029}x", "1.0\(replaced)x"),
-            // Not controls: these are shown as they are.
-            ("1.0 é", "1.0 é"), ("1.0\u{A0}", "1.0\u{A0}"), ("1.0\u{2027}", "1.0\u{2027}"), ("1.0\u{202A}", "1.0\u{202A}")
+            // Bidirectional formatting: an override would show 9.9\u{202E}0.1 as 9.91.0 and reverse the rest of the line.
+            ("9.9\u{202E}0.1", "9.9\(replaced)0.1"), ("1.0\u{202A}", "1.0\(replaced)"), ("1.0\u{2066}x\u{2069}", "1.0\(replaced)x\(replaced)"),
+            ("1.0\u{2067}\u{2068}", "1.0\(replaced)\(replaced)"), ("1.0\u{200E}\u{200F}", "1.0\(replaced)\(replaced)"),
+            ("1.0\u{061C}", "1.0\(replaced)"),
+            // Neither: these are shown as they are.
+            ("1.0 é", "1.0 é"), ("1.0\u{A0}", "1.0\u{A0}"), ("1.0\u{2027}", "1.0\u{2027}"), ("1.0\u{202F}", "1.0\u{202F}"),
+            ("1.0\u{2065}", "1.0\u{2065}")
         ]
         for (version, shown) in cases {
             let copy = InstalledCopy(path: "/Applications/Breaks.app", folder: "/Applications", version: version, build: "1", channel: .live)
