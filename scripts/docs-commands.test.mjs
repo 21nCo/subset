@@ -108,6 +108,15 @@ test('a fence opens with up to three spaces of indentation, counted from its lis
   for (const rule of ['- - -', '* * *', '---', '***', '_ _ _', '-  -  -  -']) {
     assert.deepEqual(problems(lines(rule, '', '    ```sh', '    subset-timer list', '    ```')), [], rule);
   }
+  // A "-" under a paragraph underlines a setext heading, so a fence after it is at the top level.
+  assert.deepEqual(problems(lines('Title', '-', '', '  ```sh', 'subset-timer list', '  ```')).map((problem) => problem.split(':')[1]), ['5']);
+  assert.deepEqual(problems(lines('Title', '-', '', '  ```json', '{ "command": "subset-timer" }', '  ```')).map((problem) => problem.split(':')[1]), ['5']);
+  assert.deepEqual(problems(lines('Title', '-', '', '    ```sh', '    subset-timer list', '    ```')), []);
+  assert.deepEqual(problems(lines('Title', '=====', '-', '', '  ```sh', '  subset-timer list', '  ```')).map((problem) => problem.split(':')[1]), ['6']);
+  // A numbered line other than 1 cannot start a list inside a paragraph, so it continues the paragraph.
+  assert.deepEqual(problems(lines('Released in', '2026. A good year.', '', '    ```sh', '    subset-timer list', '    ```')), []);
+  // A lazy continuation line keeps its list item open, so the fence after it is in the item.
+  assert.deepEqual(problems(lines('- Step', 'continued', '', '    ```sh', '    subset-timer list', '    ```')).map((problem) => problem.split(':')[1]), ['5']);
   // Once the list ends, four spaces is indented code again.
   assert.deepEqual(problems(lines('- Step', '', 'Prose.', '', '    ```sh', '    subset-timer list', '    ```')), []);
 });

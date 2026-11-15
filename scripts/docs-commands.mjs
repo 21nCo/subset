@@ -51,7 +51,8 @@ export function docCommandProblems(path, text, tools) {
   const jsonCommand = alternatives ? new RegExp(`"command"\\s*:\\s*"(subset-(?:${alternatives}))"`, 'g') : null;
   const problems = [];
   let fence = null; // { marker, length, language, base } while inside a fenced block
-  const items = []; // the content columns of the open list items, outermost first (CommonMark, without lazy lines)
+  const items = []; // the content columns of the open list items, outermost first
+  let paragraph = null; // the content column of the container whose paragraph the previous line was in, if any
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     const at = `${path}:${index + 1}`;
     for (const [form] of line.matchAll(NPX_SCOPED)) {
@@ -61,26 +62,44 @@ export function docCommandProblems(path, text, tools) {
     // A line indented less than the list item holding the block ends the item, and with it the block.
     if (fence !== null && rest !== '' && width < fence.base) fence = null;
     if (fence === null) {
-      if (rest === '') continue; // a blank line keeps the list items open
-      while (items.length > 0 && width < items.at(-1)) items.pop();
-      let base = items.at(-1) ?? 0;
+      if (rest === '') {
+        paragraph = null; // a blank line ends a paragraph and keeps the list items open
+        continue;
+      }
+      let depth = items.length;
+      while (depth > 0 && width < items[depth - 1]) depth -= 1;
+      let base = depth > 0 ? items[depth - 1] : 0;
       let column = width;
       let content = rest;
+      const opened = [];
       // Markers indented up to 3 columns from the enclosing item open items; their content may open a fence.
       for (let marker; column - base <= 3 && !THEMATIC_BREAK.test(content) && (marker = LIST_MARKER.exec(content)); ) {
         const after = splitIndent(content.slice(marker[0].length), column + marker[0].length);
+        // A list that interrupts a paragraph starts with an item that is not empty and, if numbered, is 1; otherwise the
+        // line continues the paragraph, or underlines it as a setext heading.
+        if (opened.length === 0 && paragraph === base && (after.rest === '' || (/^\d/.test(marker[0]) && !/^0*1\D/.test(marker[0])))) break;
         // One to four spaces after the marker set the item's content column; more start indented code in it.
         base = column + marker[0].length + (after.rest === '' || after.width > 4 ? 1 : after.width);
-        items.push(base);
+        opened.push(base);
         column += marker[0].length + after.width;
         content = after.rest;
       }
       // A fence is indented at most 3 columns from its list item (from the margin outside one); more is indented
       // code. A backtick fence's info string has no backtick (CommonMark), so ```x``` on one line is inline code.
-      const opening = column - base <= 3 && /^(?:(`{3,})(?!.*`)|(~{3,}))\s*([^\s{]*)/.exec(content);
+      const indented = column - base > 3;
+      const opening = !indented && /^(?:(`{3,})(?!.*`)|(~{3,}))\s*([^\s{]*)/.exec(content);
+      const ending = !indented && (content === '' || THEMATIC_BREAK.test(content) || /^#{1,6}(?:[ \t]|$)/.test(content)
+        || (paragraph !== null && opened.length === 0 && /^(?:=+|-+)[ \t]*$/.test(content)));
+      // A paragraph's continuation keeps its list items open even when it is indented less (a lazy line).
+      if (paragraph === null || opened.length > 0 || opening || ending) items.splice(depth, Infinity, ...opened);
       if (opening) {
         const marker = opening[1] ?? opening[2];
         fence = { marker: marker[0], length: marker.length, language: opening[3].toLowerCase(), base };
+        paragraph = null;
+      } else if (ending || (indented && (paragraph === null || opened.length > 0))) {
+        paragraph = null; // an empty item, a break, a heading or its underline, or indented code
+      } else if (paragraph === null || opened.length > 0) {
+        paragraph = base;
       }
       continue;
     }
