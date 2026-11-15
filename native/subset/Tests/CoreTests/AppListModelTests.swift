@@ -20,23 +20,51 @@ final class RecordedLoader: CatalogLoading, @unchecked Sendable {
     }
 }
 
-/// Holds each load until the test finishes it, so a test can act while a fetch is in flight.
+/// Holds each load until the test finishes it, so a test can act while a fetch is in flight. A result finished before
+/// the load arrives is kept for it, and once closed every waiting and later load ends at once, so no load is left
+/// waiting when a test stops early.
 final class GatedLoader: CatalogLoading, @unchecked Sendable {
+    typealias LoadResult = Result<LoadedCatalog, CatalogError>
+    static let closedResult: LoadResult = .failure(.unavailable("closed by the test"))
+
     private let lock = NSLock()
-    private var waiting: CheckedContinuation<Result<LoadedCatalog, CatalogError>, Never>?
+    private var waiting: CheckedContinuation<LoadResult, Never>?
+    private var pending: LoadResult?
+    private var closed = false
 
     var isWaiting: Bool { lock.withLock { waiting != nil } }
 
-    func load(refresh _: Bool) async -> Result<LoadedCatalog, CatalogError> {
-        await withCheckedContinuation { continuation in lock.withLock { waiting = continuation } }
+    func load(refresh _: Bool) async -> LoadResult {
+        await withCheckedContinuation { continuation in
+            let ready = lock.withLock { () -> LoadResult? in
+                if let pending {
+                    self.pending = nil
+                    return pending
+                }
+                if closed { return Self.closedResult }
+                waiting = continuation
+                return nil
+            }
+            if let ready { continuation.resume(returning: ready) }
+        }
     }
 
-    func finish(_ result: Result<LoadedCatalog, CatalogError>) {
-        let continuation = lock.withLock { () -> CheckedContinuation<Result<LoadedCatalog, CatalogError>, Never>? in
+    func finish(_ result: LoadResult) {
+        let continuation = lock.withLock { () -> CheckedContinuation<LoadResult, Never>? in
             defer { waiting = nil }
+            if waiting == nil { pending = result }
             return waiting
         }
         continuation?.resume(returning: result)
+    }
+
+    func close() {
+        let continuation = lock.withLock { () -> CheckedContinuation<LoadResult, Never>? in
+            defer { waiting = nil }
+            closed = true
+            return waiting
+        }
+        continuation?.resume(returning: Self.closedResult)
     }
 }
 
@@ -69,6 +97,9 @@ final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
 
     func release() { gate.signal() }
 }
+
+/// What `waitUntil` throws when its condition did not hold in time.
+struct WaitTimedOut: Error {}
 
 @MainActor
 final class AppListModelTests: XCTestCase {
@@ -240,7 +271,7 @@ final class AppListModelTests: XCTestCase {
         let clock = clock
         let model = AppListModel(loader: loader, finder: finder, defaults: defaults, now: { clock.now })
         let first = Task { await model.refresh() }
-        try await waitUntil { loader.isWaiting }
+        try await waitUntil({ loader.isWaiting }, orElse: { loader.close() })
         loader.finish(try loaded("catalog-valid-live-only"))
         await first.value
         let fetchedAt = model.fetchedAt
@@ -250,7 +281,7 @@ final class AppListModelTests: XCTestCase {
         // the transport then reports the fetch as cancelled.
         clock.advance(60 * 60)
         let cancelled = Task { await model.refresh() }
-        try await waitUntil { loader.isWaiting }
+        try await waitUntil({ loader.isWaiting }, orElse: { loader.close() })
         cancelled.cancel()
         loader.finish(.failure(.unavailable("Could not fetch the catalog (cancelled), and there is no cached copy.")))
         await cancelled.value
@@ -278,7 +309,8 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(installed["breaks"]?.map(\.versionLabel), ["0.0.9"])
 
         let cancelled = Task { await model.refresh() }
-        try await waitUntil { gated.isWaiting }
+        // The gated detection is on a detached task; on a timeout the release lets it end if it starts later.
+        try await waitUntil({ gated.isWaiting }, orElse: { gated.release() })
         cancelled.cancel()
         gated.release()
         await cancelled.value
@@ -290,12 +322,51 @@ final class AppListModelTests: XCTestCase {
         XCTAssertFalse(model.isRefreshing)
     }
 
-    private func waitUntil(_ condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(5)
+    /// Waits until `condition` holds. When it does not within `timeout` seconds, it records a failure, runs `orElse`
+    /// to release whatever the test's tasks may wait on, and throws, so the test stops there instead of going on to
+    /// finish or await work that never started.
+    private func waitUntil(
+        timeout: TimeInterval = 5, _ condition: () -> Bool, orElse cleanUp: () -> Void
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
-            guard Date() < deadline else { return XCTFail("timed out") }
+            guard Date() < deadline else {
+                XCTFail("timed out")
+                cleanUp()
+                throw WaitTimedOut()
+            }
             try await Task.sleep(for: .milliseconds(5))
         }
+    }
+
+    func testATimedOutWaitFailsAtOnceAndLeavesNoRefreshWaiting() async throws {
+        let loader = GatedLoader()
+        let clock = clock
+        let model = AppListModel(loader: loader, finder: finder, defaults: defaults, now: { clock.now })
+        let refresh = Task { await model.refresh() }
+        let started = Date()
+        let options = XCTExpectedFailure.Options()
+        options.issueMatcher = { $0.compactDescription.contains("timed out") }
+        XCTExpectFailure("the condition never holds", options: options)
+        do {
+            try await waitUntil(timeout: 0.1, { false }, orElse: { loader.close() })
+            XCTFail("the wait did not throw")
+        } catch is WaitTimedOut {}
+        // The refresh's load was released by the cleanup, so it ends instead of waiting forever.
+        await refresh.value
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(model.status, .failed("closed by the test"))
+    }
+
+    func testAResultFinishedBeforeTheLoadArrivesIsKeptForIt() async throws {
+        let loader = GatedLoader()
+        loader.finish(try loaded("catalog-valid-live-only"))
+        let clock = clock
+        let model = AppListModel(loader: loader, finder: finder, defaults: defaults, now: { clock.now })
+        await model.refresh()
+        XCTAssertEqual(model.status, .current)
+        XCTAssertEqual(model.rows.map(\.id), ["breaks"])
     }
 
     func testInstalledAppsAreLookedForAgainOnEachRefresh() async throws {
@@ -311,13 +382,29 @@ final class AppListModelTests: XCTestCase {
 
     func testAutoRefreshLoadsAtOnceAndThenEveryInterval() async throws {
         let (model, loader) = model(Array(repeating: try loaded("catalog-valid-live-only"), count: 10))
-        model.startAutoRefresh(every: .milliseconds(50))
-        model.startAutoRefresh(every: .milliseconds(50))
+        XCTAssertTrue(model.startAutoRefresh(every: .milliseconds(50)))
+        XCTAssertTrue(model.startAutoRefresh(every: .milliseconds(50)))
         let deadline = Date().addingTimeInterval(5)
         while loader.loads < 3, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         model.stopAutoRefresh()
         XCTAssertGreaterThanOrEqual(loader.loads, 3)
         XCTAssertNotNil(model.catalog)
         XCTAssertEqual(AppListModel.refreshInterval, .seconds(6 * 60 * 60))
+    }
+
+    func testAZeroOrNegativeIntervalIsRefusedAndStartsNothing() async throws {
+        let (model, loader) = model(Array(repeating: try loaded("catalog-valid-live-only"), count: 10))
+        XCTAssertFalse(model.startAutoRefresh(every: .zero))
+        XCTAssertFalse(model.startAutoRefresh(every: .seconds(-1)))
+        XCTAssertFalse(model.startAutoRefresh(every: .milliseconds(-50)))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(loader.loads, 0, "a refused interval refreshes nothing")
+        XCTAssertNil(model.catalog)
+        // A refused start leaves nothing running, so a positive interval still starts.
+        XCTAssertTrue(model.startAutoRefresh(every: .seconds(60)))
+        let deadline = Date().addingTimeInterval(5)
+        while loader.loads < 1, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        model.stopAutoRefresh()
+        XCTAssertEqual(loader.loads, 1)
     }
 }

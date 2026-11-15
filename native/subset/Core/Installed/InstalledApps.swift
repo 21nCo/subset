@@ -37,11 +37,26 @@ public struct InstalledCopy: Equatable, Sendable {
         self.channel = channel
     }
 
-    /// The copy as `subset list` shows it: 0.1.0, or 0.1.1-beta.4 for a beta by its receipt.
+    /// The copy as `subset list` shows it, for display only: 0.1.0, or 0.1.1-beta.4 for a beta by its receipt. The
+    /// version and build come from the app's own Info.plist, so control characters in them (C0, DEL, C1, and the line
+    /// and paragraph separators U+2028 and U+2029) are shown as U+FFFD and cannot break the line. Comparisons and
+    /// receipt matching use the raw `version` and `build`.
     public var versionLabel: String {
         guard let version else { return "unknown version" }
-        if channel == .beta, let build { return "\(version)-beta.\(build)" }
-        return version
+        if channel == .beta, let build { return Self.displayable("\(version)-beta.\(build)") }
+        return Self.displayable(version)
+    }
+
+    /// `text` with each control character (C0, DEL, C1, U+2028, U+2029) replaced by U+FFFD.
+    static func displayable(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x00...0x1F, 0x7F...0x9F, 0x2028, 0x2029: scalars.append("\u{FFFD}")
+            default: scalars.append(scalar)
+            }
+        }
+        return String(scalars)
     }
 }
 

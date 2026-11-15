@@ -91,6 +91,27 @@ final class InstalledAppsTests: XCTestCase {
         XCTAssertEqual(copy.versionLabel, "0.1.1-beta.4")
     }
 
+    func testControlCharactersInTheVersionAreNotShownButAreKeptForComparisons() {
+        let replaced = "\u{FFFD}"
+        let cases: [(String, String)] = [
+            ("1.0\n2", "1.0\(replaced)2"), ("1.0\r", "1.0\(replaced)"), ("\u{0}1.0", "\(replaced)1.0"),
+            ("1.0\t\u{1B}[31m", "1.0\(replaced)\(replaced)[31m"), ("1.0\u{7F}", "1.0\(replaced)"),
+            ("1.0\u{85}", "1.0\(replaced)"), ("1.0\u{9F}", "1.0\(replaced)"),
+            ("1.0\u{2028}x", "1.0\(replaced)x"), ("1.0\u{2029}x", "1.0\(replaced)x"),
+            // Not controls: these are shown as they are.
+            ("1.0 é", "1.0 é"), ("1.0\u{A0}", "1.0\u{A0}"), ("1.0\u{2027}", "1.0\u{2027}"), ("1.0\u{202A}", "1.0\u{202A}")
+        ]
+        for (version, shown) in cases {
+            let copy = InstalledCopy(path: "/Applications/Breaks.app", folder: "/Applications", version: version, build: "1", channel: .live)
+            XCTAssertEqual(copy.versionLabel, shown, version.debugDescription)
+            XCTAssertEqual(copy.version, version, "the raw version is kept")
+        }
+        let beta = InstalledCopy(path: "/Applications/Breaks.app", folder: "/Applications", version: "0.1.1", build: "4\n5", channel: .beta)
+        XCTAssertEqual(beta.versionLabel, "0.1.1-beta.4\(replaced)5")
+        XCTAssertEqual(beta.build, "4\n5")
+        XCTAssertEqual(InstalledCopy(path: "", folder: "", version: nil, build: nil, channel: nil).versionLabel, "unknown version")
+    }
+
     func testAReceiptForAnotherCopyOrAnInvalidOneIsNotUsed() throws {
         try makeApp("system", "Breaks", bundleID: "dev.subset.breaks", version: "0.1.1", build: "4")
         // Another folder, another version, another build, and an invalid receipt (a live one with a build).

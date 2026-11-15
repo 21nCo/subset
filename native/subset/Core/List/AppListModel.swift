@@ -95,15 +95,20 @@ public final class AppListModel: ObservableObject {
         }
     }
 
-    /// Refreshes now, then every 6 hours until `stopAutoRefresh`. Calling it again does nothing.
-    public func startAutoRefresh(every interval: Duration = refreshInterval) {
-        guard refreshLoop == nil else { return }
+    /// Refreshes now, then every 6 hours until `stopAutoRefresh`, and returns true. Calling it again while it runs does
+    /// nothing. A zero or negative `interval` is refused: nothing starts and it returns false, since the loop would
+    /// otherwise refresh back to back.
+    @discardableResult
+    public func startAutoRefresh(every interval: Duration = refreshInterval) -> Bool {
+        guard interval > .zero else { return false }
+        guard refreshLoop == nil else { return true }
         refreshLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
                 try? await Task.sleep(for: interval)
             }
         }
+        return true
     }
 
     public func stopAutoRefresh() {
