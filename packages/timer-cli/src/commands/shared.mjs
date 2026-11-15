@@ -26,6 +26,15 @@ export class CliError extends Error {
 
 export const usageError = (message) => new CliError('invalid_input', message);
 
+/**
+ * The command name to print in help and messages: `SUBSET_COMMAND` when the `subset` launcher set it to
+ * `subset <tool>` (such as `subset timer`), otherwise the bin name. Any other value is ignored. Only text uses it.
+ */
+export function commandName(env) {
+  const value = env?.SUBSET_COMMAND;
+  return typeof value === 'string' && /^subset [a-z0-9-]+$/.test(value) ? value : 'subset-timer';
+}
+
 /** The body of a successful daemon reply; otherwise the daemon's error as a `CliError`. */
 export function expectOk(reply) {
   if (reply.status === 200) return reply.body;

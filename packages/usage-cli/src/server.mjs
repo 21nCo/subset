@@ -397,7 +397,11 @@ const publicErrors = new Set([
   'Could not restore the CLI status line for this account. Fix its settings.json, then remove the account again.',
 ]);
 
-const usage = `Usage: subset-usage [serve|status|mcp|collect] [options]
+// The command name in the help: `SUBSET_COMMAND` when the `subset` launcher set it to `subset <tool>` (such as
+// `subset usage`), otherwise the bin name. Any other value is ignored, and nothing but text uses it.
+const subsetCommand = process.env.SUBSET_COMMAND;
+const commandName = typeof subsetCommand === 'string' && /^subset [a-z0-9-]+$/.test(subsetCommand) ? subsetCommand : 'subset-usage';
+const usage = `Usage: ${commandName} [serve|status|mcp|collect] [options]
 
   serve                 Open the local usage dashboard (default)
     --port <number>     Port on 127.0.0.1 (default 4174, or the next free one)

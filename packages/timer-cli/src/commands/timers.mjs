@@ -43,14 +43,14 @@ export function intervalSpec(values) {
   return spec;
 }
 
-/** The preset `ref` names: an exact id, a unique case-insensitive name, or an alias such as `hiit`. */
-async function resolvePreset(client, ref) {
+/** The preset `ref` names: an exact id, a unique case-insensitive name, or an alias such as `hiit`. `cli` names this command in the hint. */
+async function resolvePreset(client, ref, cli) {
   const { presets } = await call(client.presets());
   try {
     return findPreset(presets, ref);
   } catch (error) {
     if (error.code === 'not_found') {
-      throw new CliError('not_found', `"${ref}" is not a duration, stopwatch, interval or preset. Run subset-timer presets to list presets.`);
+      throw new CliError('not_found', `"${ref}" is not a duration, stopwatch, interval or preset. Run ${cli} presets to list presets.`);
     }
     throw error;
   }
@@ -81,7 +81,7 @@ async function startInput(client, spec, values, now, io) {
       throw usageError(`--until: ${error.message}`);
     }
   }
-  if (spec === undefined) throw usageError('start needs a <spec> or --until. Run subset-timer --help.');
+  if (spec === undefined) throw usageError(`start needs a <spec> or --until. Run ${io.cli} --help.`);
   if (TIMER_ID_PATTERN.test(spec)) {
     if (values.name !== undefined || values['no-sound']) throw usageError('--name and --no-sound apply only to a new timer.');
     return { id: spec };
@@ -96,7 +96,7 @@ async function startInput(client, spec, values, now, io) {
   }
   let preset;
   try {
-    preset = await resolvePreset(client, spec);
+    preset = await resolvePreset(client, spec, io.cli);
   } catch (error) {
     // Something that starts like a duration but is not one, and names no preset, is a malformed duration.
     if (error.code === 'not_found' && /^\d/.test(spec)) throw usageError(durationError.message);
@@ -133,8 +133,8 @@ export const timerCommands = {
       ...INTERVAL_OPTIONS
     },
     positionals: [0, 1],
-    async run({ client, positionals: [spec], values, now, cwd, readStdin }) {
-      const input = await startInput(client, spec, values, now(), { cwd, readStdin });
+    async run({ client, positionals: [spec], values, now, cwd, readStdin, cli }) {
+      const input = await startInput(client, spec, values, now(), { cwd, readStdin, cli });
       const result = await call(client.op('start', input));
       return { json: result, text: timerResultText(result) };
     }

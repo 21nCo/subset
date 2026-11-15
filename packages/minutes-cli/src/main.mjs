@@ -22,7 +22,17 @@ import {
 } from '@subset.dev/minutes-core';
 import manifest from '../package.json' with { type: 'json' };
 
-export const usage = `Usage: subset-minutes <command> [options]
+/**
+ * The command name to print in help and messages: `SUBSET_COMMAND` when the `subset` launcher set it to
+ * `subset <tool>` (such as `subset minutes`), otherwise the bin name. Any other value is ignored. Only text uses it.
+ */
+export function commandName(env) {
+  const value = env?.SUBSET_COMMAND;
+  return typeof value === 'string' && /^subset [a-z0-9-]+$/.test(value) ? value : 'subset-minutes';
+}
+
+/** The help, naming the command `name` (`subset-minutes`, or `subset minutes` when started through `subset`). */
+export const usageText = (name) => `Usage: ${name} <command> [options]
 
 Sends a visible notetaker bot to a Google Meet or Zoom (web client) meeting in the
 system Google Chrome and records the other participants' audio to a WebM file.
@@ -48,6 +58,9 @@ Shared options
 
 Exit status: 0 success, 1 the session or a check failed, 2 invalid command or meeting link.
 `;
+
+/** The help of the `subset-minutes` bin. */
+export const usage = usageText('subset-minutes');
 
 const commandOptions = {
   join: { out: { type: 'string' }, name: { type: 'string' }, 'max-minutes': { type: 'string' }, json: { type: 'boolean' }, profile: { type: 'string' }, 'stop-on-stdin-close': { type: 'boolean' }, 'link-from-stdin': { type: 'boolean' } },
@@ -112,8 +125,9 @@ function profileInsideHome(value, home) {
  */
 export async function main(io) {
   const { argv, stdout, stderr } = io;
+  const cli = commandName(io.env);
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
-    (argv.length === 0 ? stderr : stdout)(usage);
+    (argv.length === 0 ? stderr : stdout)(usageText(cli));
     return argv.length === 0 ? 2 : 0;
   }
   if (argv[0] === '--version' || argv[0] === '-v') {
@@ -125,7 +139,7 @@ export async function main(io) {
   const json = rest.includes('--json');
   // Own properties only, so names such as "constructor" are unknown commands.
   const options = Object.hasOwn(commandOptions, command) ? commandOptions[command] : undefined;
-  if (!options) return usageError(io, json, `Unknown command "${command}". Run subset-minutes --help.`);
+  if (!options) return usageError(io, json, `Unknown command "${command}". Run ${cli} --help.`);
 
   let parsed;
   try {
@@ -369,7 +383,7 @@ export async function runCli({ createDriver } = {}) {
       stdout(`${JSON.stringify(createEvent(null, { type: 'error', code: 'internal', message }))}\n`);
       stdout(`${JSON.stringify(createEvent(null, { type: 'ended', reason: 'failed', path: null, bytes: null }))}\n`);
     } else {
-      stderr(`subset-minutes: ${message}\n`);
+      stderr(`${commandName(process.env)}: ${message}\n`);
     }
     code = 1;
   }
