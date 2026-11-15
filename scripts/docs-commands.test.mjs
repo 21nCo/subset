@@ -101,6 +101,13 @@ test('a fence opens with up to three spaces of indentation, counted from its lis
   assert.deepEqual(problems(lines('- ```sh', '  subset-timer list', '  ```')).map((problem) => problem.split(':')[1]), ['2']);
   // Seven spaces under "- " (five past its content) is indented code inside the item, not a fence.
   assert.deepEqual(problems(lines('- Step:', '', '       ```sh', '       subset-timer list', '       ```')), []);
+  // A tab after the marker advances to the next multiple of four columns, so the item's content starts at column 4.
+  assert.deepEqual(problems(lines('-\tStep:', '', '\t```sh', '\tsubset-timer list', '\t```')).map((problem) => problem.split(':')[1]), ['4']);
+  assert.deepEqual(problems(lines('-\tStep:', '\t```json', '\t{ "command": "subset-timer" }', '\t```')).map((problem) => problem.split(':')[1]), ['3']);
+  // A thematic break is not a list item, so four spaces after it is indented code.
+  for (const rule of ['- - -', '* * *', '---', '***', '_ _ _', '-  -  -  -']) {
+    assert.deepEqual(problems(lines(rule, '', '    ```sh', '    subset-timer list', '    ```')), [], rule);
+  }
   // Once the list ends, four spaces is indented code again.
   assert.deepEqual(problems(lines('- Step', '', 'Prose.', '', '    ```sh', '    subset-timer list', '    ```')), []);
 });

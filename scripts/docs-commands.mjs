@@ -16,6 +16,8 @@ const EXCLUDED_FILES = new Set(['docs/architecture.md']);
 
 // A list item's marker: a bullet, or up to nine digits and `.` or `)`, then a space, a tab or the end of the line.
 const LIST_MARKER = /^(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)/;
+// A thematic break (three or more of one of `-`, `*`, `_`, with spaces or tabs between), which is not a list item.
+const THEMATIC_BREAK = /^([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const NPX_SCOPED = /\bnpx\s+(?:-y\s+)?@subset\.dev\/[a-z0-9][a-z0-9._-]*/g;
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -26,14 +28,17 @@ export function isCheckedDoc(path) {
   return !segments.slice(0, -1).some((segment) => EXCLUDED_SEGMENTS.has(segment));
 }
 
-/** A line's leading indentation in columns (a tab goes to the next multiple of 4) and the text after it. */
-function splitIndent(line) {
-  let width = 0;
+/**
+ * The leading spaces and tabs of `text`, which starts at column `start`, as a width in columns (a tab goes to the next
+ * multiple of 4), and the text after them.
+ */
+function splitIndent(text, start = 0) {
+  let column = start;
   let index = 0;
-  for (; index < line.length && (line[index] === ' ' || line[index] === '\t'); index += 1) {
-    width += line[index] === '\t' ? 4 - (width % 4) : 1;
+  for (; index < text.length && (text[index] === ' ' || text[index] === '\t'); index += 1) {
+    column += text[index] === '\t' ? 4 - (column % 4) : 1;
   }
-  return { width, rest: line.slice(index) };
+  return { width: column - start, rest: text.slice(index) };
 }
 
 /**
@@ -62,8 +67,8 @@ export function docCommandProblems(path, text, tools) {
       let column = width;
       let content = rest;
       // Markers indented up to 3 columns from the enclosing item open items; their content may open a fence.
-      for (let marker; column - base <= 3 && (marker = LIST_MARKER.exec(content)); ) {
-        const after = splitIndent(content.slice(marker[0].length));
+      for (let marker; column - base <= 3 && !THEMATIC_BREAK.test(content) && (marker = LIST_MARKER.exec(content)); ) {
+        const after = splitIndent(content.slice(marker[0].length), column + marker[0].length);
         // One to four spaces after the marker set the item's content column; more start indented code in it.
         base = column + marker[0].length + (after.rest === '' || after.width > 4 ? 1 : after.width);
         items.push(base);
