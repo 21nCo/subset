@@ -318,14 +318,14 @@ The tests (`Tests/CoreTests/AskTests.swift`, `AskOpenRouterTests.swift`, `Tests/
 
 `subset-system` is a command-line tool built from this package (`swift build --package-path native/system --product subset-system`) and bundled in the app at `Subset System.app/Contents/Helpers/subset-system`. It reads this Mac with the same `SystemCore` code the app uses, without the app running, and prints a concise text summary, or JSON with `--json`. It never changes anything: there is no cleanup, write, `serve`, MCP, network, or AI command, and it links `SystemCore` alone, so the app's cleanups are out of its reach. Results stay in memory; nothing is saved.
 
-To run it from Terminal, install the `subset` command once; `subset system` then runs the helper of the Subset System app in `/Applications` or `~/Applications` (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)):
+To run it from Terminal, install the `subset` command once; `subset system` then runs the helper of a Developer ID-signed Subset System app in `/Applications` or `~/Applications` (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)):
 
 ```sh
 npm i -g subset.dev
 subset system status
 ```
 
-`npx subset.dev system ...` works without installing `subset`. Alternatively, link the helper into a folder on your `PATH` and run it by its own name (create `/usr/local/bin` first, or use `sudo`, if needed). The status menu's **Command-Line Helper…** shows both, with this link command for the app's actual location, and copies either:
+`npx subset.dev system ...` works without installing `subset`. `subset` refuses a helper without the Subset team's Developer ID signature, and the app is not signed yet (SET-59), so for a development build run the helper by its path (`'<app>/Contents/Helpers/subset-system' status`), or build and run it with `swift run --package-path native/system subset-system status`. Alternatively, link the helper into a folder on your `PATH` and run it by its own name (create `/usr/local/bin` first, or use `sudo`, if needed). The status menu's **Command-Line Helper…** shows both, with this link command for the app's actual location, and copies either:
 
 ```sh
 ln -s '/Applications/Subset System.app/Contents/Helpers/subset-system' /usr/local/bin/subset-system

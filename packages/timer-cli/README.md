@@ -2,7 +2,7 @@
 
 The `subset timer` command: countdowns, stopwatches and interval workouts (Tabata, EMOM, HIIT, Pomodoro, AMRAP and your own) for people and shell-capable agents, with sounds and notifications on macOS and Linux and an agent skill. Timers run in a per-user daemon on your computer, so they keep running after the command exits. Timer is local only: it opens no network connection and sends nothing anywhere.
 
-> Status: prepared for npm as version 0.1.0, not yet published. The first release (`timer-v0.1.0`) is an owner decision after acceptance on a real Mac (SET-85 to SET-87). Install from a tarball or the repository until then. No Timer surface is listed as available.
+> Status: prepared for npm as version 0.1.0, not yet published. The first release (`timer-v0.1.0`) is an owner decision after acceptance on a real Mac (SET-85 to SET-87). Run it from a build of the repository until then (see [Use](#use)). No Timer surface is listed as available.
 
 ## Use
 
@@ -14,12 +14,11 @@ subset timer start tabata
 subset timer                                # one line per timer
 ```
 
-`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev timer ...` works without installing it. `subset timer` runs the CLI bundled in an installed Timer app, otherwise the published `@subset.dev/timer` (see [`subset.dev`](../subset-dev/README.md)). Until the package is published, run a build from the repository with the same arguments:
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev timer ...` works without installing it. `subset timer` runs the CLI bundled in an installed Timer app, otherwise the published `@subset.dev/timer` (see [`subset.dev`](../subset-dev/README.md)). Neither is released yet, so these commands work only after a release: until then `subset timer` stops with `timer is not on npm yet.` (or refuses an unsigned Timer app). Run a build from the repository instead, with the same arguments:
 
 ```sh
 npm ci && npm run build                     # at the repository root
 node packages/timer-cli/dist/cli.mjs start 25m --name Tea
-cd packages/timer-cli && npm pack           # or pack it: writes subset.dev-timer-0.1.0.tgz for a global install
 ```
 
 | Command | What it does |
@@ -101,7 +100,7 @@ While the Timer macOS app is running and allowed to post notifications, it regis
 
 ### Host configuration
 
-The host starts `npx -y subset.dev timer mcp`, so `npx` must be on the `PATH` the host sees (or give its absolute path, from `which npx`). It runs the installed Timer app's CLI, or the published package. Claude Desktop (`claude_desktop_config.json`):
+The host starts `npx -y subset.dev timer mcp`, so `npx` must be on the `PATH` the host sees (or give its absolute path, from `which npx`). It runs the CLI of an installed, Developer ID-signed Timer app, or the published package, so it works only after a release. Claude Desktop (`claude_desktop_config.json`):
 
 ```json
 { "mcpServers": { "subset-timer": { "command": "npx", "args": ["-y", "subset.dev", "timer", "mcp"] } } }
@@ -111,6 +110,12 @@ VS Code (`.vscode/mcp.json` in a workspace):
 
 ```json
 { "servers": { "subset-timer": { "type": "stdio", "command": "npx", "args": ["-y", "subset.dev", "timer", "mcp"] } } }
+```
+
+Until then, point the host at a build of the repository (`npm ci && npm run build` at its root): the `command` is `node` (its absolute path, from `which node`, if the host's `PATH` lacks it) and the `args` are the absolute path of `packages/timer-cli/dist/cli.mjs` and `mcp`:
+
+```json
+{ "mcpServers": { "subset-timer": { "command": "node", "args": ["/absolute/path/to/subset/packages/timer-cli/dist/cli.mjs", "mcp"] } } }
 ```
 
 The macOS app (SET-81) will bundle a copy of the CLI; the path of that copy for the `command` is documented once SET-81 ships it. Use in real hosts is checked in SET-84, not here.

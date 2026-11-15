@@ -86,6 +86,35 @@ test('a block ends only at its own closing fence', () => {
   assert.equal(problems(lines('```bash', 'subset-timer list')).length, 1);
 });
 
+test('a fence opens with up to three spaces of indentation, counted from its list item', () => {
+  // Fences indented 0 to 3 spaces are checked.
+  for (const indent of ['', ' ', '  ', '   ']) {
+    assert.deepEqual(problems(lines('Intro', '', `${indent}\`\`\`sh`, `${indent}subset-timer list`, `${indent}\`\`\``)).map((problem) => problem.split(':')[1]), ['4'], JSON.stringify(indent));
+  }
+  // Four spaces at the top level make an indented code block (or a paragraph's continuation), not a fence.
+  assert.deepEqual(problems(lines('Intro', '', '    ```sh', '    subset-timer list', '    ```', '', 'subset-timer list')), []);
+  assert.deepEqual(problems(lines('Intro', '\t```sh', '\tsubset-timer list', '\t```')), []);
+  // A fence nested in a list item is indented from the item's content: four spaces under "1. " or "- " is a fence.
+  assert.deepEqual(problems(lines('1. Step:', '', '    ```sh', '    subset-timer list', '    ```')).map((problem) => problem.split(':')[1]), ['4']);
+  assert.deepEqual(problems(lines('- Step:', '    ```sh', '    subset-usage status', '    ```', '- Next', '  ```bash', '  subset-minutes doctor', '  ```')).map((problem) => problem.split(':')[1]), ['3', '7']);
+  assert.deepEqual(problems(lines('1. Step:', '   - Nested:', '     ```sh', '     subset-system status', '     ```')).map((problem) => problem.split(':')[1]), ['4']);
+  assert.deepEqual(problems(lines('- ```sh', '  subset-timer list', '  ```')).map((problem) => problem.split(':')[1]), ['2']);
+  // Seven spaces under "- " (five past its content) is indented code inside the item, not a fence.
+  assert.deepEqual(problems(lines('- Step:', '', '       ```sh', '       subset-timer list', '       ```')), []);
+  // Once the list ends, four spaces is indented code again.
+  assert.deepEqual(problems(lines('- Step', '', 'Prose.', '', '    ```sh', '    subset-timer list', '    ```')), []);
+});
+
+test('a closing fence is indented at most three spaces from its block, and a list item ends its block', () => {
+  // A ``` line indented four spaces inside a top-level block is content, so the block goes on.
+  assert.deepEqual(problems(lines('```sh', '    ```', 'subset-timer list', '```', 'subset-timer list')).map((problem) => problem.split(':')[1]), ['3']);
+  // Up to three spaces still closes it.
+  assert.deepEqual(problems(lines('```sh', '   ```', 'subset-timer list')), []);
+  // A block in a list item closes at the item's indentation, or ends with the item.
+  assert.deepEqual(problems(lines('- Step', '  ```sh', '  subset-usage status', '  ```', '  subset-usage status')).map((problem) => problem.split(':')[1]), ['3']);
+  assert.deepEqual(problems(lines('- Step', '  ```sh', '  subset-usage status', 'Prose ends the item.', 'subset-usage status', '```sh', 'subset-timer list', '```')).map((problem) => problem.split(':')[1]), ['3', '7']);
+});
+
 test('reads Markdown outside test/, fixtures/, changelogs and docs/architecture.md', () => {
   for (const path of ['README.md', 'packages/timer-cli/README.md', 'packages/timer-cli/skills/subset-timer/SKILL.md', 'docs/macos-release.md', 'native/system/README.md']) {
     assert.equal(isCheckedDoc(path), true, path);

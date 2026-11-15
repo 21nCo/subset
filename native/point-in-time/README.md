@@ -129,14 +129,14 @@ subset point-in-time --version
 - `--json` prints one JSON object that follows [`schemas/status-v1.schema.json`](schemas/status-v1.schema.json) (`schemaVersion: 1`); without it the command prints a short text summary.
 - `--include-titles` adds window titles and pages (scheme, host, and path) to the output. Without it no window title or URL path appears in either output; app names, bundle IDs, and hosts do. Query strings and fragments are never stored, so they never appear. Excluded apps are never named.
 
-**Running it from a terminal.** The app bundles the command at `pointInTime.app/Contents/Helpers/point-in-time`. `subset point-in-time` runs it from the pointInTime app in `/Applications` or `~/Applications` (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)); install the `subset` command once:
+**Running it from a terminal.** The app bundles the command at `pointInTime.app/Contents/Helpers/point-in-time`. `subset point-in-time` runs it from a Developer ID-signed pointInTime app in `/Applications` or `~/Applications` (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)); install the `subset` command once:
 
 ```sh
 npm i -g subset.dev
 subset point-in-time status
 ```
 
-`npx subset.dev point-in-time ...` works without installing `subset`. **Command-Line Tool…** in the menu shows these commands and, as the alternative, the command to link the bundled command onto your `PATH` and run it as `point-in-time`; it can copy either or reveal the file. You create the link yourself, for example:
+`npx subset.dev point-in-time ...` works without installing `subset`. `subset` refuses a command without the Subset team's Developer ID signature, such as the ad hoc signed `build-app.sh` build (see [Build and run](#build-and-run)), so for a development build run the command by its path: `native/point-in-time/build/pointInTime.app/Contents/Helpers/point-in-time status`. **Command-Line Tool…** in the menu shows these commands and, as the alternative, the command to link the bundled command onto your `PATH` and run it as `point-in-time`; it can copy either or reveal the file. You create the link yourself, for example:
 
 ```sh
 sudo mkdir -p /usr/local/bin

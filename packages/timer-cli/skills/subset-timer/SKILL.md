@@ -7,6 +7,8 @@ description: Start, check and control countdowns, stopwatches and interval worko
 
 `npx -y subset.dev timer` runs timers in a per-user background daemon on this computer (`subset.dev` is the Subset command; npx fetches it on first use, and `-y` skips npm's prompt). A timer keeps running, and plays its sounds and notifications, after your turn ends and after the command exits. You do not need to keep a process open or poll it.
 
+Before Timer's first release, `npx -y subset.dev timer` works only after Timer is published to npm or a Developer ID-signed Timer app is installed; until then it fails with `timer is not on npm yet.` and starts nothing. If the user runs Timer from a build of the Subset repository, run `node <repository>/packages/timer-cli/dist/cli.mjs` in its place with the same arguments, using the absolute path of their checkout.
+
 Use it when the user asks you to:
 
 - time something ("set a 25 minute timer", "remind me in 90 seconds");

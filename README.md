@@ -61,7 +61,7 @@ subset                      # lists the tools
 subset usage status         # runs a tool; arguments after its name go to the tool
 ```
 
-`npx subset.dev <tool> ...` works without installing (for example `npx subset.dev usage status`). Agent skills and MCP configs use `npx -y subset.dev <tool>`. See [`packages/subset-dev`](packages/subset-dev/README.md) for the tools and commands.
+`npx subset.dev <tool> ...` works without installing (for example `npx subset.dev usage status`). A tool runs this way once its npm package is published, or, for a command bundled in a Mac app, from a Developer ID-signed release of the app; until then, its README gives the command for a build of this repository. Agent skills and MCP configs use `npx -y subset.dev <tool>`. See [`packages/subset-dev`](packages/subset-dev/README.md) for the tools and commands.
 
 ## Development
 

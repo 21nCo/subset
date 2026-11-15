@@ -2,7 +2,7 @@
 
 `subset minutes` sends a visible notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio to a local WebM file. The bot runs in your installed Google Chrome. Nothing is sent to Subset.
 
-> Status: prepared for npm, not published. Install from a tarball or the repository until a release is announced. No bot has joined a real meeting with this release candidate.
+> Status: prepared for npm, not published. Run it from a build of the repository until a release is announced (see [Use](#use)). No bot has joined a real meeting with this release candidate.
 
 Everyone in the meeting sees the bot join under its name. Tell participants that you are recording, and follow the recording-consent rules that apply to you and to the meeting platform.
 
@@ -15,12 +15,11 @@ subset minutes doctor
 subset minutes join 'https://meet.google.com/abc-defg-hij'
 ```
 
-`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev minutes ...` works without installing it. `subset minutes` runs the CLI bundled in an installed Minutes app, otherwise the published `@subset.dev/minutes` (see [`subset.dev`](../subset-dev/README.md)). Until the package is published, run a build from the repository with the same arguments:
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev minutes ...` works without installing it. `subset minutes` runs the CLI bundled in an installed Minutes app, otherwise the published `@subset.dev/minutes` (see [`subset.dev`](../subset-dev/README.md)). Neither is released yet, so these commands work only after a release: until then `subset minutes` stops with `minutes is not on npm yet.` (or refuses a Minutes app without the Subset team's Developer ID signature). Run a build from the repository instead, with the same arguments:
 
 ```sh
 npm ci && npm run build                    # at the repository root
 node packages/minutes-cli/dist/cli.mjs doctor
-cd packages/minutes-cli && npm pack        # or pack it: writes subset.dev-minutes-<version>.tgz for a global install
 ```
 
 | Command | What it does |
