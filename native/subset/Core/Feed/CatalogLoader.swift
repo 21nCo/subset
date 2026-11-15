@@ -19,9 +19,10 @@ public enum CatalogError: Error, Equatable, Sendable {
 
 /// Where the feed is: `https://subset.21n.dev/catalog/v1.json`, unless the `SUBSET_CATALOG_URL` environment variable or
 /// the hidden `SubsetCatalogURL` default (`defaults write dev.subset.manager SubsetCatalogURL <url>`) names another
-/// https URL on an allowed host. Any other URL is refused rather than replaced by the default. An accepted URL is spelled
-/// as the WHATWG URL parser spells it (`url.href` in `subset`): lowercase scheme and host, no `:443`, `/` for an empty
-/// path, so both key the shared cache alike.
+/// https URL on an allowed host. Any other URL is refused rather than replaced by the default. An accepted URL gets four
+/// of the WHATWG spelling rules `url.href` applies in `subset`: lowercase scheme and host, no `:443`, `/` for an empty
+/// path, so for these spellings both key the shared cache alike. Other differences, such as `..` path segments, are
+/// not normalized.
 public enum CatalogLocation {
     public static let defaultURL = URL(string: "https://subset.21n.dev/catalog/v1.json")!
     public static let environmentVariable = "SUBSET_CATALOG_URL"

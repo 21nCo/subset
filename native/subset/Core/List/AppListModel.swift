@@ -51,13 +51,13 @@ public final class AppListModel: ObservableObject {
     }
 
     private let loader: any CatalogLoading
-    private let finder: InstalledAppFinder
+    private let finder: any InstalledAppDetecting
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
 
     public init(
-        loader: any CatalogLoading, finder: InstalledAppFinder, defaults: UserDefaults = .standard,
+        loader: any CatalogLoading, finder: any InstalledAppDetecting, defaults: UserDefaults = .standard,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.loader = loader
@@ -112,34 +112,40 @@ public final class AppListModel: ObservableObject {
     }
 
     /// Loads the catalog (from the cache when it is younger than 5 minutes, unless `force`) and looks for the installed
-    /// apps again. A refresh while another runs does nothing, and a cancelled one changes nothing: a fetch cut short
-    /// is not a feed failure.
+    /// apps again, then publishes the catalog, its status and the installed apps together. A refresh while another runs
+    /// does nothing. A refresh whose task is cancelled (`stopAutoRefresh`, or the caller's task) changes nothing, even
+    /// when the cancel comes during detection: a fetch cut short is not a feed failure.
     public func refresh(force: Bool = false) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
         let result = await loader.load(refresh: force)
         if Task.isCancelled { return }
+        var nextCatalog = catalog
+        var nextFetchedAt = fetchedAt
+        let nextStatus: CatalogStatus
         switch result {
         case .success(let loaded):
-            catalog = loaded.catalog
-            fetchedAt = loaded.fetchedAt
-            status = loaded.warning.map(CatalogStatus.offline) ?? .current
+            nextCatalog = loaded.catalog
+            nextFetchedAt = loaded.fetchedAt
+            nextStatus = loaded.warning.map(CatalogStatus.offline) ?? .current
         case .failure(let error):
-            status = .failed(error.message)
+            nextStatus = .failed(error.message)
             // What was shown stays (the reader rules keep the previous feed) while it is younger than 7 days.
-            if let fetchedAt, now().timeIntervalSince(fetchedAt) >= CatalogLoader.staleLimit {
-                catalog = nil
-                self.fetchedAt = nil
+            if let shown = nextFetchedAt, now().timeIntervalSince(shown) >= CatalogLoader.staleLimit {
+                nextCatalog = nil
+                nextFetchedAt = nil
             }
         }
-        guard let apps = catalog?.apps else {
-            installed = [:]
-            return
+        var found: [String: [InstalledCopy]] = [:]
+        if let apps = nextCatalog?.apps {
+            let finder = finder
+            found = await Task.detached { finder.detect(apps) }.value
+            if Task.isCancelled { return }
         }
-        let finder = finder
-        let found = await Task.detached { finder.detect(apps) }.value
-        if Task.isCancelled { return }
+        catalog = nextCatalog
+        fetchedAt = nextFetchedAt
+        status = nextStatus
         installed = found
     }
 

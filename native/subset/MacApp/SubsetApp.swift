@@ -27,7 +27,7 @@ struct SubsetApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The catalog and installed apps, shared by the menu and the window.
-    let model = AppListModel(loader: CatalogLoader.standard(), finder: .standard())
+    let model = AppListModel(loader: CatalogLoader.standard(), finder: InstalledAppFinder.standard())
 
     func applicationWillFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the policy

@@ -40,6 +40,36 @@ final class GatedLoader: CatalogLoading, @unchecked Sendable {
     }
 }
 
+/// Detects with `finder`, except that call number `gatedCall` (from 1) waits until `release`, then finds nothing.
+final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
+    private let finder: InstalledAppFinder
+    private let gatedCall: Int
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var calls = 0
+    private var waiting = false
+
+    init(_ finder: InstalledAppFinder, gatedCall: Int) {
+        self.finder = finder
+        self.gatedCall = gatedCall
+    }
+
+    var isWaiting: Bool { lock.withLock { waiting } }
+
+    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
+        let call = lock.withLock { () -> Int in
+            calls += 1
+            if calls == gatedCall { waiting = true }
+            return calls
+        }
+        guard call == gatedCall else { return finder.detect(apps) }
+        gate.wait()
+        return [:]
+    }
+
+    func release() { gate.signal() }
+}
+
 @MainActor
 final class AppListModelTests: XCTestCase {
     private var defaults: UserDefaults!
@@ -216,7 +246,7 @@ final class AppListModelTests: XCTestCase {
         let fetchedAt = model.fetchedAt
         XCTAssertEqual(model.status, .current)
 
-        // Closing the window mid-fetch cancels the refresh; the transport then reports the fetch as cancelled.
+        // stopAutoRefresh cancels a refresh mid-fetch; the transport then reports the fetch as cancelled.
         clock.advance(60 * 60)
         let cancelled = Task { await model.refresh() }
         try await waitUntil { loader.isWaiting }
@@ -226,6 +256,36 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(model.status, .current)
         XCTAssertEqual(model.fetchedAt, fetchedAt)
         XCTAssertEqual(model.rows.map(\.id), ["breaks"])
+        XCTAssertFalse(model.isRefreshing)
+    }
+
+    func testARefreshCancelledDuringDetectionChangesNothing() async throws {
+        try install("Breaks", "dev.subset.breaks", version: "0.0.9")
+        let gated = GatedFinder(finder, gatedCall: 2)
+        let first = try loaded("catalog-valid-live-only")
+        clock.advance(60 * 60)
+        // The next load succeeds with another feed, then the refresh is cancelled while the apps are detected.
+        let second = try loaded("catalog-valid-live-and-beta", warning: "offline")
+        let loader = RecordedLoader([first, second])
+        let clock = clock
+        let model = AppListModel(loader: loader, finder: gated, defaults: defaults, now: { clock.now })
+        await model.refresh()
+        let catalog = model.catalog
+        let fetchedAt = model.fetchedAt
+        let installed = model.installed
+        XCTAssertEqual(model.status, .current)
+        XCTAssertEqual(installed["breaks"]?.map(\.versionLabel), ["0.0.9"])
+
+        let cancelled = Task { await model.refresh() }
+        try await waitUntil { gated.isWaiting }
+        cancelled.cancel()
+        gated.release()
+        await cancelled.value
+        XCTAssertEqual(model.catalog, catalog)
+        XCTAssertEqual(model.fetchedAt, fetchedAt)
+        XCTAssertEqual(model.status, .current)
+        XCTAssertEqual(model.installed, installed)
+        XCTAssertEqual(model.updatesMenuTitle, "1 update available")
         XCTAssertFalse(model.isRefreshing)
     }
 

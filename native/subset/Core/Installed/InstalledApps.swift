@@ -45,11 +45,17 @@ public struct InstalledCopy: Equatable, Sendable {
     }
 }
 
+/// Finds which feed apps are installed; `InstalledAppFinder` looks on disk.
+public protocol InstalledAppDetecting: Sendable {
+    /// The installed copies of each app, by app ID, in folder order.
+    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]]
+}
+
 /// Which feed apps are installed (decision D2 of SET-224, as `subset list` detects them): `<appName>.app` at the top
 /// level of /Applications and ~/Applications, accepted only when its Info.plist's CFBundleIdentifier is the feed's
 /// bundle ID. An app elsewhere (another folder, a subfolder, under another name, a symbolic link) is not found. A valid
 /// install receipt that names the copy's path, version and (for a beta) build adds its channel.
-public struct InstalledAppFinder: Sendable {
+public struct InstalledAppFinder: InstalledAppDetecting {
     static let maxInfoPlistBytes = 1024 * 1024
 
     public var folders: [ApplicationsFolder]
