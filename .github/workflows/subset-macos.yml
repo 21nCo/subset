@@ -1,0 +1,80 @@
+name: Subset macOS
+
+# Builds and tests the Subset manager app (native/subset) on macOS. No signing credentials are available or needed here:
+# the app is built unsigned, and releases go through release-macos.yml.
+on:
+  pull_request:
+    paths:
+      - 'native/subset/**'
+      - '.github/workflows/subset-macos.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'native/subset/**'
+      - '.github/workflows/subset-macos.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: subset-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native/subset
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$xcode" ]; then echo "No Xcode 26 on this runner." >&2; exit 1; fi
+          sudo xcode-select --switch "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      - name: Package tests
+        run: swift test
+
+      - name: Generated project is current
+        run: |
+          gem install --user-install xcodeproj -v 1.27.0
+          export PATH="$(ruby -e 'print Gem.user_dir')/bin:$PATH"
+          ruby ProjectGenerator.rb
+          git diff --exit-code -- Subset.xcodeproj
+          test -z "$(git status --porcelain -- Subset.xcodeproj)"
+          sh Tests/project-generator.sh
+
+      - name: Build and test the Xcode project (unsigned)
+        run: |
+          xcodebuild -project Subset.xcodeproj -scheme Subset -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build test
+
+      - name: Build the Release configuration (unsigned)
+        run: |
+          xcodebuild -project Subset.xcodeproj -scheme Subset -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build
+
+      # The built app, not just its sources: the bundle ID macos-release.json declares, no Dock icon, version 0.1.0 and
+      # macOS 14 or later.
+      - name: Release app is the Subset manager
+        run: |
+          plist="$RUNNER_TEMP/derived/Build/Products/Release/Subset.app/Contents/Info.plist"
+          check() {
+            actual="$(plutil -extract "$1" raw -o - "$plist")"
+            [ "$actual" = "$2" ] || { echo "$1 is $actual, expected $2" >&2; exit 1; }
+          }
+          check CFBundleIdentifier "$(plutil -extract bundleId raw -o - macos-release.json)"
+          check CFBundleIdentifier dev.subset.manager
+          check CFBundleName Subset
+          check LSUIElement true
+          check CFBundleShortVersionString 0.1.0
+          check LSMinimumSystemVersion 14.0
