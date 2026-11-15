@@ -1,0 +1,39 @@
+README.md
+  s_78533450d0a456::t_cb54ed69134479 64
+native/minutes/README.md
+  s_78533450d0a456::t_dbdf957c9b9fbe 5
+native/point-in-time/README.md
+  s_78533450d0a456::t_c9117d52e8d70a 132,139
+native/system/README.md
+  s_78533450d0a456::t_2bf843cdc113ca 321,328
+native/timer/README.md
+  s_78533450d0a456::t_0fa36e30065174 3
+packages/minutes-cli/README.md
+  s_78533450d0a456::t_4cd7fca7523be1 5,18
+packages/timer-cli/README.md
+  s_78533450d0a456::t_ef897fac838782 5,17,103,115-120
+packages/timer-cli/skills/subset-timer/SKILL.md
+  s_78533450d0a456::t_968606d5660e9f 10-11
+packages/usage-cli/README.md
+  s_78533450d0a456::t_7a4f0c58f7fafc 5,16,41-46
+scripts/docs-commands.mjs
+  s_78533450d0a456::t_c4ec147803945e 8-9,17-18,29-38,48-49,55-57,59-75,78,82
+scripts/docs-commands.test.mjs
+  s_78533450d0a456::t_8b5cb900782c54 89-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "76c9308a8bf4a4fac9f490dc5a191d1311e01b3a",
+  "prompts": {},
+  "sessions": {
+    "s_78533450d0a456": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_78533450d0a456",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
