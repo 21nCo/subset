@@ -22,13 +22,17 @@ import {
 } from '@subset.dev/minutes-core';
 import manifest from '../package.json' with { type: 'json' };
 
+/** The bin name, which JSON event messages always use. */
+const BIN = 'subset-minutes';
+
 /**
- * The command name to print in help and messages: `SUBSET_COMMAND` when the `subset` launcher set it to
- * `subset <tool>` (such as `subset minutes`), otherwise the bin name. Any other value is ignored. Only text uses it.
+ * The command name to print in help and on stderr: `SUBSET_COMMAND` when the `subset` launcher set it to
+ * `subset <tool>` (such as `subset minutes`), otherwise the bin name. Any other value is ignored. Only human text
+ * uses it; JSON events name the bin whatever `SUBSET_COMMAND` is.
  */
 export function commandName(env) {
   const value = env?.SUBSET_COMMAND;
-  return typeof value === 'string' && /^subset [a-z0-9-]+$/.test(value) ? value : 'subset-minutes';
+  return typeof value === 'string' && /^subset [a-z0-9-]+$/.test(value) ? value : BIN;
 }
 
 /** The help, naming the command `name` (`subset-minutes`, or `subset minutes` when started through `subset`). */
@@ -60,7 +64,7 @@ Exit status: 0 success, 1 the session or a check failed, 2 invalid command or me
 `;
 
 /** The help of the `subset-minutes` bin. */
-export const usage = usageText('subset-minutes');
+export const usage = usageText(BIN);
 
 const commandOptions = {
   join: { out: { type: 'string' }, name: { type: 'string' }, 'max-minutes': { type: 'string' }, json: { type: 'boolean' }, profile: { type: 'string' }, 'stop-on-stdin-close': { type: 'boolean' }, 'link-from-stdin': { type: 'boolean' } },
@@ -139,7 +143,10 @@ export async function main(io) {
   const json = rest.includes('--json');
   // Own properties only, so names such as "constructor" are unknown commands.
   const options = Object.hasOwn(commandOptions, command) ? commandOptions[command] : undefined;
-  if (!options) return usageError(io, json, `Unknown command "${command}". Run ${cli} --help.`);
+  if (!options) {
+    const hint = (tool) => `Unknown command "${command}". Run ${tool} --help.`;
+    return usageError(io, json, hint(BIN), hint(cli));
+  }
 
   let parsed;
   try {
@@ -165,12 +172,13 @@ export async function main(io) {
   return 2;
 }
 
-function usageError(io, json, message) {
+/** Reports a usage error: `message` in the JSON error event, or `text` (the same message naming the command that started the CLI) on stderr. */
+function usageError(io, json, message, text = message) {
   if (json) {
     io.stdout(`${JSON.stringify(createEvent(null, { type: 'error', code: 'usage', message }))}\n`);
     io.stdout(`${JSON.stringify(createEvent(null, { type: 'ended', reason: 'failed', path: null, bytes: null }))}\n`);
   } else {
-    io.stderr(`${message}\n`);
+    io.stderr(`${text}\n`);
   }
   return 2;
 }

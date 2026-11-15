@@ -7,7 +7,7 @@ import { daemonCommands } from './daemon.mjs';
 import { mcpCommands } from './mcp.mjs';
 import { presetCommands } from './presets.mjs';
 import { serveCommands } from './serve.mjs';
-import { CliError, commandName, EXIT } from './shared.mjs';
+import { BIN, CliError, commandName, EXIT, hintError } from './shared.mjs';
 import { timerCommands } from './timers.mjs';
 
 export const VERSION = manifest.version;
@@ -78,12 +78,12 @@ Exit status: 0 ok, 2 invalid input or an ambiguous <ref>, 3 daemon unavailable, 
 `;
 
 /** The help of the `subset-timer` bin. */
-export const HELP = helpText('subset-timer');
+export const HELP = helpText(BIN);
 
 const COMMANDS = { ...timerCommands, ...presetCommands, ...daemonCommands, ...serveCommands, ...mcpCommands };
 const GROUPS = new Set(Object.keys(COMMANDS).filter((name) => name.includes(' ')).map((name) => name.split(' ')[0]));
 
-/** The command `argv` names and the arguments after it. No command, or only options, is `list`. `cli` names this command in the hint. */
+/** The command `argv` names and the arguments after it. No command, or only options, is `list`. `cli` names this command in the stderr hint. */
 function findCommand(argv, cli) {
   if (!argv.length || argv[0].startsWith('-')) return { name: 'list', rest: argv };
   const [first, second] = argv;
@@ -91,7 +91,7 @@ function findCommand(argv, cli) {
   // Own properties only, so names such as "constructor" are unknown commands.
   if (!Object.hasOwn(COMMANDS, name)) {
     const hint = GROUPS.has(first) ? `Unknown ${first} command "${second ?? ''}".` : `Unknown command "${first}".`;
-    throw new CliError('invalid_input', `${hint} Run ${cli} --help.`);
+    throw hintError('invalid_input', cli, (tool) => `${hint} Run ${tool} --help.`);
   }
   return { name, rest: argv.slice(name.split(' ').length) };
 }
@@ -103,7 +103,7 @@ function findCommand(argv, cli) {
 function wantsHelp(argv) {
   let options = {};
   try {
-    options = COMMANDS[findCommand(argv, '').name].options;
+    options = COMMANDS[findCommand(argv, BIN).name].options;
   } catch {
     // An unknown command still shows help when asked.
   }
@@ -122,8 +122,9 @@ function connect(env, cliPath) {
   return createClient({ dataDir, cliPath, env });
 }
 
+/** The stderr text of `error`, naming the command `cli`; its `text`, when it has one, names `cli` in its hint too. */
 function errorText(error, cli) {
-  const lines = [`${cli}: ${error.message}`];
+  const lines = [`${cli}: ${error.text ?? error.message}`];
   for (const candidate of error.details.candidates ?? []) {
     lines.push(`  ${candidate.id}  ${candidate.name}${candidate.status ? ` (${candidate.status})` : ''}`);
   }
@@ -167,13 +168,13 @@ export async function main(io) {
     try {
       parsed = parseArgs({ args: rest, options: { ...command.options, json: { type: 'boolean' } }, allowPositionals: true, strict: true });
     } catch (error) {
-      throw new CliError('invalid_input', `${error.message} Run ${cli} --help.`);
+      throw hintError('invalid_input', cli, (tool) => `${error.message} Run ${tool} --help.`);
     }
     json = parsed.values.json === true;
     const print = (output) => stdout(`${json ? JSON.stringify(output.json) : output.text}\n`);
     const [min, max] = command.positionals;
     if (parsed.positionals.length < min || parsed.positionals.length > max) {
-      throw new CliError('invalid_input', `Wrong number of arguments for ${name}. Run ${cli} --help.`);
+      throw hintError('invalid_input', cli, (tool) => `Wrong number of arguments for ${name}. Run ${tool} --help.`);
     }
     if (parsed.positionals.some((value) => !value.trim())) throw new CliError('invalid_input', `${name} needs a non-empty argument.`);
     // Commands that need no daemon client never check the data directory.

@@ -1,5 +1,5 @@
 // SET-233: the CLI names itself after SUBSET_COMMAND (`subset minutes`) when the `subset` launcher started it, and
-// subset-minutes otherwise. Only text changes: exit codes and JSON event codes stay the same.
+// subset-minutes otherwise. Only human text changes: exit codes and --json events stay byte-identical.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { main, usage, usageText } from '../src/main.mjs';
@@ -42,12 +42,24 @@ test('the unknown-command hint names the command that started the CLI', async ()
   for (const [env, name] of cases) {
     const message = `Unknown command "record". Run ${name} --help.`;
     assert.deepEqual(await run(['record'], env), { code: 2, stdout: '', stderr: `${message}\n` }, JSON.stringify(env.SUBSET_COMMAND));
-    const json = await run(['record', '--json'], env);
-    assert.equal(json.code, 2);
-    const events = json.stdout.trim().split('\n').map((line) => JSON.parse(line));
-    assert.deepEqual(events.map(({ type, code, message: text, reason }) => ({ type, code, message: text, reason })), [
-      { type: 'error', code: 'usage', message, reason: undefined },
-      { type: 'ended', code: undefined, message: undefined, reason: 'failed' }
-    ]);
+  }
+});
+
+test('the --json usage error names subset-minutes whatever SUBSET_COMMAND is', async () => {
+  // Events carry a timestamp, so compare everything but it.
+  const strip = (stdout) => stdout.trim().split('\n').map((line) => {
+    const { at, ...event } = JSON.parse(line);
+    assert.equal(typeof at, 'string');
+    return event;
+  });
+  const direct = await run(['record', '--json'], {});
+  assert.equal(direct.code, 2);
+  assert.deepEqual(strip(direct.stdout).map(({ type, code, message, reason }) => ({ type, code, message, reason })), [
+    { type: 'error', code: 'usage', message: 'Unknown command "record". Run subset-minutes --help.', reason: undefined },
+    { type: 'ended', code: undefined, message: undefined, reason: 'failed' }
+  ]);
+  for (const value of ['subset minutes', 'subset Minutes']) {
+    const through = await run(['record', '--json'], { SUBSET_COMMAND: value });
+    assert.deepEqual({ code: through.code, stderr: through.stderr, events: strip(through.stdout) }, { code: 2, stderr: '', events: strip(direct.stdout) }, value);
   }
 });

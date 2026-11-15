@@ -1,5 +1,5 @@
 // SET-233: the CLI names itself after SUBSET_COMMAND (`subset timer`) when the `subset` launcher started it, and
-// subset-timer otherwise. Only text changes: exit codes and JSON error codes stay the same.
+// subset-timer otherwise. Only human text changes: exit codes and --json output stay byte-identical.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HELP, helpText } from '../../src/commands/index.mjs';
@@ -51,12 +51,23 @@ test('error hints name the command that started the CLI', async () => {
       { code: 2, stdout: '', stderr: `${name}: Unknown command "frobnicate". Run ${name} --help.\n` },
       JSON.stringify(env.SUBSET_COMMAND)
     );
-    const json = await runCli(['frobnicate', '--json'], { env });
-    assert.deepEqual({ code: json.code, body: json.json() }, {
-      code: 2,
-      body: { error: { code: 'invalid_input', message: `Unknown command "frobnicate". Run ${name} --help.` } }
-    });
   }
+});
+
+test('--json errors name subset-timer whatever SUBSET_COMMAND is', async () => {
+  const argvs = [['frobnicate', '--json'], ['preset', 'frob', '--json'], ['list', '--frobnicate', '--json'], ['status', '--json']];
+  for (const argv of argvs) {
+    const direct = await runCli(argv, { env: ENV });
+    assert.equal(direct.code, 2);
+    assert.match(direct.json().error.message, /Run subset-timer --help\.$/);
+    for (const env of [THROUGH_SUBSET, { ...ENV, SUBSET_COMMAND: 'subset Timer' }]) {
+      const through = await runCli(argv, { env });
+      assert.deepEqual({ code: through.code, stdout: through.stdout, stderr: through.stderr }, { code: direct.code, stdout: direct.stdout, stderr: direct.stderr }, argv.join(' '));
+    }
+  }
+  assert.deepEqual((await runCli(['frobnicate', '--json'], { env: THROUGH_SUBSET })).json(), {
+    error: { code: 'invalid_input', message: 'Unknown command "frobnicate". Run subset-timer --help.' }
+  });
   const options = await runCli(['list', '--frobnicate'], { env: THROUGH_SUBSET });
   assert.equal(options.code, 2);
   assert.match(options.stderr, /^subset timer: .+ Run subset timer --help\.\n$/);
@@ -69,10 +80,21 @@ test('start hints name the command that started the CLI', async (t) => {
   for (const [env, name] of [[ENV, 'subset-timer'], [THROUGH_SUBSET, 'subset timer'], [{ ...ENV, SUBSET_COMMAND: 'subset Timer' }, 'subset-timer']]) {
     const missing = await run(['start'], { env });
     assert.deepEqual({ code: missing.code, stderr: missing.stderr }, { code: 2, stderr: `${name}: start needs a <spec> or --until. Run ${name} --help.\n` });
-    const preset = await run(['start', 'nosuchpreset', '--json'], { env });
-    assert.deepEqual({ code: preset.code, body: preset.json() }, {
+    const preset = await run(['start', 'nosuchpreset'], { env });
+    assert.deepEqual({ code: preset.code, stderr: preset.stderr }, {
       code: 4,
-      body: { error: { code: 'not_found', message: `"nosuchpreset" is not a duration, stopwatch, interval or preset. Run ${name} presets to list presets.` } }
+      stderr: `${name}: "nosuchpreset" is not a duration, stopwatch, interval or preset. Run ${name} presets to list presets.\n`
+    });
+    // The --json messages name the bin whatever SUBSET_COMMAND is.
+    const missingJson = await run(['start', '--json'], { env });
+    assert.deepEqual({ code: missingJson.code, stdout: missingJson.stdout }, {
+      code: 2,
+      stdout: `${JSON.stringify({ error: { code: 'invalid_input', message: 'start needs a <spec> or --until. Run subset-timer --help.' } })}\n`
+    });
+    const presetJson = await run(['start', 'nosuchpreset', '--json'], { env });
+    assert.deepEqual({ code: presetJson.code, stdout: presetJson.stdout }, {
+      code: 4,
+      stdout: `${JSON.stringify({ error: { code: 'not_found', message: '"nosuchpreset" is not a duration, stopwatch, interval or preset. Run subset-timer presets to list presets.' } })}\n`
     });
   }
 });
