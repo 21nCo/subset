@@ -1,0 +1,19 @@
+native/subset/README.md
+  s_fa18a41950ce90::t_a77c2c3ddd1815 87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a7468ba5083431263dc9c8e4f879614e9f64385e",
+  "prompts": {},
+  "sessions": {
+    "s_fa18a41950ce90": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "23150b8f-44ff-4b6f-b865-2e80dbf1f0eb",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
