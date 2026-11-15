@@ -2,7 +2,8 @@ import Foundation
 
 /// The catalog feed, `subset.catalog@1` (`packages/catalog/README.md`): the Mac apps Subset ships, by channel, and its
 /// command-line tools. `Catalog.parse` applies the reader rules the `subset` command applies, so both readers accept and
-/// refuse the same documents (`CatalogFeedTests` runs both against `packages/catalog/feed/fixtures`).
+/// refuse the same documents (`CatalogFeedTests` runs both against `packages/catalog/feed/fixtures`), except two that
+/// only the app refuses (see `StrictJSON`): a property name given twice in one object, and an unpaired surrogate escape.
 public struct Catalog: Equatable, Sendable {
     public static let schema = "subset.catalog@1"
     /// The largest feed a reader accepts, as received (256 KiB).

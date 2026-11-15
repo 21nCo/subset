@@ -3,9 +3,12 @@ import Foundation
 /// The JSON grammar of RFC 8259, as JavaScript's `JSON.parse` reads it, checked over UTF-8 bytes before Foundation
 /// parses them. `JSONSerialization` is more lenient than `JSON.parse` (it reads trailing commas, and UTF-16 or UTF-32
 /// text without a byte order mark), so without this check the app would accept feeds, cached copies and receipts that
-/// the `subset` command refuses. One difference is the other way round, on purpose: a property name that appears twice
-/// in an object is refused here, because `JSON.parse` keeps the last value and `JSONSerialization` the first, so the two
-/// readers would otherwise see different documents.
+/// the `subset` command refuses. Two differences are the other way round, on purpose, where the app is stricter:
+/// - a property name that appears twice in an object is refused, because `JSON.parse` keeps the last value and
+///   `JSONSerialization` the first, so the two readers would otherwise see different documents;
+/// - a `\u` escape of an unpaired UTF-16 surrogate (a high one, `\uD800`-`\uDBFF`, not followed by a `\u` escape of a
+///   low one, `\uDC00`-`\uDFFF`, or a low one on its own) is refused, because `JSON.parse` keeps it in the string while
+///   `JSONSerialization` cannot read it, so the reason is given here rather than left to Foundation.
 enum StrictJSON {
     /// Why `bytes` is not one JSON text, or nil when it is. The bytes must already be valid UTF-8.
     static func problem(_ bytes: [UInt8]) -> String? {
@@ -25,15 +28,12 @@ enum StrictJSON {
         let bytes: [UInt8]
         var index = 0
 
-        /// An open object (with the property names read so far, as UTF-16 code units) or array.
+        /// An open object or array.
         enum Frame {
-            case object(Set<[UInt16]>)
+            case object
             case array
 
-            var isObject: Bool {
-                if case .object = self { return true }
-                return false
-            }
+            var isObject: Bool { self == .object }
         }
 
         init(bytes: [UInt8]) {
@@ -43,6 +43,9 @@ enum StrictJSON {
         // Iterative, so a deeply nested document cannot overflow the stack.
         mutating func run() -> String? {
             var stack: [Frame] = []
+            // The property names read so far in each open object, innermost last, as UTF-16 code units. Kept apart from
+            // `stack` and changed in place, so adding a name does not copy the set.
+            var names: [Set<[UInt16]>] = []
             while true {
                 // A value is expected here.
                 skipWhitespace()
@@ -54,9 +57,9 @@ enum StrictJSON {
                     if peek(UInt8(ascii: "}")) {
                         index += 1
                     } else {
-                        var names = Set<[UInt16]>()
-                        if let problem = propertyName(into: &names) { return problem }
-                        stack.append(.object(names))
+                        names.append([])
+                        stack.append(.object)
+                        if let problem = propertyName(into: &names[names.count - 1]) { return problem }
                         continue
                     }
                 case UInt8(ascii: "["):
@@ -92,9 +95,8 @@ enum StrictJSON {
                     if byte == UInt8(ascii: ",") {
                         index += 1
                         skipWhitespace()
-                        if case .object(var names) = frame {
-                            if let problem = propertyName(into: &names, afterComma: true) { return problem }
-                            stack[stack.count - 1] = .object(names)
+                        if frame.isObject {
+                            if let problem = propertyName(into: &names[names.count - 1], afterComma: true) { return problem }
                         } else if peek(UInt8(ascii: "]")) {
                             return "a trailing comma at byte \(index - 1)"
                         }
@@ -102,7 +104,7 @@ enum StrictJSON {
                     }
                     if byte == UInt8(ascii: frame.isObject ? "}" : "]") {
                         index += 1
-                        stack.removeLast()
+                        if stack.removeLast().isObject { names.removeLast() }
                         continue
                     }
                     return unexpected("in an \(frame.isObject ? "object" : "array")")
@@ -160,11 +162,20 @@ enum StrictJSON {
                 case UInt8(ascii: "r"): units.append(0x0D)
                 case UInt8(ascii: "t"): units.append(0x09)
                 case UInt8(ascii: "u"):
-                    guard index + 6 <= bytes.count,
-                          let unit = UInt16(String(decoding: bytes[index + 2 ..< index + 6], as: UTF8.self), radix: 16),
-                          bytes[index + 2 ..< index + 6].allSatisfy(\.isHexDigit)
-                    else { return .failure(Refusal("a bad \\u escape at byte \(index)")) }
-                    units.append(unit)
+                    guard let unit = hexEscape(at: index) else { return .failure(Refusal("a bad \\u escape at byte \(index)")) }
+                    if (0xD800 ... 0xDBFF).contains(unit) {
+                        // A high surrogate must be followed at once by the escape of a low one.
+                        guard let low = hexEscape(at: index + 6), (0xDC00 ... 0xDFFF).contains(low) else {
+                            return .failure(Refusal("an unpaired surrogate escape at byte \(index)"))
+                        }
+                        units += [unit, low]
+                        index += 6
+                    } else if (0xDC00 ... 0xDFFF).contains(unit) {
+                        // A low surrogate that is not taken with the high one before it.
+                        return .failure(Refusal("an unpaired surrogate escape at byte \(index)"))
+                    } else {
+                        units.append(unit)
+                    }
                     index += 4
                 default:
                     return .failure(Refusal("a bad escape at byte \(index)"))
@@ -173,6 +184,14 @@ enum StrictJSON {
                 run = index
             }
             return .failure(Refusal("the string that starts at byte \(start) does not end"))
+        }
+
+        // The code unit of the `\uXXXX` escape at byte `start`, or nil when there is none.
+        func hexEscape(at start: Int) -> UInt16? {
+            guard start + 6 <= bytes.count, bytes[start] == UInt8(ascii: "\\"), bytes[start + 1] == UInt8(ascii: "u"),
+                  bytes[start + 2 ..< start + 6].allSatisfy(\.isHexDigit)
+            else { return nil }
+            return UInt16(String(decoding: bytes[start + 2 ..< start + 6], as: UTF8.self), radix: 16)
         }
 
         mutating func literal(_ word: String) -> String? {

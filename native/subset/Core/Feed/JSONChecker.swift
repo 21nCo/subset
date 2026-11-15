@@ -107,7 +107,8 @@ struct JSONChecker {
 
     /// Parses `data` as UTF-8 JSON by the rules of the `subset` command (`TextDecoder` with `fatal`, then `JSON.parse`),
     /// or returns why it is not: bytes that are not UTF-8 (UTF-16 and UTF-32 text among them), anything outside the
-    /// RFC 8259 grammar (a trailing comma, a NUL byte), or a property name that appears twice (see `StrictJSON`). A
+    /// RFC 8259 grammar (a trailing comma, a NUL byte), and, where the app is stricter than `subset`, a property name
+    /// that appears twice or an unpaired surrogate escape such as `\uD800` (see `StrictJSON`). A
     /// leading byte order mark is refused, as `subset` refuses it in a feed and its cache, unless
     /// `allowingByteOrderMark` (`subset` skips one at the start of a receipt).
     static func parse(_ data: Data, allowingByteOrderMark: Bool = false) -> Result<Any, FeedRefusal> {

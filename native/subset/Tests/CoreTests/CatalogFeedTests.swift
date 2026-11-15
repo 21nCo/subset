@@ -163,6 +163,28 @@ final class CatalogFeedTests: XCTestCase {
         assertRefused(Catalog.parse(Data(array.utf8)), "a trailing comma in an array", because: "not JSON: a trailing comma")
     }
 
+    // JSON.parse keeps an unpaired surrogate in the string, so subset reads these; the app refuses them on purpose (see
+    // StrictJSON), with its own reason rather than whatever Foundation says.
+    func testAnUnpairedSurrogateEscapeIsRefusedAndAPairIsRead() throws {
+        let text = String(decoding: try fixture("catalog-valid-live-only"), as: UTF8.self)
+        for lone in [#"\ud800"#, #"\udc00"#, #"\uDBFF\u0041"#, #"\udc00\ud800"#, #"\ud800\n"#] {
+            let changed = text.replacingOccurrences(of: "Take well-timed", with: "Take \(lone) well-timed")
+            XCTAssertNotEqual(changed, text)
+            assertRefused(Catalog.parse(Data(changed.utf8)), lone, because: "not JSON: an unpaired surrogate escape")
+        }
+        let ending = text.replacingOccurrences(of: "on-device history.", with: #"on-device history.\ud800"#)
+        XCTAssertNotEqual(ending, text)
+        assertRefused(Catalog.parse(Data(ending.utf8)), "at the end", because: "not JSON: an unpaired surrogate escape")
+        let paired = text.replacingOccurrences(of: "Take well-timed", with: #"Take \ud83d\uDE00 well-timed"#)
+        XCTAssertNotEqual(paired, text)
+        XCTAssertEqual(try Catalog.parse(Data(paired.utf8)).get().apps.first?.summary.hasPrefix("Take \u{1F600} well-timed"), true)
+
+        let receipt = String(decoding: try fixture("receipt-valid-live"), as: UTF8.self)
+        let loneReceipt = receipt.replacingOccurrences(of: "Breaks.app", with: #"Breaks\ud800.app"#)
+        XCTAssertNotEqual(loneReceipt, receipt)
+        assertRefused(Receipt.parse(Data(loneReceipt.utf8)), "a receipt", because: "not JSON: an unpaired surrogate escape")
+    }
+
     func testAReceiptThatOnlyFoundationWouldReadIsRefused() throws {
         let text = String(decoding: try fixture("receipt-valid-live"), as: UTF8.self)
         for (label, data, reason) in lenientVariants(of: text, property: "\"channel\": \"gamma\"") {
@@ -188,7 +210,11 @@ final class CatalogFeedTests: XCTestCase {
 /// spelling, JSONSerialization would keep the first value and JSON.parse the last.
 func lenientVariants(of text: String, property: String) -> [(String, Data, String)] {
     let body = text.trimmingCharacters(in: .whitespacesAndNewlines).dropLast()
-    let escaped = property.replacingOccurrences(of: "\"s", with: "\"\\u0073").replacingOccurrences(of: "\"c", with: "\"\\u0063")
+    // The first character of the property name (ASCII in every caller), written as a \u escape.
+    let first = property.unicodeScalars.dropFirst().first!
+    let escaped = "\"" + String(format: "\\u%04x", first.value) + property.dropFirst(2)
+    XCTAssertTrue(property.hasPrefix("\"") && first.isASCII, "\(property) does not start with an ASCII name")
+    XCTAssertNotEqual(escaped, property, "the escaped variant must differ from the plain one")
     return [
         ("a trailing comma in an object", Data((body + ",}").utf8), "not JSON: a trailing comma"),
         ("a property given twice", Data((body + ",\(property)}").utf8), "appears twice"),
