@@ -152,5 +152,13 @@ export const capabilities = [
     state: 'planned',
     proposedSurfaces: ['web', 'agent-cli', 'agent-view'],
     availableSurfaces: []
+  },
+  {
+    id: 'subset',
+    name: 'Subset',
+    summary: 'See which Subset apps are on your Mac, and install or update them from the menu bar.',
+    state: 'planned',
+    proposedSurfaces: ['macos'],
+    availableSurfaces: []
   }
 ] as const satisfies readonly CapabilityListing[];
