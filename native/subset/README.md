@@ -68,7 +68,7 @@ xcodebuild -project Subset.xcodeproj -scheme Subset -destination 'platform=macOS
 
 `.github/workflows/subset-macos.yml` runs on macOS 26 for changes here: package tests, the generated-project check, an unsigned Debug `xcodebuild build test`, an unsigned Release build, and the check of the built app's `Info.plist`.
 
-`macos-release.json` describes the app for `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)), so the **Beta builds** workflow builds `macos/subset` betas, tagged `macos/subset/v<version>-beta.<n>`. Locally, `node scripts/release-macos.mjs subset --archive-only` archives the app without signing credentials.
+`macos-release.json` describes the app for `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)), so the **Beta builds** workflow builds `macos/subset` betas, tagged `macos/subset/v<version>-beta.<n>`. Locally, from the repository root, `node scripts/release-macos.mjs subset --archive-only --archive-out /tmp/Subset.xcarchive.tar.gz` archives the app without signing credentials and writes the archive outside the repository.
 
 ## Superfunctions evaluated
 
