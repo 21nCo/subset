@@ -1,0 +1,23 @@
+packages/timer-cli/skills/subset-timer/SKILL.md
+  s_7e3617eb3afc99::t_78617e7d4c959a 10
+scripts/docs-commands.mjs
+  s_7e3617eb3afc99::t_c9ce682d5d7a5d 19-20,31-36,38-39,41,70-71
+scripts/docs-commands.test.mjs
+  s_7e3617eb3afc99::t_8da39f69b25ccf 104-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1160d74242767506f783f7d1cb1a019a5042fa6",
+  "prompts": {},
+  "sessions": {
+    "s_7e3617eb3afc99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_7e3617eb3afc99",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
