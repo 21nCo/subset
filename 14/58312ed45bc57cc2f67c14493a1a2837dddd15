@@ -1,0 +1,21 @@
+scripts/docs-commands.mjs
+  s_c9a4d98f0bc99a::t_c193e9aafc9f82 29-31,33-37,42-43,107,154
+scripts/docs-commands.test.mjs
+  s_c9a4d98f0bc99a::t_66b5d6fc16fdea 145-158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1458312ed45bc57cc2f67c14493a1a2837dddd15",
+  "prompts": {},
+  "sessions": {
+    "s_c9a4d98f0bc99a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f08f3f36-6790-46c0-9ff2-5aa2cc25eeb0",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
