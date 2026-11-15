@@ -96,6 +96,54 @@ final class HelperCommandTests: XCTestCase {
         XCTAssertTrue(help.stdout.contains("Exit codes: 0 ok, 2 usage error, 3 partial result, 4 timeout, 5 internal error."))
     }
 
+    /// SET-234: only a `subset <tool>` value of `SUBSET_COMMAND`, which the `subset` launcher sets, renames the helper.
+    func testOnlyASubsetToolValueOfSubsetCommandIsUsed() {
+        XCTAssertEqual(HelperInvocation.commandName([:]), "subset-system")
+        XCTAssertEqual(HelperInvocation.commandName(["SUBSET_COMMAND": "subset system"]), "subset system")
+        for ignored in ["", "subset", "subset ", "subset  system", "subset System", "subset system\n", "subset system --json",
+                        "npx subset.dev system", "subset-system; rm -rf ~", "subset sys_tem"] {
+            XCTAssertEqual(HelperInvocation.commandName(["SUBSET_COMMAND": ignored]), "subset-system", ignored.debugDescription)
+        }
+    }
+
+    /// Started through `subset system`, help and usage errors name that; `--version`, JSON and exit codes are unchanged.
+    func testHelpAndUsageErrorsNameTheCommandThatStartedTheHelper() async throws {
+        // A fresh environment for each run: a fixture probe's samples are used up by one measurement.
+        func subset() -> HelperEnvironment {
+            var environment = HelperFixtures.environment()
+            environment.command = "subset system"
+            return environment
+        }
+
+        let help = await run(["--help"], subset())
+        XCTAssertEqual(help.exit, .ok)
+        XCTAssertTrue(help.stdout.hasPrefix("Usage: subset system <command> [options]\n"), help.stdout)
+        XCTAssertFalse(help.stdout.contains("subset-system"))
+        let plainHelp = await run(["--help"], HelperFixtures.environment())
+        XCTAssertTrue(plainHelp.stdout.hasPrefix("Usage: subset-system <command> [options]\n"))
+        XCTAssertEqual(help.stdout.replacingOccurrences(of: "subset system", with: "subset-system"), plainHelp.stdout)
+
+        for arguments in [[], ["clean"], ["disk"], ["status", "--layer", "app"]] {
+            let error = await run(arguments, subset())
+            XCTAssertEqual(error.exit, .usage, "\(arguments)")
+            XCTAssertEqual(error.stdout, "", "\(arguments)")
+            XCTAssertTrue(error.stderr.hasPrefix("subset system: "), error.stderr)
+            XCTAssertTrue(error.stderr.hasSuffix("\nRun subset system --help for usage.\n"), error.stderr)
+            let plain = await run(arguments, HelperFixtures.environment())
+            XCTAssertEqual(error.stderr.replacingOccurrences(of: "subset system", with: "subset-system"), plain.stderr)
+        }
+
+        let version = await run(["--version"], subset())
+        XCTAssertEqual(version.stdout, "subset-system 0.1.0\n")
+        for arguments in [["status", "--json"], ["processes", "--layer", "vendor", "--json"]] {
+            let json = await run(arguments, subset())
+            let plain = await run(arguments, HelperFixtures.environment())
+            XCTAssertEqual(json.stdout, plain.stdout, "\(arguments)")
+            XCTAssertEqual(json.stderr, plain.stderr, "\(arguments)")
+            XCTAssertEqual(json.exit, plain.exit, "\(arguments)")
+        }
+    }
+
     func testExitCodesAreTheDocumentedOnes() {
         XCTAssertEqual([HelperExit.ok, .usage, .partial, .timeout, .internalError].map(\.rawValue), [0, 2, 3, 4, 5])
     }

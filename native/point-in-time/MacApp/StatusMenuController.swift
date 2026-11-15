@@ -308,10 +308,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    /// Explains how to put the bundled, read-only `point-in-time` command on PATH. The user creates the link; pointInTime
-    /// never writes it, `/usr/local`, or a shell file itself.
+    /// Explains how to run the bundled, read-only `point-in-time` command from a terminal: through
+    /// `subset point-in-time`, or by linking it onto PATH. Each Copy button writes its command to the clipboard;
+    /// pointInTime never installs subset or writes the link, `/usr/local`, or a shell file itself.
     private func showCommandLineTool() {
-        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/point-in-time")
+        let helper = URL(fileURLWithPath: CommandLineTool.path(inApp: Bundle.main.bundleURL.path))
         let alert = NSAlert()
         alert.messageText = "pointInTime Command-Line Tool"
         guard FileManager.default.isExecutableFile(atPath: helper.path) else {
@@ -320,30 +321,18 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             alert.runModal()
             return
         }
-        let quoted = "'" + helper.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let command = "sudo mkdir -p /usr/local/bin && sudo ln -sf \(quoted) /usr/local/bin/point-in-time"
-        alert.informativeText = """
-            pointInTime includes a read-only command for scripts and AI agents. point-in-time status --json prints today's \
-            focus summary from this Mac without starting the app, changing data, or using the network; titles and page paths \
-            are left out unless you add --include-titles.
-
-            To run it from a terminal, link it into a folder on your PATH, for example:
-
-            \(command)
-
-            pointInTime does not create this link or change your shell files. If you move the app, create the link again.
-            """
-        alert.addButton(withTitle: "Copy Command")
+        let instructions = CommandLineTool.instructions(helperPath: helper.path)
+        alert.informativeText = instructions.text
+        for copy in instructions.copies { alert.addButton(withTitle: copy.title) }
         alert.addButton(withTitle: "Show in Finder")
         alert.addButton(withTitle: "Done")
         NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
+        let chosen = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if instructions.copies.indices.contains(chosen) {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(command, forType: .string)
-        case .alertSecondButtonReturn:
+            NSPasteboard.general.setString(instructions.copies[chosen].command, forType: .string)
+        } else if chosen == instructions.copies.count {
             NSWorkspace.shared.activateFileViewerSelecting([helper])
-        default: break
         }
     }
 

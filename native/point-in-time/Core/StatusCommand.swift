@@ -12,14 +12,18 @@ public struct StatusEnvironment {
     public var appRunning: Bool?
     /// The enclosing app's version, nil outside an app bundle.
     public var version: String?
+    /// The command help and error messages name (`StatusCommand.commandName`).
+    public var command: String
 
-    public init(now: Date, timeZone: TimeZone, storeDirectory: URL?, settings: StoredSettings, appRunning: Bool?, version: String?) {
+    public init(now: Date, timeZone: TimeZone, storeDirectory: URL?, settings: StoredSettings, appRunning: Bool?, version: String?,
+                command: String = StatusCommand.name) {
         self.now = now
         self.timeZone = timeZone
         self.storeDirectory = storeDirectory
         self.settings = settings
         self.appRunning = appRunning
         self.version = version
+        self.command = command
     }
 }
 
@@ -48,9 +52,22 @@ public enum StatusCommand {
         public var exitCode: ExitCode
     }
 
-    public static let usage = """
-        Usage: point-in-time status [--date YYYY-MM-DD] [--json] [--include-titles]
-               point-in-time --version
+    /// The command's name on `PATH` and in the app bundle; `--version` names it whatever `SUBSET_COMMAND` is.
+    public static let name = "point-in-time"
+
+    /// The command to name in help and on standard error: `SUBSET_COMMAND` when the `subset` launcher set it to
+    /// `subset <tool>` (such as `subset point-in-time`), otherwise `point-in-time`. Any other value is ignored, as for
+    /// the Node CLIs (SET-233). JSON output never names the command.
+    public static func commandName(_ environment: [String: String]) -> String {
+        guard let value = environment["SUBSET_COMMAND"], value.wholeMatch(of: /subset [a-z0-9-]+/) != nil else { return name }
+        return value
+    }
+
+    /// The help, naming the command `command` (`point-in-time`, or `subset point-in-time` when started through `subset`).
+    public static func usage(command: String = name) -> String {
+        """
+        Usage: \(command) status [--date YYYY-MM-DD] [--json] [--include-titles]
+               \(command) --version
 
         Prints a day's focus summary from pointInTime's local activity store. Reads only; never starts the app, changes
         data, or uses the network.
@@ -60,6 +77,7 @@ public enum StatusCommand {
           --include-titles    Also list window titles and page paths. Off by default.
 
         """
+    }
 
     struct Options: Equatable {
         var date: DateComponents?
@@ -70,18 +88,18 @@ public enum StatusCommand {
     public static func run(_ arguments: [String], environment: StatusEnvironment) -> Output {
         switch arguments.first {
         case "--version", "-V":
-            guard arguments.count == 1 else { return usageError("--version takes no arguments.") }
-            return Output(standardOutput: "point-in-time \(environment.version ?? "development build (not in pointInTime.app)")\n",
+            guard arguments.count == 1 else { return usageError("--version takes no arguments.", command: environment.command) }
+            return Output(standardOutput: "\(name) \(environment.version ?? "development build (not in pointInTime.app)")\n",
                           standardError: "", exitCode: .ok)
         case "--help", "-h", "help":
-            return Output(standardOutput: usage, standardError: "", exitCode: .ok)
+            return Output(standardOutput: usage(command: environment.command), standardError: "", exitCode: .ok)
         case "status":
             switch parse(Array(arguments.dropFirst())) {
             case .success(let options): return status(options, environment: environment)
-            case .failure(let error): return usageError(error.message)
+            case .failure(let error): return usageError(error.message, command: environment.command)
             }
-        case nil: return usageError("Missing command.")
-        case let other?: return usageError("Unknown command \"\(other)\".")
+        case nil: return usageError("Missing command.", command: environment.command)
+        case let other?: return usageError("Unknown command \"\(other)\".", command: environment.command)
         }
     }
 
@@ -122,24 +140,25 @@ public enum StatusCommand {
         return components
     }
 
-    private static func usageError(_ message: String) -> Output {
-        Output(standardOutput: "", standardError: "point-in-time: \(message)\n\n" + usage, exitCode: .usage)
+    private static func usageError(_ message: String, command: String) -> Output {
+        Output(standardOutput: "", standardError: "\(command): \(message)\n\n" + usage(command: command), exitCode: .usage)
     }
 
     static func status(_ options: Options, environment: StatusEnvironment) -> Output {
         let report = StatusReport.build(options: options, environment: environment)
         guard options.json else {
-            return Output(standardOutput: report.text(), standardError: report.errors.map { "point-in-time: \($0.message)\n" }.joined(),
+            return Output(standardOutput: report.text(), standardError: report.errors.map { "\(environment.command): \($0.message)\n" }.joined(),
                           exitCode: report.exitCode)
         }
-        return json(report.jsonObject(), exitCode: report.exitCode)
+        return json(report.jsonObject(), exitCode: report.exitCode, command: environment.command)
     }
 
-    /// `object` as JSON with `exitCode`, or nothing on standard output and exit code 1 when it cannot be encoded.
-    static func json(_ object: [String: Any], exitCode: ExitCode) -> Output {
+    /// `object` as JSON with `exitCode`, or nothing on standard output and exit code 1 when it cannot be encoded, which
+    /// standard error reports naming `command`.
+    static func json(_ object: [String: Any], exitCode: ExitCode, command: String = name) -> Output {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
-            return Output(standardOutput: "", standardError: "point-in-time: The status could not be encoded as JSON.\n", exitCode: .internalError)
+            return Output(standardOutput: "", standardError: "\(command): The status could not be encoded as JSON.\n", exitCode: .internalError)
         }
         return Output(standardOutput: String(decoding: data, as: UTF8.self) + "\n", standardError: "", exitCode: exitCode)
     }

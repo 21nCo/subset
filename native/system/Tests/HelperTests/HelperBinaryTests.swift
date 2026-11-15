@@ -17,10 +17,14 @@ final class HelperBinaryTests: XCTestCase {
         return binary
     }
 
-    private func execute(_ arguments: [String]) throws -> (stdout: String, stderr: String, status: Int32) {
+    /// Runs the helper with this test's environment, without `SUBSET_COMMAND` unless `subsetCommand` sets it.
+    private func execute(_ arguments: [String], subsetCommand: String? = nil) throws -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = try helper()
         process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["SUBSET_COMMAND"] = subsetCommand
+        process.environment = environment
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -91,5 +95,22 @@ final class HelperBinaryTests: XCTestCase {
             let info = try XCTUnwrap(NSDictionary(contentsOf: helpers.deletingLastPathComponent().appendingPathComponent("Info.plist")))
             XCTAssertEqual(try execute(["--version"]).stdout, "subset-system \(info["CFBundleShortVersionString"] ?? "")\n")
         }
+    }
+
+    /// SET-234: the `subset` launcher sets `SUBSET_COMMAND` when it runs the helper of an installed System app.
+    func testTheBuiltHelperNamesTheSubsetCommandThatStartedIt() throws {
+        let usage = try execute(["clean"], subsetCommand: "subset system")
+        XCTAssertEqual(usage.status, 2)
+        XCTAssertEqual(usage.stdout, "")
+        XCTAssertEqual(usage.stderr, "subset system: Unknown command clean.\nRun subset system --help for usage.\n")
+        let help = try execute(["--help"], subsetCommand: "subset system")
+        XCTAssertEqual(help.status, 0)
+        XCTAssertTrue(help.stdout.hasPrefix("Usage: subset system <command> [options]\n"), help.stdout)
+        XCTAssertEqual(try execute(["--version"], subsetCommand: "subset system").stdout, try execute(["--version"]).stdout)
+
+        // Without it, or with a value that is not `subset <tool>`, the helper names itself.
+        XCTAssertEqual(try execute(["clean"]).stderr, "subset-system: Unknown command clean.\nRun subset-system --help for usage.\n")
+        XCTAssertEqual(try execute(["clean"], subsetCommand: "rm -rf ~").stderr,
+                       "subset-system: Unknown command clean.\nRun subset-system --help for usage.\n")
     }
 }

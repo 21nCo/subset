@@ -28,7 +28,9 @@ let environment = StatusEnvironment(
     now: Date(), timeZone: .current, storeDirectory: try? ActivityStore.defaultDirectory(), settings: appSettings(),
     appRunning: RunningApp.isRunning(listedBundleIdentifiers: NSWorkspace.shared.runningApplications.map(\.bundleIdentifier),
                                      processExecutables: RunningApp.processExecutables),
-    version: enclosingAppVersion())
+    version: enclosingAppVersion(),
+    // `subset point-in-time` when the `subset` launcher started this command; help and errors then name that.
+    command: StatusCommand.commandName(ProcessInfo.processInfo.environment))
 let output = StatusCommand.run(arguments, environment: environment)
 FileHandle.standardOutput.write(Data(output.standardOutput.utf8))
 FileHandle.standardError.write(Data(output.standardError.utf8))
