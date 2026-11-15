@@ -1,0 +1,61 @@
+.github/workflows/subset-macos.yml
+  s_f058f999ab46b7::t_5172b0d3c24697 1-80
+native/subset/.gitignore
+  s_2ab6806e7371a1::t_7d117e38180454 1-6
+native/subset/Core/MenuCommand.swift
+  s_2ab6806e7371a1::t_df90eaf3993814 1-33
+native/subset/Core/SubsetIdentity.swift
+  s_2ab6806e7371a1::t_5e12045336ecaa 1-12
+native/subset/MacApp/Info.plist
+  s_2ab6806e7371a1::t_4a37cd891345f5 1-32
+native/subset/MacApp/MainWindowView.swift
+  s_2ab6806e7371a1::t_129842380d3875 1-10
+native/subset/MacApp/Subset.entitlements
+  s_2ab6806e7371a1::t_56e79fe74b1f4e 1-5
+native/subset/MacApp/SubsetApp.swift
+  s_2ab6806e7371a1::t_2c66d3a5987400 1-70
+native/subset/Package.swift
+  s_2ab6806e7371a1::t_20fc853e8b2ea5 1-30
+native/subset/ProjectGenerator.rb
+  s_2ab6806e7371a1::t_2a15232ae4bf23 1-172
+native/subset/README.md
+  s_f058f999ab46b7::t_45864d48d87dc5 1-89
+native/subset/Subset.xcodeproj/project.pbxproj
+  s_2ab6806e7371a1::t_0c9cc8adac126d 1-597
+native/subset/Subset.xcodeproj/xcshareddata/xcschemes/Subset.xcscheme
+  s_2ab6806e7371a1::t_aa38ae4d15c4a0 1-111
+native/subset/Tests/CoreTests/MenuCommandTests.swift
+  s_2ab6806e7371a1::t_1222c7c1e16a87 1-17
+native/subset/Tests/CoreTests/SubsetIdentityTests.swift
+  s_2ab6806e7371a1::t_cbd68e19ac810d 1-41
+native/subset/Tests/project-generator.sh
+  s_2ab6806e7371a1::t_21f82e325a5169 1-127
+native/subset/macos-release.json
+  s_2ab6806e7371a1::t_47cfebee469543 1-7
+packages/catalog/src/index.ts
+  s_f058f999ab46b7::t_60ca9e63e2178a 155-162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "db624ea0db93bf2fb2ea0f67de0382286a872542",
+  "prompts": {},
+  "sessions": {
+    "s_2ab6806e7371a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e80531e-e637-4a8f-af1e-584d446c411d",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_f058f999ab46b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb025346-b9a2-48b2-b8e1-3df0ee912478",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
