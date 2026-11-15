@@ -1,0 +1,21 @@
+scripts/docs-commands.mjs
+  s_31f9c17b0c27b9::t_f95003075f96c5 54-55,65-71,74,78-80,83,89-94,98-102
+scripts/docs-commands.test.mjs
+  s_31f9c17b0c27b9::t_f9d1c1ab58f2e1 111-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e37454389ee5399512839ba0048e106b04bc87a4",
+  "prompts": {},
+  "sessions": {
+    "s_31f9c17b0c27b9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_31f9c17b0c27b9",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
