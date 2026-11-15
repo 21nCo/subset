@@ -26,6 +26,29 @@ export class CliError extends Error {
 
 export const usageError = (message) => new CliError('invalid_input', message);
 
+/** The bin name, which JSON error messages always use. */
+export const BIN = 'subset-timer';
+
+/**
+ * The command name to print in help and on stderr: `SUBSET_COMMAND` when the `subset` launcher set it to
+ * `subset <tool>` (such as `subset timer`), otherwise the bin name. Any other value is ignored. Only human text
+ * uses it; JSON output names the bin whatever `SUBSET_COMMAND` is.
+ */
+export function commandName(env) {
+  const value = env?.SUBSET_COMMAND;
+  return typeof value === 'string' && /^subset [a-z0-9-]+$/.test(value) ? value : BIN;
+}
+
+/**
+ * A `CliError` whose message names a command: `compose(name)` gives the text. The JSON `message` names the bin
+ * and `text`, which the CLI prints on stderr, names `cli`.
+ */
+export function hintError(code, cli, compose) {
+  const error = new CliError(code, compose(BIN));
+  error.text = compose(cli);
+  return error;
+}
+
 /** The body of a successful daemon reply; otherwise the daemon's error as a `CliError`. */
 export function expectOk(reply) {
   if (reply.status === 200) return reply.body;
