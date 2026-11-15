@@ -1,0 +1,31 @@
+native/subset/Core/Feed/CatalogLoader.swift
+  s_38852b4993409a::t_0f5bc61a6160b4 22-24,56-64,102-103
+native/subset/Core/Feed/JSONChecker.swift
+  s_38852b4993409a::t_541741d6743819 123
+native/subset/Core/List/AppListModel.swift
+  s_38852b4993409a::t_9ce11c998407b9 115-116,121-123,141-143
+native/subset/MacApp/MainWindowView.swift
+  s_38852b4993409a::t_c30b3f2897185b 27-29
+native/subset/README.md
+  s_38852b4993409a::t_fda92692d28c80 15,40,42
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_38852b4993409a::t_88538e74c0b3fd 23-42,208-239
+native/subset/Tests/CoreTests/CatalogLoaderTests.swift
+  s_38852b4993409a::t_ad11b77d5004f3 78-92,156-165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2c531a0982494482615d8591c6019342e6d5b64e",
+  "prompts": {},
+  "sessions": {
+    "s_38852b4993409a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a7b68b1-b34b-4366-9383-7e0081d766c0",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
