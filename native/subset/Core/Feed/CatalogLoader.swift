@@ -19,7 +19,9 @@ public enum CatalogError: Error, Equatable, Sendable {
 
 /// Where the feed is: `https://subset.21n.dev/catalog/v1.json`, unless the `SUBSET_CATALOG_URL` environment variable or
 /// the hidden `SubsetCatalogURL` default (`defaults write dev.subset.manager SubsetCatalogURL <url>`) names another
-/// https URL on an allowed host. Any other URL is refused rather than replaced by the default.
+/// https URL on an allowed host. Any other URL is refused rather than replaced by the default. An accepted URL is spelled
+/// as the WHATWG URL parser spells it (`url.href` in `subset`): lowercase scheme and host, no `:443`, `/` for an empty
+/// path, so both key the shared cache alike.
 public enum CatalogLocation {
     public static let defaultURL = URL(string: "https://subset.21n.dev/catalog/v1.json")!
     public static let environmentVariable = "SUBSET_CATALOG_URL"
@@ -51,7 +53,15 @@ public enum CatalogLocation {
             let allowed = allowedHosts.sorted().joined(separator: ", ")
             return .failure(.invalid("\(source) names the host \(url.host ?? "(none)"), which is not one of \(allowed)"))
         }
-        return .success(url)
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return .failure(.invalid("\(source) is not a URL: \(text)"))
+        }
+        components.scheme = "https"
+        components.host = host
+        if components.port == 443 { components.port = nil }
+        if components.percentEncodedPath.isEmpty { components.percentEncodedPath = "/" }
+        guard let canonical = components.url else { return .failure(.invalid("\(source) is not a URL: \(text)")) }
+        return .success(canonical)
     }
 }
 
@@ -89,7 +99,8 @@ public protocol CatalogLoading: Sendable {
 
 /// Loads the catalog by the rules `subset` uses: from the cache when it is younger than 5 minutes (unless `refresh`),
 /// otherwise fetched, validated and cached. When it cannot be fetched, a cached copy younger than 7 days is used with a
-/// warning. A refused feed is an error and does not replace the cached copy. The cache is
+/// warning, unless `refresh` (as `subset` does, a forced refresh never reads the cache, so it is an error; the view model
+/// keeps the list it already shows). A refused feed is an error and does not replace the cached copy. The cache is
 /// ~/Library/Caches/Subset/catalog.json, the file `subset` keeps, in its format.
 public struct CatalogLoader: CatalogLoading {
     public static let freshFor: TimeInterval = 5 * 60

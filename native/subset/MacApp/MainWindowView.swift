@@ -24,8 +24,9 @@ struct MainWindowView: View {
                 .disabled(model.isRefreshing)
             }
         }
-        // Opening the window refreshes too; within 5 minutes of a fetch that uses the cache.
-        .task { await model.refresh() }
+        // Opening the window refreshes too; within 5 minutes of a fetch that uses the cache. Unstructured, as Refresh is,
+        // so closing the window does not cancel a fetch that another refresh may be waiting on.
+        .onAppear { Task { await model.refresh() } }
     }
 
     @ViewBuilder

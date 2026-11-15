@@ -112,12 +112,15 @@ public final class AppListModel: ObservableObject {
     }
 
     /// Loads the catalog (from the cache when it is younger than 5 minutes, unless `force`) and looks for the installed
-    /// apps again. A refresh while another runs does nothing.
+    /// apps again. A refresh while another runs does nothing, and a cancelled one changes nothing: a fetch cut short
+    /// is not a feed failure.
     public func refresh(force: Bool = false) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
-        switch await loader.load(refresh: force) {
+        let result = await loader.load(refresh: force)
+        if Task.isCancelled { return }
+        switch result {
         case .success(let loaded):
             catalog = loaded.catalog
             fetchedAt = loaded.fetchedAt
@@ -135,7 +138,9 @@ public final class AppListModel: ObservableObject {
             return
         }
         let finder = finder
-        installed = await Task.detached { finder.detect(apps) }.value
+        let found = await Task.detached { finder.detect(apps) }.value
+        if Task.isCancelled { return }
+        installed = found
     }
 
     // The newest release that is an update for some installed copy: from the live channel, or the live or beta channel

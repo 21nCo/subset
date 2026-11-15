@@ -20,6 +20,26 @@ final class RecordedLoader: CatalogLoading, @unchecked Sendable {
     }
 }
 
+/// Holds each load until the test finishes it, so a test can act while a fetch is in flight.
+final class GatedLoader: CatalogLoading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: CheckedContinuation<Result<LoadedCatalog, CatalogError>, Never>?
+
+    var isWaiting: Bool { lock.withLock { waiting != nil } }
+
+    func load(refresh _: Bool) async -> Result<LoadedCatalog, CatalogError> {
+        await withCheckedContinuation { continuation in lock.withLock { waiting = continuation } }
+    }
+
+    func finish(_ result: Result<LoadedCatalog, CatalogError>) {
+        let continuation = lock.withLock { () -> CheckedContinuation<Result<LoadedCatalog, CatalogError>, Never>? in
+            defer { waiting = nil }
+            return waiting
+        }
+        continuation?.resume(returning: result)
+    }
+}
+
 @MainActor
 final class AppListModelTests: XCTestCase {
     private var defaults: UserDefaults!
@@ -183,6 +203,38 @@ final class AppListModelTests: XCTestCase {
         XCTAssertNil(model.catalog)
         XCTAssertEqual(model.rows, [])
         XCTAssertEqual(model.updatesMenuTitle, "Updates unavailable")
+    }
+
+    func testACancelledRefreshChangesNothing() async throws {
+        let loader = GatedLoader()
+        let clock = clock
+        let model = AppListModel(loader: loader, finder: finder, defaults: defaults, now: { clock.now })
+        let first = Task { await model.refresh() }
+        try await waitUntil { loader.isWaiting }
+        loader.finish(try loaded("catalog-valid-live-only"))
+        await first.value
+        let fetchedAt = model.fetchedAt
+        XCTAssertEqual(model.status, .current)
+
+        // Closing the window mid-fetch cancels the refresh; the transport then reports the fetch as cancelled.
+        clock.advance(60 * 60)
+        let cancelled = Task { await model.refresh() }
+        try await waitUntil { loader.isWaiting }
+        cancelled.cancel()
+        loader.finish(.failure(.unavailable("Could not fetch the catalog (cancelled), and there is no cached copy.")))
+        await cancelled.value
+        XCTAssertEqual(model.status, .current)
+        XCTAssertEqual(model.fetchedAt, fetchedAt)
+        XCTAssertEqual(model.rows.map(\.id), ["breaks"])
+        XCTAssertFalse(model.isRefreshing)
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("timed out") }
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     func testInstalledAppsAreLookedForAgainOnEachRefresh() async throws {

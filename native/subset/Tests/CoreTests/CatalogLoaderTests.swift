@@ -75,6 +75,21 @@ final class CatalogLoaderTests: XCTestCase {
         XCTAssertEqual(defaults.path, "/catalog/defaults.json")
     }
 
+    func testAnAcceptedURLIsSpelledAsSubsetSpellsIt() throws {
+        // subset keys the shared cache by WHATWG url.href; the same feed must get the same key here.
+        let spellings = [
+            ("HTTPS://SUBSET.21n.DEV/catalog/v1.json", "https://subset.21n.dev/catalog/v1.json"),
+            ("https://subset.21n.dev:443/catalog/v1.json", "https://subset.21n.dev/catalog/v1.json"),
+            ("https://Subset.21n.dev", "https://subset.21n.dev/"),
+            ("https://subset.21n.dev?v=2", "https://subset.21n.dev/?v=2"),
+            ("https://subset.21n.dev:8443/Catalog/V1.json", "https://subset.21n.dev:8443/Catalog/V1.json")
+        ]
+        for (text, href) in spellings {
+            let url = try CatalogLocation.resolve(environment: ["SUBSET_CATALOG_URL": text], defaultsValue: nil).get()
+            XCTAssertEqual(url.absoluteString, href, text)
+        }
+    }
+
     func testOnlyHTTPSURLsOnAnAllowedHostAreAccepted() {
         let refused = [
             ("http://subset.21n.dev/catalog/v1.json", "must be an https URL"),
@@ -136,6 +151,16 @@ final class CatalogLoaderTests: XCTestCase {
         let refreshed = try await loader.load(refresh: true).get()
         XCTAssertFalse(refreshed.cached)
         XCTAssertEqual(transport.fetches, 2)
+    }
+
+    func testAForcedRefreshThatCannotFetchIsAnErrorEvenWithAFreshCache() async throws {
+        let transport = RecordedTransport([.success(try fixture("catalog-valid-live-only")), .failure(FeedUnavailable("HTTP 503"))])
+        let loader = loader(transport)
+        _ = try await loader.load(refresh: false).get()
+        let refreshed = await loader.load(refresh: true)
+        XCTAssertEqual(refreshed, .failure(.unavailable(
+            "Could not fetch the catalog from https://subset.21n.dev/catalog/v1.json (HTTP 503)."
+        )))
     }
 
     func testOfflineACopyCachedLessThanSevenDaysAgoIsUsedWithAWarning() async throws {
