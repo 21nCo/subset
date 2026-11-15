@@ -1,6 +1,6 @@
 # @subset.dev/timer
 
-The `subset-timer` command: countdowns, stopwatches and interval workouts (Tabata, EMOM, HIIT, Pomodoro, AMRAP and your own) for people and shell-capable agents, with sounds and notifications on macOS and Linux and an agent skill. Timers run in a per-user daemon on your computer, so they keep running after the command exits. Timer is local only: it opens no network connection and sends nothing anywhere.
+The `subset timer` command: countdowns, stopwatches and interval workouts (Tabata, EMOM, HIIT, Pomodoro, AMRAP and your own) for people and shell-capable agents, with sounds and notifications on macOS and Linux and an agent skill. Timers run in a per-user daemon on your computer, so they keep running after the command exits. Timer is local only: it opens no network connection and sends nothing anywhere.
 
 > Status: prepared for npm as version 0.1.0, not yet published. The first release (`timer-v0.1.0`) is an owner decision after acceptance on a real Mac (SET-85 to SET-87). Install from a tarball or the repository until then. No Timer surface is listed as available.
 
@@ -9,15 +9,18 @@ The `subset-timer` command: countdowns, stopwatches and interval workouts (Tabat
 Requires Node.js 22.13 or later on macOS or Linux (not Windows).
 
 ```sh
-npm ci && npm run build                     # at the repository root
-cd packages/timer-cli && npm pack           # builds and writes subset.dev-timer-0.1.0.tgz
-npm install -g ./subset.dev-timer-*.tgz     # installs the subset-timer command
-subset-timer start 25m --name Tea           # Tea (t_ab12cd34): running · 25:00 left / Ends at 17:25:00.
-subset-timer start tabata
-subset-timer                                # one line per timer
+subset timer start 25m --name Tea           # Tea (t_ab12cd34): running · 25:00 left / Ends at 17:25:00.
+subset timer start tabata
+subset timer                                # one line per timer
 ```
 
-After a release, `npx @subset.dev/timer` and `npm install -g @subset.dev/timer` work too.
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev timer ...` works without installing it. `subset timer` runs the CLI bundled in an installed Timer app, otherwise the published `@subset.dev/timer` (see [`subset.dev`](../subset-dev/README.md)). Until the package is published, run a build from the repository with the same arguments:
+
+```sh
+npm ci && npm run build                     # at the repository root
+node packages/timer-cli/dist/cli.mjs start 25m --name Tea
+cd packages/timer-cli && npm pack           # or pack it: writes subset.dev-timer-0.1.0.tgz for a global install
+```
 
 | Command | What it does |
 | --- | --- |
@@ -62,11 +65,11 @@ While the Timer macOS app is running and allowed to post notifications, it regis
 
 ## Agent skill
 
-`skills/subset-timer/SKILL.md` teaches a shell-capable agent when to use Timer, to always pass `--json`, to report the timer id and end time, that timers keep running after its turn, that `reset` and `rm` need the user's explicit request, and that `serve` is only for a user who asks for the browser board and does not exit by itself. `subset-timer skill path` prints its folder, for example to copy or link it into an agent's skills directory. Its use by a real agent is checked in SET-84.
+`skills/subset-timer/SKILL.md` teaches a shell-capable agent when to use Timer, to always pass `--json`, to report the timer id and end time, that timers keep running after its turn, that `reset` and `rm` need the user's explicit request, and that `serve` is only for a user who asks for the browser board and does not exit by itself. `subset timer skill path` prints its folder, for example to copy or link it into an agent's skills directory. Its use by a real agent is checked in SET-84.
 
 ## Web host (SET-78)
 
-`subset-timer serve` is the standalone local web surface: the board from `@subset.dev/timer-core/view` in the private Vite app `apps/timer` (`@subset.dev/timer-web`), whose build `scripts/build.mjs` copies into `web/`. It is not a deployed site. `src/serve.mjs` holds no timer state; it serves `web/` and proxies to the daemon socket with the same client as every other command, so the first page request starts the daemon if it is not running, and a page left open keeps it from idling out.
+`subset timer serve` is the standalone local web surface: the board from `@subset.dev/timer-core/view` in the private Vite app `apps/timer` (`@subset.dev/timer-web`), whose build `scripts/build.mjs` copies into `web/`. It is not a deployed site. `src/serve.mjs` holds no timer state; it serves `web/` and proxies to the daemon socket with the same client as every other command, so the first page request starts the daemon if it is not running, and a page left open keeps it from idling out.
 
 - **Listening:** `127.0.0.1` only, never `0.0.0.0` or `::`, whatever the flags. Port 4175, else each next port up to 20 tries; `--port <n>` takes only that port. Ctrl-C or SIGTERM ends the open event streams and connections and exits 0; the daemon and its timers keep running.
 - **API:** `GET /api/timers` and `GET /api/presets` relay `/v1/timers` and `/v1/presets`; `POST /api/ops/<operation>` relays a known operation's JSON body (up to 1 MiB) to `/v1/ops/<operation>`; `GET /api/events` relays the daemon's `state` and `heartbeat` events (alerts stay with the daemon). The daemon's status and body pass through unchanged. A daemon that cannot be reached or started is `503 daemon_unavailable`, a body that is not JSON `400 invalid_input`, an unknown operation or path `404`, another method `405`.
@@ -76,7 +79,7 @@ While the Timer macOS app is running and allowed to post notifications, it regis
 
 ## MCP server (SET-79)
 
-`subset-timer mcp` is a local MCP server over stdio for any MCP host. It is a client of the daemon like every other command: it holds no timer state, starts the daemon on the first tool call if it is not running, and exits 0 when the host closes stdin, while the daemon and its timers keep running. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-timer` with the package version.
+`subset timer mcp` is a local MCP server over stdio for any MCP host. It is a client of the daemon like every other command: it holds no timer state, starts the daemon on the first tool call if it is not running, and exits 0 when the host closes stdin, while the daemon and its timers keep running. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-timer` with the package version.
 
 | Tool | Class | Input |
 | --- | --- | --- |
@@ -98,16 +101,16 @@ While the Timer macOS app is running and allowed to post notifications, it regis
 
 ### Host configuration
 
-The host starts the command, so `subset-timer` must be on the `PATH` the host sees (or give its absolute path, from `which subset-timer`). Claude Desktop (`claude_desktop_config.json`):
+The host starts `npx -y subset.dev timer mcp`, so `npx` must be on the `PATH` the host sees (or give its absolute path, from `which npx`). It runs the installed Timer app's CLI, or the published package. Claude Desktop (`claude_desktop_config.json`):
 
 ```json
-{ "mcpServers": { "subset-timer": { "command": "subset-timer", "args": ["mcp"] } } }
+{ "mcpServers": { "subset-timer": { "command": "npx", "args": ["-y", "subset.dev", "timer", "mcp"] } } }
 ```
 
 VS Code (`.vscode/mcp.json` in a workspace):
 
 ```json
-{ "servers": { "subset-timer": { "type": "stdio", "command": "subset-timer", "args": ["mcp"] } } }
+{ "servers": { "subset-timer": { "type": "stdio", "command": "npx", "args": ["-y", "subset.dev", "timer", "mcp"] } } }
 ```
 
 The macOS app (SET-81) will bundle a copy of the CLI; the path of that copy for the `command` is documented once SET-81 ships it. Use in real hosts is checked in SET-84, not here.
@@ -129,7 +132,7 @@ In hosts with the MCP Apps extension (`io.modelcontextprotocol/ui`), the results
 
 ## Release
 
-`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Verify the published package (`npx @subset.dev/timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
+`release-packages.json` lists the package as `timer` with inputs `packages/timer-cli`, `packages/timer` and `apps/timer`. Setting `private: false` and that entry publish nothing: a live release is a pushed `timer-v<version>` tag, and the beta pipeline skips an npm package that was never released. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Verify the published package (`npx subset.dev timer@<version> --version`, then a real timer with sound and notifications) before listing it anywhere.
 
 ## macOS app runtime (SET-81)
 
@@ -205,7 +208,7 @@ Each alert is delivered once, across a daemon crash too (SET-169). Every sink pl
 
 A part can play twice only when the daemon ends in the instant between spawning its process and recording its pid: one synchronous write of `plays.json`, or, while that cannot be written, that failed write, the rest of the task that spawned it and one save of `scheduler.json` carrying the pid, with no lookup of the process's birth (a `ps` on macOS, up to 2 s) before that save. A part the sink played can be lost only when the daemon ends between recording its process's pid and its birth (a second write), or its birth cannot be read, and the system gives that pid to another process still running 10 s later: the next daemon cannot tell that process from the sink's, and counts the part as played once its 10 s wait ends. A part the app played can play twice only when the app ends between finishing it and a daemon recording that (the app says so again in the background until a daemon answers), and a part it holds is never lost: it plays once the app ends. A daemon writes the entries it found in either file to `plays.json` before it can save `scheduler.json`, which may hold their only copy. While `plays.json` cannot be written, the failure is logged and every save of `scheduler.json` carries the journal instead, saved at once after each failed write (a play's start before the sink spawns its first process, together with every other play started at once: the handoffs and plays a daemon replays at startup, whose save keeps the marks it loaded, or the alerts one scheduler run plays with no handler, whose save holds marks past all of them), and no handoff is retired without it; once `plays.json` can be written again, `scheduler.json` drops the copy. The next daemon merges both, so each part plays once whichever file could be written: a part finished in either copy counts, and the parts left running, and so held for the app, are the newer copy's (the higher `rev`), as a failed write keeps the older file and a held part can be given back to the sink without finishing; likewise the newer of an acknowledgement and its `progress` says which process holds each part the app started. A wait for a process left running, or for the app holding a part, asks only whether its pid exists on each poll, and checks its birth (which tells a pid given to another process, a `ps` on macOS) every 30 s and before stopping it; only a daemon that ends while neither can be written leaves the alert as `scheduler.json` last held it, played again in full (at least once, never lost). A sink that ignores `progress` (such as a custom one) has an alert cut off mid-play played again in full. A client that finds the socket gone while a live process still holds `daemon.lock` (a daemon finishing its sink) waits up to 6 s longer than its 3 s start budget (`LOCKED_START_EXTRA_MS`), and a daemon it spawns once the lock is let go gets the whole budget.
 
-`startDaemon` defaults to `createRecordingSink()`, which records alerts in memory, keeping only the latest 1,000 (`RECORDING_LIMIT`, or its `limit`) however long the daemon runs; `subset-timer daemon run` passes the platform sink (see Alerts).
+`startDaemon` defaults to `createRecordingSink()`, which records alerts in memory, keeping only the latest 1,000 (`RECORDING_LIMIT`, or its `limit`) however long the daemon runs; `subset timer daemon run` passes the platform sink (see Alerts).
 
 ### Alert handler
 

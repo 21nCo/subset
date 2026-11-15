@@ -8,17 +8,18 @@ A local dashboard and CLI for AI subscription usage: ChatGPT (Codex), Claude, Cu
 
 Requires Node.js 22 or later.
 
-Until the first release, install from the repository:
+```sh
+subset usage                                # open the dashboard
+subset usage status                         # current usage as JSON, read-only
+```
+
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev usage ...` works without installing it. `subset usage` runs the published `@subset.dev/usage` (see [`subset.dev`](../subset-dev/README.md)). To run a build from the repository instead, with the same arguments:
 
 ```sh
 npm ci && npm run build                     # at the repository root
-cd packages/usage-cli && npm pack           # builds and writes subset.dev-usage-<version>.tgz
-npm install -g ./subset.dev-usage-*.tgz        # installs the subset-usage command
-subset-usage                                # open the dashboard
-subset-usage status                         # current usage as JSON, read-only
+node packages/usage-cli/dist/cli.mjs status
+cd packages/usage-cli && npm pack           # or pack it: writes subset.dev-usage-<version>.tgz for a global install
 ```
-
-After a release is published, the registry commands work too: `npx @subset.dev/usage`, or `npm install -g @subset.dev/usage`.
 
 Collectors and status-line chaining use a POSIX shell script, so they are supported on macOS and Linux; reading the Cursor app sign-in is not supported on Windows.
 
@@ -32,7 +33,13 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 
 ## MCP server
 
-`subset-usage mcp` is a local MCP server over stdio. It gives any MCP host the same answer as `status`, without the dashboard. Add it to a host as a stdio server whose command is `subset-usage` with the argument `mcp`. The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-usage` with the package version. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. It exits 0 when the host closes stdin, after answering the calls it already received. Calls get up to 10 seconds. Then the server stops: it ends the provider subprocesses still running (such as `claude auth status` or `amp usage`), and their calls are answered with that provider's error. On SIGTERM or SIGINT it stops the same way at once, and a second signal skips the grace period. Stopping sends SIGTERM first, so a launcher such as a shell script or Node entrypoint can end the provider it started, then SIGKILL to any subprocess still running a second later. A subprocess a read starts while the server stops is ended as it starts. At 5 seconds, any subprocess still running, including one started just before, gets SIGKILL, and the server waits up to half a second more for it and its call; stopping takes at most 5.5 seconds and exits 0. No subprocess a read started outlives the server, except after SIGKILL of the server, and except a process started by a launcher that does not pass SIGTERM on to it: one that ignores SIGTERM, or that dies of it without forwarding it (a shell script that does not `exec` the provider or trap the signal). Then only the launcher ends.
+`subset usage mcp` is a local MCP server over stdio. It gives any MCP host the same answer as `status`, without the dashboard. Add it to a host as a stdio server whose command is `npx` with the arguments `-y`, `subset.dev`, `usage` and `mcp`, for example in Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "subset-usage": { "command": "npx", "args": ["-y", "subset.dev", "usage", "mcp"] } } }
+```
+
+The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-usage` with the package version. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. It exits 0 when the host closes stdin, after answering the calls it already received. Calls get up to 10 seconds. Then the server stops: it ends the provider subprocesses still running (such as `claude auth status` or `amp usage`), and their calls are answered with that provider's error. On SIGTERM or SIGINT it stops the same way at once, and a second signal skips the grace period. Stopping sends SIGTERM first, so a launcher such as a shell script or Node entrypoint can end the provider it started, then SIGKILL to any subprocess still running a second later. A subprocess a read starts while the server stops is ended as it starts. At 5 seconds, any subprocess still running, including one started just before, gets SIGKILL, and the server waits up to half a second more for it and its call; stopping takes at most 5.5 seconds and exits 0. No subprocess a read started outlives the server, except after SIGKILL of the server, and except a process started by a launcher that does not pass SIGTERM on to it: one that ignores SIGTERM, or that dies of it without forwarding it (a shell script that does not `exec` the provider or trap the signal). Then only the launcher ends.
 
 | Tool | Input | Result |
 | --- | --- | --- |
@@ -78,4 +85,4 @@ From the repository root, `npm run build` builds `@subset.dev/usage-core`, the `
 
 ## Release
 
-Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes through the package's npm trusted publisher (OIDC); the workflow has no npm token. A package that has never been on npm needs a one-time manual step first; see [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx @subset.dev/usage@<version> --version`, then a real `serve`) before listing it as available anywhere.
+Releases are tag-based. Bump `version` here, merge, then push a tag `usage-v<version>`; `.github/workflows/publish-tag.yml` installs, checks, builds, tests, packs, and publishes through the package's npm trusted publisher (OIDC); the workflow has no npm token. A package that has never been on npm needs a one-time manual step first; see [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). `scripts/resolve-release-tag.mjs` refuses a tag whose version or package name does not match. Verify the published package (`npx subset.dev usage@<version> --version`, then a real `serve`) before listing it as available anywhere.

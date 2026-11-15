@@ -474,7 +474,11 @@ test('--help is help only as an option, not as a value or after --', async (t) =
 test('--help lists every command SKILL.md uses, and SKILL.md uses only commands that exist', () => {
   const skill = readFileSync(join(PACKAGE_ROOT, 'skills/subset-timer/SKILL.md'), 'utf8');
   const helpCommands = new Set([...HELP.matchAll(/^ {2}([a-z]+(?: (?:run|status|stop|path|save|rm))?)(?= |$)/gm)].map((match) => match[1]));
-  const skillCommands = new Set([...skill.matchAll(/(?:^|`)subset-timer ([a-z]+)(?: (run|status|stop|path|save|rm)\b)?/gm)]
+  // Skills run the command as `npx -y subset.dev timer` (SET-235), never as the package's own bin.
+  const frontMatterEnd = skill.indexOf('\n---\n');
+  assert.ok(frontMatterEnd > 0, 'SKILL.md has no front matter');
+  assert.doesNotMatch(skill.slice(frontMatterEnd), /subset-timer/);
+  const skillCommands = new Set([...skill.matchAll(/(?:^|`)npx -y subset\.dev timer ([a-z]+)(?: (run|status|stop|path|save|rm)\b)?/gm)]
     .map(([, command, sub]) => (['daemon', 'skill', 'preset'].includes(command) ? `${command} ${sub}` : command)));
   assert.deepEqual([...skillCommands].filter((command) => !helpCommands.has(command)), []);
   // The skill teaches every timer, preset, daemon and web command.
@@ -487,5 +491,5 @@ test('--help lists every command SKILL.md uses, and SKILL.md uses only commands 
   assert.match(skill, /its id/);
   assert.match(skill, /when it ends/);
   assert.match(skill, /keep running after your turn ends/);
-  assert.match(skill, /`subset-timer reset` and `subset-timer rm` only when the user explicitly asks/);
+  assert.match(skill, /`npx -y subset\.dev timer reset` and `npx -y subset\.dev timer rm` only when the user explicitly asks/);
 });

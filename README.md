@@ -18,7 +18,7 @@
 ---
 Subset is a collection of small, independently useful apps. Each app solves one focused problem and can, where its platform allows, also serve as a capability inside 21n products or as an interface returned by an AI agent.
 
-The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as the `subset-usage` CLI (`@subset.dev/usage`, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
+The first pilots are a **usage dashboard** and a **PDF annotation and review tool**. The local usage dashboard supports isolated Codex/ChatGPT connections, Claude Code and Antigravity CLI quota snapshots, Cursor team-member spending, and, with opt-in local sign-ins, live usage for Claude, personal Cursor, Factory Droid, Devin, Amp, and logins stored by Pi, OpenCode, omp, and Hermes. It runs as `subset usage` (the `@subset.dev/usage` CLI, prepared for npm but not yet published); neither pilot is released. The directory labels availability accordingly.
 
 ## Product model
 
@@ -51,6 +51,18 @@ Future capability packages belong under `packages/<capability>/`; their standalo
 
 Every workspace, published or private, uses the `@subset.dev/<name>` scope; we do not own `@subset` on npm. The exception is the launcher `subset.dev` (`packages/subset-dev`, command `subset`), which runs the published CLIs as `npx subset.dev <tool>`. A private domain package that would share a name with a published CLI takes the `-core` suffix (for example `@subset.dev/usage-core`). App hosts remain private. The packages that are released to npm are listed in `release-packages.json`.
 
+## Running a Subset tool
+
+Every Subset command-line tool runs through one command, `subset`:
+
+```sh
+npm install -g subset.dev   # installs the subset command
+subset                      # lists the tools
+subset usage status         # runs a tool; arguments after its name go to the tool
+```
+
+`npx subset.dev <tool> ...` works without installing (for example `npx subset.dev usage status`). Agent skills and MCP configs use `npx -y subset.dev <tool>`. See [`packages/subset-dev`](packages/subset-dev/README.md) for the tools and commands.
+
 ## Development
 
 Requires Node.js 22.13 or newer and npm 10.
@@ -72,7 +84,7 @@ Before implementing auth, billing, storage, uploads, MCP, UI primitives, or obse
 
 ## Current status
 
-The monorepo and directory are an initial scaffold. The [usage package](packages/usage/README.md) and local standalone preview are under development, with no public or agent surface verified. The only published download is [Breaks 0.1.0 for macOS](native/breaks/README.md#release-macos), and `subset.dev` deployment has not been configured. [Minutes](packages/minutes/README.md), a meeting-recorder bot, runs as the `subset-minutes` CLI (`@subset.dev/minutes`, prepared for npm but not published) and as a [macOS app](native/minutes/README.md) that runs the same CLI; neither has joined a live meeting in verification. A local [M Graph macOS capture spike](native/mgraph/README.md) tests Accessibility collection and development packaging without adding a catalog availability claim. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
+The monorepo and directory are an initial scaffold. The [usage package](packages/usage/README.md) and local standalone preview are under development, with no public or agent surface verified. The only published download is [Breaks 0.1.0 for macOS](native/breaks/README.md#release-macos), and `subset.dev` deployment has not been configured. [Minutes](packages/minutes/README.md), a meeting-recorder bot, runs as `subset minutes` (the `@subset.dev/minutes` CLI, prepared for npm but not published) and as a [macOS app](native/minutes/README.md) that runs the same CLI; neither has joined a live meeting in verification. A local [M Graph macOS capture spike](native/mgraph/README.md) tests Accessibility collection and development packaging without adding a catalog availability claim. Pilot requirements and delivery plans are tracked in [SET-1: usage dashboard](https://linear.app/21n/issue/SET-1/pilot-a-reusable-usage-status-dashboard) and [SET-2: PDF annotation and review](https://linear.app/21n/issue/SET-2/pilot-reusable-pdf-annotation-and-agent-review).
 
 ## License
 

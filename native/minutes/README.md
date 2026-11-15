@@ -1,6 +1,8 @@
 # Minutes (macOS app)
 
-Minutes sends a notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio. This SwiftUI app is one host for the capability. It checks the local setup, accepts a meeting link, and runs the shared **`subset-minutes` CLI** ([`@subset.dev/minutes`](../../packages/minutes-cli/README.md)), which bundles the capability package [`@subset.dev/minutes-core`](../../packages/minutes/README.md). The app shows the CLI's state (joining, in meeting, finished, failed) with a meeting timer and points to the finished audio file. The bot itself drives a visible Google Chrome window, mutes itself, and writes WebM/Opus audio.
+Minutes sends a notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio. This SwiftUI app is one host for the capability. It checks the local setup, accepts a meeting link, and runs the shared **Minutes CLI** ([`@subset.dev/minutes`](../../packages/minutes-cli/README.md)), which bundles the capability package [`@subset.dev/minutes-core`](../../packages/minutes/README.md). The app shows the CLI's state (joining, in meeting, finished, failed) with a meeting timer and points to the finished audio file. The bot itself drives a visible Google Chrome window, mutes itself, and writes WebM/Opus audio.
+
+The same CLI runs from a terminal as `subset minutes` (install the `subset` command once with `npm i -g subset.dev`); with the Minutes app in `/Applications` or `~/Applications`, `subset minutes` runs the CLI bundled in the app (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)). `npx subset.dev minutes ...` works without installing `subset`.
 
 The app owns only a lightweight link pre-check for the form. Strict link validation, the Meet and Zoom join flows, audio capture, the session lifecycle, and file naming all live in `@subset.dev/minutes-core`. The app runs the CLI and reads its documented outputs: the versioned `join` NDJSON stream and the `doctor --json` report. It passes the meeting link on stdin (`--link-from-stdin`), so a Zoom passcode is not visible in the process list.
 
@@ -20,12 +22,12 @@ This app was ported from a proof of concept. It builds locally, but it does not 
 
 | Operation | Trigger | Effect |
 | --- | --- | --- |
-| Check setup | On launch, on app activation, on choosing a folder, and on **Check Again** | Finds Node.js (Homebrew paths first, then the login shell with a 5-second limit, which covers nvm). Then it locates the CLI and runs `subset-minutes doctor --json --out <folder> --profile <profile>`. The checklist shows each doctor check: Chrome, the bot's Google sign-in (optional), whether the profile is in use, and the output folder. |
+| Check setup | On launch, on app activation, on choosing a folder, and on **Check Again** | Finds Node.js (Homebrew paths first, then the login shell with a 5-second limit, which covers nvm). Then it locates the CLI and runs `node <cli.mjs> doctor --json --out <folder> --profile <profile>`. The checklist shows each doctor check: Chrome, the bot's Google sign-in (optional), whether the profile is in use, and the output folder. |
 | Fill link | Type, **Paste**, or **Use Current Tab** | Pre-checks for an `https` link on a Google Meet or Zoom host. **Use Current Tab** reads the front tab of a running Chrome or Safari through Apple Events, only when clicked. The CLI does the strict validation. |
 | Send bot | **Send Bot to Meeting** (⌘↩) | Runs `node <cli.mjs> join --link-from-stdin --json --stop-on-stdin-close --profile <profile> --name <name> --out <folder>` and writes the link to its stdin. |
 | Stop | **Leave and Stop** (⌘.) | Sends SIGINT, which makes the CLI flush the recording, leave, and exit. If the CLI is still running after 15 seconds, the app sends SIGTERM to that same process. |
 | Quit during a session | Quitting or a crash closes the CLI's stdin | With `--stop-on-stdin-close`, the CLI finalizes the recording as if it had been stopped. |
-| Set up sign-in | **Set Up Google Sign-In…** | Runs `subset-minutes sign-in --profile <profile>`, which opens Chrome with the bot profile at accounts.google.com. Quit that window before you start the bot. |
+| Set up sign-in | **Set Up Google Sign-In…** | Runs `node <cli.mjs> sign-in --profile <profile>`, which opens Chrome with the bot profile at accounts.google.com. Quit that window before you start the bot. |
 | Inspect | **Details**, **Copy Log**, **Show in Finder**, **Open** | Shows and copies the session log, and reveals the audio file and its folder. |
 
 ### Contract with the CLI

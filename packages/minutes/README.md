@@ -1,6 +1,6 @@
 # @subset.dev/minutes-core
 
-The Minutes capability: send a visible notetaker bot to a Google Meet or Zoom (web client) meeting in the system Google Chrome and record the other participants' audio to a local WebM file. This private workspace owns the domain logic and the contract. The `subset-minutes` CLI ([`@subset.dev/minutes`](../minutes-cli/README.md)) bundles it, and the [macOS app](../../native/minutes/README.md) runs that CLI. There is one implementation.
+The Minutes capability: send a visible notetaker bot to a Google Meet or Zoom (web client) meeting in the system Google Chrome and record the other participants' audio to a local WebM file. This private workspace owns the domain logic and the contract. The `subset minutes` CLI ([`@subset.dev/minutes`](../minutes-cli/README.md)) bundles it, and the [macOS app](../../native/minutes/README.md) runs that CLI. There is one implementation.
 
 Status: building. No bot has joined a real meeting since this package was extracted (see [Unverified](#unverified)).
 
@@ -11,7 +11,7 @@ Status: building. No bot has joined a real meeting since this package was extrac
 | User outcome | An audio recording of a Google Meet or Zoom meeting, made by a bot participant that everyone can see, without a meeting-platform SDK or a hosted service. |
 | Source of truth | The meeting page as the bot's Chrome session observes it. The output is one `.webm` file per session, written by the bot. Session records (`<data dir>/sessions/<id>.json`) hold state for `status`. |
 | Operations | `parseMeetingLink` (validate), `runMeetingSession` (join, record, and finalize), `readStatus` (read-only), and `runDoctor` (read-only prerequisite checks). |
-| Consumers | The `subset-minutes` CLI (terminal and shell-capable agents) and the macOS app (through the CLI's `--json` stream). |
+| Consumers | The `subset minutes` CLI (terminal and shell-capable agents) and the macOS app (through the CLI's `--json` stream). |
 | Not included | Transcription, speaker labels, notes, upload, calendar integration, or any network service of Subset's. |
 
 ## Modules
