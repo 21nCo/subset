@@ -51,8 +51,21 @@ public struct HelperInvocation: Equatable, Sendable {
     public static let defaultTimeout: Duration = .seconds(60)
     public static let defaultDepth = 1
 
-    public static let usage = """
-        Usage: subset-system <command> [options]
+    /// The helper's name on `PATH` and in the app bundle; `--version` names it whatever `SUBSET_COMMAND` is.
+    public static let name = "subset-system"
+
+    /// The command to name in help and usage errors: `SUBSET_COMMAND` when the `subset` launcher set it to
+    /// `subset <tool>` (such as `subset system`), otherwise the helper's name. Any other value is ignored, as for the
+    /// Node CLIs (SET-233). Only human text uses it.
+    public static func commandName(_ environment: [String: String]) -> String {
+        guard let value = environment["SUBSET_COMMAND"], value.wholeMatch(of: /subset [a-z0-9-]+/) != nil else { return name }
+        return value
+    }
+
+    /// The help, naming the command `command` (`subset-system`, or `subset system` when started through `subset`).
+    public static func usage(command: String = name) -> String {
+        """
+        Usage: \(command) <command> [options]
 
         Read-only: nothing is changed, deleted, or sent anywhere.
 
@@ -73,6 +86,7 @@ public struct HelperInvocation: Equatable, Sendable {
 
         Exit codes: 0 ok, 2 usage error, 3 partial result, 4 timeout, 5 internal error.
         """
+    }
 
     /// Parses `arguments` (without the program name). `home` expands a `--path` starting with `~`. Throws a message
     /// for a usage error.

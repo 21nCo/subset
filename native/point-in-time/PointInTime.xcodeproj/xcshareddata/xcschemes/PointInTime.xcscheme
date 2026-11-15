@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9C6AC2B0BBBD4EC1D7A3248635CB8A14"
+               BlueprintIdentifier = "30C101A30199F887CC4991B53966CBF5"
                BuildableName = "PointInTimeCoreTests.xctest"
                BlueprintName = "PointInTimeCoreTests"
                ReferencedContainer = "container:PointInTime.xcodeproj">
@@ -55,7 +55,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9C6AC2B0BBBD4EC1D7A3248635CB8A14"
+               BlueprintIdentifier = "30C101A30199F887CC4991B53966CBF5"
                BuildableName = "PointInTimeCoreTests.xctest"
                BlueprintName = "PointInTimeCoreTests"
                ReferencedContainer = "container:PointInTime.xcodeproj">

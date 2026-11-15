@@ -117,8 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Explains the bundled read-only helper and how to link it onto PATH. Copy Command writes the command to the
-    /// clipboard; nothing is linked, run, or written anywhere else.
+    /// Explains the bundled read-only helper and how to run it from a terminal: through `subset system`, or by linking
+    /// it onto PATH. Each Copy button writes its command to the clipboard; nothing is installed, linked, run, or written
+    /// anywhere else.
     private func showCommandLineHelper() {
         let helper = CommandLineHelper.path(inApp: Bundle.main.bundlePath)
         let alert = NSAlert()
@@ -129,23 +130,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
             return
         }
-        let command = CommandLineHelper.linkCommand(helperPath: helper)
-        alert.informativeText = """
-            \(CommandLineHelper.name) prints this Mac's CPU and memory by origin and disk usage by folder as text or JSON, \
-            for you or an agent that runs shell commands. It only reads: it never cleans up, changes, or sends anything.
-
-            To run it from Terminal, link it into a folder on your PATH, for example:
-
-            \(command)
-
-            System never edits shell files or /usr/local itself. Run \(CommandLineHelper.name) --help for its commands.
-            """
-        alert.addButton(withTitle: "Copy Command")
+        let instructions = CommandLineHelper.instructions(helperPath: helper)
+        alert.informativeText = instructions.text
+        for copy in instructions.copies { alert.addButton(withTitle: copy.title) }
         alert.addButton(withTitle: "Close")
         NSApp.activate()
-        if alert.runModal() == .alertFirstButtonReturn {
+        let chosen = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if instructions.copies.indices.contains(chosen) {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(command, forType: .string)
+            NSPasteboard.general.setString(instructions.copies[chosen].command, forType: .string)
         }
     }
 }

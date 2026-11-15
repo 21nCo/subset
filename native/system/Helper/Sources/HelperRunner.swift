@@ -8,16 +8,21 @@ public struct HelperEnvironment: Sendable {
     public var processes: ProcessProbe
     public var disk: DiskProbe
     public var now: @Sendable () -> Date
+    /// The command help and usage errors name (`HelperInvocation.commandName`).
+    public var command: String
 
-    public init(home: String, processes: ProcessProbe, disk: DiskProbe, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(home: String, processes: ProcessProbe, disk: DiskProbe, now: @escaping @Sendable () -> Date = { Date() },
+                command: String = HelperInvocation.name) {
         self.home = home
         self.processes = processes
         self.disk = disk
         self.now = now
+        self.command = command
     }
 
     public static func live() -> HelperEnvironment {
-        HelperEnvironment(home: NSHomeDirectory(), processes: .live(), disk: .live)
+        HelperEnvironment(home: NSHomeDirectory(), processes: .live(), disk: .live,
+                          command: HelperInvocation.commandName(ProcessInfo.processInfo.environment))
     }
 }
 
@@ -35,16 +40,17 @@ public enum HelperRunner {
         do {
             invocation = try HelperInvocation.parse(arguments, home: environment.home)
         } catch {
-            return HelperOutput(stdout: "", stderr: "subset-system: \(error.message)\nRun subset-system --help for usage.\n",
+            let command = environment.command
+            return HelperOutput(stdout: "", stderr: "\(command): \(error.message)\nRun \(command) --help for usage.\n",
                                 exit: .usage)
         }
         let paths = PathDisplay(home: environment.home, absolute: invocation.absolute)
         let report: HelperReport
         switch invocation.command {
         case .help:
-            return HelperOutput(stdout: HelperInvocation.usage + "\n", stderr: "", exit: .ok)
+            return HelperOutput(stdout: HelperInvocation.usage(command: environment.command) + "\n", stderr: "", exit: .ok)
         case .version:
-            return HelperOutput(stdout: "subset-system \(HelperInvocation.version)\n", stderr: "", exit: .ok)
+            return HelperOutput(stdout: "\(HelperInvocation.name) \(HelperInvocation.version)\n", stderr: "", exit: .ok)
         case .status:
             report = ProcessReports.status(await environment.processes.measure(), paths: paths)
         case let .processes(layer):
