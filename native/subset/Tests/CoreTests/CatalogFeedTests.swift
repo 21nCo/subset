@@ -151,6 +151,27 @@ final class CatalogFeedTests: XCTestCase {
         assertRefused(Catalog.parse(Data([0x22, 0xFF, 0x22])), "not UTF-8", because: "not UTF-8")
     }
 
+    // JSONSerialization reads all of these; `subset` (TextDecoder with fatal, then JSON.parse) refuses each.
+    func testAFeedThatOnlyFoundationWouldReadIsRefused() throws {
+        let text = String(decoding: try fixture("catalog-valid-live-only"), as: UTF8.self)
+        XCTAssertNoThrow(try Catalog.parse(Data(text.utf8)).get())
+        for (label, data, reason) in lenientVariants(of: text, property: "\"schema\": \"subset.catalog@0\"") {
+            assertRefused(Catalog.parse(data), label, because: reason)
+        }
+        let array = text.replacingOccurrences(of: "}\n  ],\n  \"tools\"", with: "},\n  ],\n  \"tools\"")
+        XCTAssertNotEqual(array, text)
+        assertRefused(Catalog.parse(Data(array.utf8)), "a trailing comma in an array", because: "not JSON: a trailing comma")
+    }
+
+    func testAReceiptThatOnlyFoundationWouldReadIsRefused() throws {
+        let text = String(decoding: try fixture("receipt-valid-live"), as: UTF8.self)
+        for (label, data, reason) in lenientVariants(of: text, property: "\"channel\": \"gamma\"") {
+            assertRefused(Receipt.parse(data), label, because: reason)
+        }
+        // subset skips a byte order mark at the start of a receipt (but not of a feed).
+        XCTAssertNoThrow(try Receipt.parse(Data([0xEF, 0xBB, 0xBF] + Array(text.utf8))).get())
+    }
+
     private func assertRefused<T>(_ result: Result<T, FeedRefusal>, _ label: String, because reason: String, line: UInt = #line) {
         switch result {
         case .success: XCTFail("\(label) is accepted", line: line)
@@ -160,4 +181,23 @@ final class CatalogFeedTests: XCTestCase {
             )
         }
     }
+}
+
+/// `text` (a valid document, an object) changed in ways JSONSerialization still reads and `subset` refuses, each with
+/// the reason it is refused. `property` is a member that would make the document invalid: added again after its valid
+/// spelling, JSONSerialization would keep the first value and JSON.parse the last.
+func lenientVariants(of text: String, property: String) -> [(String, Data, String)] {
+    let body = text.trimmingCharacters(in: .whitespacesAndNewlines).dropLast()
+    let escaped = property.replacingOccurrences(of: "\"s", with: "\"\\u0073").replacingOccurrences(of: "\"c", with: "\"\\u0063")
+    return [
+        ("a trailing comma in an object", Data((body + ",}").utf8), "not JSON: a trailing comma"),
+        ("a property given twice", Data((body + ",\(property)}").utf8), "appears twice"),
+        ("a property given twice, once escaped", Data((body + ",\(escaped)}").utf8), "appears twice"),
+        ("a NUL byte after it", Data((text + "\u{0}").utf8), "not JSON: unexpected byte 0x00"),
+        ("a NUL byte in a string", Data(text.replacingOccurrences(of: "live", with: "li\u{0}ve").utf8), "not JSON: a control character"),
+        ("UTF-16LE", text.data(using: .utf16LittleEndian)!, "not JSON"),
+        ("UTF-16BE", text.data(using: .utf16BigEndian)!, "not JSON"),
+        ("UTF-32LE", text.data(using: .utf32LittleEndian)!, "not JSON"),
+        ("UTF-32BE", text.data(using: .utf32BigEndian)!, "not JSON")
+    ]
 }

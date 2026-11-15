@@ -105,13 +105,24 @@ struct JSONChecker {
         value is NSNumber
     }
 
-    /// Parses `data` as UTF-8 JSON, or returns why it is not. A byte order mark is refused, as the `subset` command
-    /// refuses it.
-    static func parse(_ data: Data) -> Result<Any, FeedRefusal> {
-        if data.starts(with: [0xEF, 0xBB, 0xBF]) { return .failure(FeedRefusal(["not JSON: it starts with a byte order mark"])) }
-        guard String(data: data, encoding: .utf8) != nil else { return .failure(FeedRefusal(["not JSON: it is not UTF-8"])) }
+    /// Parses `data` as UTF-8 JSON by the rules of the `subset` command (`TextDecoder` with `fatal`, then `JSON.parse`),
+    /// or returns why it is not: bytes that are not UTF-8 (UTF-16 and UTF-32 text among them), anything outside the
+    /// RFC 8259 grammar (a trailing comma, a NUL byte), or a property name that appears twice (see `StrictJSON`). A
+    /// leading byte order mark is refused, as `subset` refuses it in a feed and its cache, unless
+    /// `allowingByteOrderMark` (`subset` skips one at the start of a receipt).
+    static func parse(_ data: Data, allowingByteOrderMark: Bool = false) -> Result<Any, FeedRefusal> {
+        var bytes = [UInt8](data)
+        if bytes.starts(with: [0xEF, 0xBB, 0xBF]) {
+            guard allowingByteOrderMark else { return .failure(FeedRefusal(["not JSON: it starts with a byte order mark"])) }
+            bytes.removeFirst(3)
+        }
+        // Swift's decoder is as strict as TextDecoder's fatal mode: an invalid sequence is replaced, so the bytes change.
+        guard String(decoding: bytes, as: UTF8.self).utf8.elementsEqual(bytes) else {
+            return .failure(FeedRefusal(["not JSON: it is not UTF-8"]))
+        }
+        if let problem = StrictJSON.problem(bytes) { return .failure(FeedRefusal(["not JSON: \(problem)"])) }
         do {
-            return .success(try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]))
+            return .success(try JSONSerialization.jsonObject(with: Data(bytes), options: [.fragmentsAllowed]))
         } catch {
             let detail = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String ?? "it cannot be parsed"
             return .failure(FeedRefusal(["not JSON: \(detail)"]))

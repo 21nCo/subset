@@ -16,11 +16,12 @@ public struct Receipt: Equatable, Sendable {
     /// The installed `.app`, directly inside /Applications or /Users/<user>/Applications.
     public var path: String
 
-    /// The receipt in `data`, or the problems that refuse it: not UTF-8 JSON or invalid against the closed schema.
+    /// The receipt in `data`, or the problems that refuse it: not UTF-8 JSON or invalid against the closed schema. A
+    /// leading byte order mark is skipped, as the `subset` command skips it.
     public static func parse(_ data: Data) -> Result<Receipt, FeedRefusal> {
         if data.count > maxBytes { return .failure(FeedRefusal(["the receipt is larger than \(maxBytes) bytes"])) }
         let json: Any
-        switch JSONChecker.parse(data) {
+        switch JSONChecker.parse(data, allowingByteOrderMark: true) {
         case .success(let value): json = value
         case .failure(let refusal): return .failure(refusal)
         }

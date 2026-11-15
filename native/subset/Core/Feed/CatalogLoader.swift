@@ -184,11 +184,12 @@ public struct CatalogLoader: CatalogLoading {
         return "\(count) \(unit)\(count == 1 ? "" : "s")"
     }
 
-    // The cached feed for `url`, or nil when there is none, it is for another URL, or it is unreadable, invalid or dated
-    // in the future (it is then simply not used).
+    // The cached feed for `url`, or nil when there is none, it is for another URL, or it is unreadable, not strict UTF-8
+    // JSON (as the feed itself must be), invalid or dated in the future (it is then simply not used). A body with a lone
+    // surrogate escape, which `subset` also refuses, does not parse.
     func readCache(url: URL, now: Date) -> (catalog: Catalog, fetchedAt: Date)? {
         guard let data = BoundedFile.read(cacheFile.path, limit: Self.maxCacheBytes), data.count <= Self.maxCacheBytes,
-              let entry = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              case .success(let json) = JSONChecker.parse(data), let entry = json as? [String: Any],
               entry["schema"] as? String == Self.cacheSchema, entry["url"] as? String == url.absoluteString,
               let body = entry["body"] as? String, let stamp = entry["fetchedAt"] as? String,
               let fetchedAt = Self.parseDate(stamp), fetchedAt <= now,

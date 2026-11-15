@@ -256,6 +256,31 @@ final class CatalogLoaderTests: XCTestCase {
         }
     }
 
+    func testACacheEntryThatOnlyFoundationWouldReadIsNotUsed() async throws {
+        try FileManager.default.createDirectory(at: cacheFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let entry: [String: Any] = [
+            "schema": "subset.catalog-cache@1", "url": "https://subset.21n.dev/catalog/v1.json", "fetchedAt": "2027-01-15T07:58:00Z",
+            "body": String(decoding: try fixture("catalog-valid-live-only"), as: UTF8.self)
+        ]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]), as: UTF8.self)
+        try Data(text.utf8).write(to: cacheFile)
+        let cached = try await loader(RecordedTransport([.failure(FeedUnavailable("offline"))])).load(refresh: false).get()
+        XCTAssertTrue(cached.cached)
+        // subset refuses a body with a lone surrogate (it is not well-formed Unicode), so it is not used here either.
+        let lone = text.replacingOccurrences(of: "Take well-timed", with: "Take \\ud800 well-timed")
+        XCTAssertNotEqual(lone, text)
+        let variants = lenientVariants(of: text, property: #""url":"https://subset.21n.dev/catalog/other.json""#)
+            + [("a lone surrogate in the body", Data(lone.utf8), "")]
+        for (label, data, _) in variants {
+            try data.write(to: cacheFile)
+            let transport = RecordedTransport([.failure(FeedUnavailable("offline"))])
+            guard case .failure(.unavailable) = await loader(transport).load(refresh: false) else {
+                XCTFail("\(label) is used")
+                continue
+            }
+        }
+    }
+
     func testDurationsAreSaidAsPeopleSayThem() {
         XCTAssertEqual(CatalogLoader.describe(0), "0 seconds")
         XCTAssertEqual(CatalogLoader.describe(61), "1 minute")
