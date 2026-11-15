@@ -121,6 +121,29 @@ test('a fence opens with up to three spaces of indentation, counted from its lis
   assert.deepEqual(problems(lines('- Step', '', 'Prose.', '', '    ```sh', '    subset-timer list', '    ```')), []);
 });
 
+test('fences follow block quotes, HTML blocks and lazy lines as CommonMark nests them', () => {
+  const at = (...items) => problems(lines(...items)).map((problem) => problem.split(':')[1]);
+  const fenced = ['    ```sh', '    subset-timer list', '    ```'];
+  const fencedJson = ['    ```json', '    { "command": "subset-usage" }', '    ```'];
+  // A block quote or an HTML block after a list paragraph is not lazy: it ends the list, so four spaces is indented code.
+  assert.deepEqual(at('- Step', '> Note', '', ...fenced), []);
+  assert.deepEqual(at('- Step', '> Note', '', ...fencedJson), []);
+  assert.deepEqual(at('- Step', '<div>', '', ...fenced), []);
+  assert.deepEqual(at('- Step', '<div>', '', ...fencedJson), []);
+  // A lazy "=" or "--" line is paragraph text, not a setext underline, so the list item stays open and holds the fence.
+  for (const underline of ['=', '--']) {
+    assert.deepEqual(at('- Foo', underline, '', ...fenced), ['5'], underline);
+    assert.deepEqual(at('- Foo', underline, '', ...fencedJson), ['5'], underline);
+  }
+  // A fence in a block quote is checked; a quote's lines need their ">" (a lazy line ends the fence and the quote).
+  assert.deepEqual(at('> ```sh', '> subset-timer list', '> ```'), ['2']);
+  assert.deepEqual(at('> - Step', '>', '>   ```json', '>   { "command": "subset-usage" }', '>   ```'), ['4']);
+  assert.deepEqual(at('> ```sh', 'subset-timer list', '```sh', 'subset-timer list'), ['4']);
+  // An HTML block hides fence-like lines until its end condition; a comment's ends at "-->".
+  assert.deepEqual(at('<div>', '```sh', 'subset-timer list', '```'), []);
+  assert.deepEqual(at('<!--', '```sh', 'subset-timer list', '-->', '```sh', 'subset-timer list', '```'), ['6']);
+});
+
 test('a closing fence is indented at most three spaces from its block, and a list item ends its block', () => {
   // A ``` line indented four spaces inside a top-level block is content, so the block goes on.
   assert.deepEqual(problems(lines('```sh', '    ```', 'subset-timer list', '```', 'subset-timer list')).map((problem) => problem.split(':')[1]), ['3']);
