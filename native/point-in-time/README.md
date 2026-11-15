@@ -2,7 +2,7 @@
 
 pointInTime is a menu-bar app that records which app, window, and website is in front while you work, and rolls that activity into three-minute blocks so you can see where your day went. Activity stays on the Mac unless you choose a classification provider.
 
-This folder holds the capture and storage slice ([SET-19](https://linear.app/21n/issue/SET-19)), block classification with your own OpenRouter key ([SET-20](https://linear.app/21n/issue/SET-20)), the daily timeline and weekly reports ([SET-21](https://linear.app/21n/issue/SET-21)), the menu-bar focus ring and drift companion ([SET-22](https://linear.app/21n/issue/SET-22)), and the read-only `point-in-time status --json` agent command ([SET-23](https://linear.app/21n/issue/SET-23)) of the pointInTime outcome ([SET-18](https://linear.app/21n/issue/SET-18)). Classification with a ChatGPT subscription through the Codex CLI moved to SET-140. Exports, sharing, write commands, `serve`, and MCP are not implemented.
+This folder holds the capture and storage slice ([SET-19](https://linear.app/21n/issue/SET-19)), block classification with your own OpenRouter key ([SET-20](https://linear.app/21n/issue/SET-20)), the daily timeline and weekly reports ([SET-21](https://linear.app/21n/issue/SET-21)), the menu-bar focus ring and drift companion ([SET-22](https://linear.app/21n/issue/SET-22)), and the read-only `subset point-in-time status --json` agent command ([SET-23](https://linear.app/21n/issue/SET-23)) of the pointInTime outcome ([SET-18](https://linear.app/21n/issue/SET-18)). Classification with a ChatGPT subscription through the Codex CLI moved to SET-140. Exports, sharing, write commands, `serve`, and MCP are not implemented.
 
 ## Capability boundary
 
@@ -97,7 +97,7 @@ Each completed three-minute block is labeled **Focus**, **Neutral**, or **Drift*
 
 ## Menu-bar ring and drift companion
 
-**The ring.** The menu bar item is a small ring of today's **Focus** (green), **Neutral** (blue), and **Drift** (orange), each arc as long as its share of today's classified time, clockwise from the top over a faint track. It comes from the same day totals as the window's rings (`DayReport` and `CategorySeconds.share(of:)`), so a correction counts the same way, and with nothing classified (a day with no data, or only unclassified or excluded time) the ring is the empty track, never 0%. A mark in its middle shows when tracking is paused, off, or failing. VoiceOver reads the tracking state and the shares, rounded as in the window: "pointInTime is tracking. Focus 62%, Neutral 20%, Drift 18% today." It is redrawn after every classification run, correction, deletion, and tracking-state change, and every minute. The menu shows the tracking state, today's recorded time, today's focus, neutral, and drift with their shares (the ring's whole-day totals: both count the span `FocusRing.dayRange` gives, so blocks starting after now, as after the clock was set back, count in the ring, the menu text, and `point-in-time status` alike), the provider with its pending and failed counts, and **Open Timeline and Reports…**.
+**The ring.** The menu bar item is a small ring of today's **Focus** (green), **Neutral** (blue), and **Drift** (orange), each arc as long as its share of today's classified time, clockwise from the top over a faint track. It comes from the same day totals as the window's rings (`DayReport` and `CategorySeconds.share(of:)`), so a correction counts the same way, and with nothing classified (a day with no data, or only unclassified or excluded time) the ring is the empty track, never 0%. A mark in its middle shows when tracking is paused, off, or failing. VoiceOver reads the tracking state and the shares, rounded as in the window: "pointInTime is tracking. Focus 62%, Neutral 20%, Drift 18% today." It is redrawn after every classification run, correction, deletion, and tracking-state change, and every minute. The menu shows the tracking state, today's recorded time, today's focus, neutral, and drift with their shares (the ring's whole-day totals: both count the span `FocusRing.dayRange` gives, so blocks starting after now, as after the clock was set back, count in the ring, the menu text, and `subset point-in-time status` alike), the provider with its pending and failed counts, and **Open Timeline and Reports…**.
 
 **When a drift is confirmed** (`DriftDetector` in `Core/Drift.swift`):
 
@@ -118,25 +118,32 @@ No action closes tabs, quits apps, or makes a sound, and the companion sends not
 
 ## Command-line status for agents
 
-`point-in-time` is a read-only command for scripts and shell-capable agents (Claude Code, Codex, and similar). It prints a day's focus summary from the local store without starting the app, changing any data, or using the network, and works whether the app is running or not.
+`subset point-in-time` is a read-only command for scripts and shell-capable agents (Claude Code, Codex, and similar). It prints a day's focus summary from the local store without starting the app, changing any data, or using the network, and works whether the app is running or not.
 
 ```text
-point-in-time status [--date YYYY-MM-DD] [--json] [--include-titles]
-point-in-time --version
+subset point-in-time status [--date YYYY-MM-DD] [--json] [--include-titles]
+subset point-in-time --version
 ```
 
 - `--date` names a day in this Mac's time zone (`TZ` overrides it); the default is today. A day is midnight to midnight, so a day the clocks change is 23 or 25 hours long, and a segment across midnight counts on each day by the three-minute block it falls in.
 - `--json` prints one JSON object that follows [`schemas/status-v1.schema.json`](schemas/status-v1.schema.json) (`schemaVersion: 1`); without it the command prints a short text summary.
 - `--include-titles` adds window titles and pages (scheme, host, and path) to the output. Without it no window title or URL path appears in either output; app names, bundle IDs, and hosts do. Query strings and fragments are never stored, so they never appear. Excluded apps are never named.
 
-**Installing on PATH.** The app bundles the command at `pointInTime.app/Contents/Helpers/point-in-time`. **Command-Line Tool…** in the menu shows the command to link it and can copy it or reveal the file; you create the link yourself, for example:
+**Running it from a terminal.** The app bundles the command at `pointInTime.app/Contents/Helpers/point-in-time`. `subset point-in-time` runs it from a Developer ID-signed pointInTime app in `/Applications` or `~/Applications` (see [`subset.dev`](../../packages/subset-dev/README.md#commands-bundled-in-mac-apps)); install the `subset` command once:
+
+```sh
+npm i -g subset.dev
+subset point-in-time status
+```
+
+`npx subset.dev point-in-time ...` works without installing `subset`. `subset` refuses a command without the Subset team's Developer ID signature, such as the ad hoc signed `build-app.sh` build (see [Build and run](#build-and-run)), so for a development build run the command by its path: `native/point-in-time/build/pointInTime.app/Contents/Helpers/point-in-time status`. **Command-Line Tool…** in the menu shows these commands and, as the alternative, the command to link the bundled command onto your `PATH` and run it as `point-in-time`; it can copy either or reveal the file. You create the link yourself, for example:
 
 ```sh
 sudo mkdir -p /usr/local/bin
 sudo ln -sf /Applications/pointInTime.app/Contents/Helpers/point-in-time /usr/local/bin/point-in-time
 ```
 
-pointInTime never creates this link, writes to `/usr/local`, or edits shell files. Moving the app breaks the link; create it again. `--version` prints the enclosing app's version and build.
+pointInTime never installs `subset`, creates this link, writes to `/usr/local`, or edits shell files. Moving the app breaks the link; create it again. `--version` prints the enclosing app's version and build.
 
 **JSON fields** (schema version 1; every field is always present, `null` when it has no value):
 
@@ -174,7 +181,7 @@ pointInTime never creates this link, writes to `/usr/local`, or edits shell file
 | Surface | State |
 | --- | --- |
 | macOS app | Building. Local development builds only; no notarized download yet. |
-| Agent CLI (`point-in-time status --json`) | Building. Bundled in local builds; no notarized download or published package yet. |
+| Agent CLI (`subset point-in-time status --json`) | Building. Bundled in local builds; no notarized download or published package yet. |
 
 The catalog lists `point-in-time` as `building`, with `macos` and `agent-cli` proposed and no available surface.
 

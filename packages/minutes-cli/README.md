@@ -1,8 +1,8 @@
 # @subset.dev/minutes
 
-`subset-minutes` sends a visible notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio to a local WebM file. The bot runs in your installed Google Chrome. Nothing is sent to Subset.
+`subset minutes` sends a visible notetaker bot to a Google Meet or Zoom (web client) meeting and records the other participants' audio to a local WebM file. The bot runs in your installed Google Chrome. Nothing is sent to Subset.
 
-> Status: prepared for npm, not published. Install from a tarball or the repository until a release is announced. No bot has joined a real meeting with this release candidate.
+> Status: prepared for npm, not published. Run it from a build of the repository until a release is announced (see [Use](#use)). No bot has joined a real meeting with this release candidate.
 
 Everyone in the meeting sees the bot join under its name. Tell participants that you are recording, and follow the recording-consent rules that apply to you and to the meeting platform.
 
@@ -10,17 +10,17 @@ Everyone in the meeting sees the bot join under its name. Tell participants that
 
 Requires Node.js 22 or later and Google Chrome (or Chromium) on macOS or Linux. No browser is downloaded.
 
-Until the first release, install from the repository:
+```sh
+subset minutes doctor
+subset minutes join 'https://meet.google.com/abc-defg-hij'
+```
+
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev minutes ...` works without installing it. `subset minutes` runs the CLI bundled in an installed Minutes app, otherwise the published `@subset.dev/minutes` (see [`subset.dev`](../subset-dev/README.md)). Neither is released yet, so these commands work only after a release: until then `subset minutes` stops with `minutes is not on npm yet.` (or refuses a Minutes app without the Subset team's Developer ID signature). Run a build from the repository instead, with the same arguments:
 
 ```sh
 npm ci && npm run build                    # at the repository root
-cd packages/minutes-cli && npm pack        # writes subset.dev-minutes-<version>.tgz
-npm install -g ./subset.dev-minutes-*.tgz  # installs the subset-minutes command
-subset-minutes doctor
-subset-minutes join 'https://meet.google.com/abc-defg-hij'
+node packages/minutes-cli/dist/cli.mjs doctor
 ```
-
-After a release, `npx @subset.dev/minutes doctor` and `npm install -g @subset.dev/minutes` will work as well.
 
 | Command | What it does |
 | --- | --- |
@@ -41,7 +41,7 @@ The first Ctrl-C (SIGINT), SIGTERM, or SIGHUP makes the bot finalize the file: i
 `join --json` streams one event per line using the [`@subset.dev/minutes-core` contract](../minutes/README.md#event-contract-version-1), version 1. The event types are `started`, `state`, `status`, `recording`, `error`, and `ended`. The last line is always `ended`. An invalid link produces `error` with code `invalid_link`, then `ended` with reason `failed`, and the command exits `2`:
 
 ```sh
-$ subset-minutes join https://example.com/x --json
+$ subset minutes join https://example.com/x --json
 {"v":1,"at":"…","session":null,"type":"error","code":"invalid_link","message":"Only Google Meet (meet.google.com) and Zoom (zoom.us) links are supported."}
 {"v":1,"at":"…","session":null,"type":"ended","reason":"failed","path":null,"bytes":null}
 ```
@@ -67,4 +67,4 @@ An agent should use `status --json` and `doctor --json` to read state. `join` st
 
 Releases are tag-based and follow the `@subset.dev/usage` path. This package is listed in `release-packages.json`. Bump `version` here and merge. Then push a tag `minutes-v<version>`. `.github/workflows/publish-tag.yml` resolves the tag with `scripts/resolve-release-tag.mjs`, then installs, checks, builds, tests (`npm test --workspace=@subset.dev/minutes`), packs, and publishes. The workflow itself is unchanged.
 
-No tag has been pushed and nothing is published. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Before listing the CLI as available, verify `npx @subset.dev/minutes@<version> doctor`, then a real `join` in a meeting you control.
+No tag has been pushed and nothing is published. The first release needs the one-time step in [First npm release of a package](../../docs/macos-release.md#first-npm-release-of-a-package). Before listing the CLI as available, verify `npx subset.dev minutes@<version> doctor`, then a real `join` in a meeting you control.

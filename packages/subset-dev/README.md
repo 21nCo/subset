@@ -10,7 +10,7 @@ Requires Node.js 22 or later.
 
 ```sh
 npx subset.dev                      # list the tools
-npx subset.dev usage                # same as npx @subset.dev/usage
+npx subset.dev usage                # runs subset-usage from @subset.dev/usage
 npx subset.dev usage status         # arguments after the tool name go to the tool unchanged
 npx subset.dev timer --help         # the tool's own help
 npx subset.dev usage@beta           # latest, beta, next or an exact version (default: latest)

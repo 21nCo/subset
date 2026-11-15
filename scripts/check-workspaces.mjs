@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { repositoryDocProblems } from './docs-commands.mjs';
 import { packageNamePattern } from './npm-beta-guard.mjs';
 import { isRepoRelativePath, macosReleaseManifestProblems, prereleaseProblems, readMacosReleaseManifests } from './release-macos.mjs';
 import { publishedManifestProblems, WORKSPACE_NAME, workspaceManifestProblems } from './workspace-names.mjs';
@@ -135,6 +136,10 @@ for (const manifest of publicPackages) {
   if (manifest.bin === undefined || manifest.name === 'subset.dev') continue;
   assert.ok(Object.values(launcherTools).some((tool) => tool.package === manifest.name), `${manifest.name} is a published CLI but not a subset.dev launcher tool`);
 }
+
+// The docs name Subset commands as `subset <tool>`, and skills and MCP configs as `npx -y subset.dev <tool>` (SET-235).
+const docProblems = repositoryDocProblems(fileURLToPath(root), Object.keys(launcherTools));
+assert.equal(docProblems.length, 0, `Document commands as subset <tool> (AGENTS.md):\n${docProblems.join('\n')}`);
 
 // Native targets reuse capability packages (for example by running their CLI); they do not carry a
 // second Node.js implementation with its own manifest or lockfile.
