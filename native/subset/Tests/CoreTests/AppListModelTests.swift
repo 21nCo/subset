@@ -246,7 +246,8 @@ final class AppListModelTests: XCTestCase {
         let fetchedAt = model.fetchedAt
         XCTAssertEqual(model.status, .current)
 
-        // stopAutoRefresh cancels a refresh mid-fetch; the transport then reports the fetch as cancelled.
+        // The test cancels its own refresh task mid-fetch, as stopAutoRefresh would;
+        // the transport then reports the fetch as cancelled.
         clock.advance(60 * 60)
         let cancelled = Task { await model.refresh() }
         try await waitUntil { loader.isWaiting }
