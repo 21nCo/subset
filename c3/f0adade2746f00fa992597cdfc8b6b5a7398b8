@@ -1,0 +1,31 @@
+native/subset/Core/Feed/CatalogLoader.swift
+  s_ffc0af01bd3136::t_c3857a68b63cec 22-25
+native/subset/Core/Installed/InstalledApps.swift
+  s_ffc0af01bd3136::t_06ab8cd3021c7b 48-53,58
+native/subset/Core/List/AppListModel.swift
+  s_ffc0af01bd3136::t_69a83ee17dd1c2 54,60,115-117,124-126,129-131,133,135-137,140-144,146-148
+native/subset/MacApp/MainWindowView.swift
+  s_ffc0af01bd3136::t_6911bd1fe6e005 27-28
+native/subset/MacApp/SubsetApp.swift
+  s_ffc0af01bd3136::t_9f4971d0152f0a 30
+native/subset/README.md
+  s_ffc0af01bd3136::t_f90271b792eb1f 40,42
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_ffc0af01bd3136::t_6e43a3a4fdc938 43-72,249,262-291
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3f0adade2746f00fa992597cdfc8b6b5a7398b8",
+  "prompts": {},
+  "sessions": {
+    "s_ffc0af01bd3136": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "99dfec84-29b2-47b5-b84b-1062c186b2d2",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
