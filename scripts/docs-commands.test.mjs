@@ -142,6 +142,20 @@ test('fences follow block quotes, HTML blocks and lazy lines as CommonMark nests
   // An HTML block hides fence-like lines until its end condition; a comment's ends at "-->".
   assert.deepEqual(at('<div>', '```sh', 'subset-timer list', '```'), []);
   assert.deepEqual(at('<!--', '```sh', 'subset-timer list', '-->', '```sh', 'subset-timer list', '```'), ['6']);
+  // Only "-->" ends a comment block: "--!>" does not, so the fence after it is still comment text, on both paths.
+  for (const [opening, body] of [['```sh', 'subset-timer list'], ['```json', '{ "command": "subset-usage" }']]) {
+    assert.deepEqual(at('<!-- note', 'x -->', opening, body, '```'), ['4'], opening);
+    assert.deepEqual(at('<!-- note', 'x --!>', opening, body, '```'), [], opening);
+    assert.deepEqual(at('<!-- note --> text', opening, body, '```'), ['3'], opening);
+    assert.deepEqual(at('<!-- note --!> text', opening, body, '```'), [], opening);
+  }
+  // The other literal ends: a raw-text tag's end tag in any case, "?>", ">" and "]]>"; indented code is not ended by them.
+  assert.deepEqual(at('<script>', '</SCRIPT>', '```sh', 'subset-timer list', '```'), ['4']);
+  assert.deepEqual(at('<script>', '</script >', '```sh', 'subset-timer list', '```'), []);
+  assert.deepEqual(at('<?php', '?>', '```sh', 'subset-timer list', '```'), ['4']);
+  assert.deepEqual(at('<!DOCTYPE html', '>', '```sh', 'subset-timer list', '```'), ['4']);
+  assert.deepEqual(at('<![CDATA[', ']]>', '```sh', 'subset-timer list', '```'), ['4']);
+  assert.deepEqual(at('    -->', '', '```sh', 'subset-timer list', '```'), ['4']);
 });
 
 test('a closing fence is indented at most three spaces from its block, and a list item ends its block', () => {

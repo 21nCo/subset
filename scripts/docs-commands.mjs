@@ -26,17 +26,21 @@ const THEMATIC_BREAK = /^([-*_])(?: *\1){2,} *$/;
 const LIST_MARKER = /^(?:[-+*]|(\d{1,9})[.)])(?= |$)/;
 const HTML_TAG = '(?:<[A-Za-z][A-Za-z0-9-]*(?:\\s+[a-zA-Z_:][a-zA-Z0-9:._-]*(?:\\s*=\\s*(?:[^"\'=<>`\\x00-\\x20]+|\'[^\']*\'|"[^"]*"))?)*\\s*\\/?>|<\\/[A-Za-z][A-Za-z0-9-]*\\s*>)';
 const HTML_BLOCK_NAMES = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
-// HTML block start conditions 1 to 7 with their end conditions (null: a blank line); the last cannot interrupt a paragraph.
+// HTML block start conditions 1 to 7 with the literal text, any letter case, that ends each (null: a blank line); the
+// last cannot interrupt a paragraph. CommonMark ends a comment block only at "-->", so its end is a substring, not a
+// tag-matching pattern.
 const HTML_BLOCKS = [
-  [/^<(?:script|pre|style|textarea)(?=\s|>|$)/i, /<\/(?:script|pre|style|textarea)>/i],
-  [/^<!--/, /-->/],
-  [/^<\?/, /\?>/],
-  [/^<![A-Z]/, />/],
-  [/^<!\[CDATA\[/, /\]\]>/],
+  [/^<(?:script|pre|style|textarea)(?=\s|>|$)/i, ['</script>', '</pre>', '</style>', '</textarea>']],
+  [/^<!--/, ['-->']],
+  [/^<\?/, ['?>']],
+  [/^<![A-Z]/, ['>']],
+  [/^<!\[CDATA\[/, [']]>']],
   [new RegExp(`^</?(?:${HTML_BLOCK_NAMES})(?=\\s|/?>|$)`, 'i'), null],
   [new RegExp(`^${HTML_TAG}\\s*$`), null]
 ];
 const NPX_SCOPED = /\bnpx\s+(?:-y\s+)?@subset\.dev\/[a-z0-9][a-z0-9._-]*/g;
+/** Whether `text` holds one of an HTML block's end texts (`ends`, lowercase; none for a blank-line end or another leaf). */
+const endsHtmlBlock = (text, ends) => ends?.some((end) => text.toLowerCase().includes(end)) ?? false;
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Whether the docs check reads this repository-relative path: Markdown outside test/, fixtures/, changelogs and docs/architecture.md. */
@@ -100,7 +104,7 @@ function* fencedLines(text) {
       }
       leafMatched = leaf.kind === 'code' ? indent >= 4 || blank : leaf.kind === 'paragraph' || leaf.end === null ? !blank : true;
       if (leafMatched && leaf.kind !== 'paragraph') {
-        if (leaf.end?.test(line.slice(column))) leaf = null;
+        if (endsHtmlBlock(line.slice(column), leaf.end)) leaf = null;
         continue;
       }
     }
@@ -147,7 +151,7 @@ function* fencedLines(text) {
       } else if (html >= 0 && (html < 6 || (!inParagraph && (allClosed || leaf?.kind !== 'paragraph')))) {
         add();
         const end = HTML_BLOCKS[html][1];
-        if (!end?.test(rest)) leaf = { kind: 'html', end };
+        if (!endsHtmlBlock(rest, end)) leaf = { kind: 'html', end };
       } else if (inParagraph && SETEXT_UNDERLINE.test(rest)) {
         leaf = null; // a setext heading: only a paragraph in the same containers takes an underline
       } else if (THEMATIC_BREAK.test(rest)) {
