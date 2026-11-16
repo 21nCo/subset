@@ -117,7 +117,7 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         while true {
             let left = try processes(inside: bundle)
             if left.isEmpty || Date() >= until { return left }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            await ToolRunner.pause(nanoseconds: 200_000_000)
         }
     }
 

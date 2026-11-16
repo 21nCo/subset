@@ -37,6 +37,12 @@ enum ToolRunner {
         if cancellable { try Task.checkCancellation() }
         return result
     }
+
+    /// Waits even when the calling task is cancelled (Task.sleep would return at once), so a wait loop that must finish,
+    /// such as for a quitting app or a detach, does not spin.
+    static func pause(nanoseconds: UInt64) async {
+        await Task.detached { try? await Task.sleep(nanoseconds: nanoseconds) }.value
+    }
 }
 
 /// One running tool, the leader of its own process group. Its state is touched only on `queue`.

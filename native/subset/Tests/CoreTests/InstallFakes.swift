@@ -105,6 +105,8 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     var unreadable = false
     /// Runs when an app is asked to quit (to check what has happened by then).
     var onQuit: (@Sendable () -> Void)?
+    /// Cancel is pressed while the app is quitting.
+    var cancelDuringQuit = false
 
     func processes(inside bundle: URL) throws -> [pid_t] {
         if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake), so nothing was changed") }
@@ -113,6 +115,7 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
 
     func quit(_ bundle: URL, timeout _: TimeInterval) async throws -> [pid_t] {
         onQuit?()
+        if cancelDuringQuit { cancelCurrentTask() }
         quits.update { $0.append(bundle.path) }
         if !stubborn { running.update { $0.remove(bundle.path) } }
         return try processes(inside: bundle)

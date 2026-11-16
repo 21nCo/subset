@@ -54,7 +54,8 @@ public struct InstallOutcome: Equatable, Sendable {
 /// force quit) only when the caller says the user agreed, and is reopened after an update.
 public struct AppInstaller: Sendable {
     public static let downloadPrefix = "https://github.com/21nCo/subset/releases/download/"
-    static let ditto = "/usr/bin/ditto"
+    /// The copying tool (tests give a wrapper that can be held mid-copy).
+    var ditto = "/usr/bin/ditto"
 
     public var setup: InstallSetup
     public var downloader: any ImageDownloading
@@ -178,8 +179,13 @@ public struct AppInstaller: Sendable {
                         old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
                 } catch {
-                    if quit, let why = await running.reopen(target) {
-                        notes.add("\(app.name) was quit and could not be reopened (\(why)).", changed: true)
+                    if quit {
+                        // Quitting changed something even when the update then failed or was cancelled.
+                        if let why = await running.reopen(target) {
+                            notes.add("\(app.name) was quit and could not be reopened (\(why)).", changed: true)
+                        } else {
+                            notes.add("\(app.name) was asked to quit for the update and was reopened.", changed: true)
+                        }
                     }
                     throw error
                 }
@@ -422,7 +428,7 @@ public struct AppInstaller: Sendable {
             step = .copy
             guard mkdir(staged.path, 0o700) == 0 else { throw InstallFailure(.copy, "\(staged.path) cannot be made (\(Self.errnoText()))") }
             stagedCreated = true
-            let copy = try await ToolRunner.run(Self.ditto, [source.path, staged.path], timeout: 600)
+            let copy = try await ToolRunner.run(ditto, [source.path, staged.path], timeout: 600)
             guard copy.status == 0 else { throw InstallFailure(.copy, "ditto could not copy \(app.appName).app into \(dir.path) (\(copy.lastLine))") }
             // The installed app carries no deny-delete ACL or immutable flag from the image, so it can be updated and removed.
             if let why = try await Self.clearProtections(staged, cancellable: true) {

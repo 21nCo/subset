@@ -389,6 +389,99 @@ final class AppInstallerTests: XCTestCase {
         assertNoLeftovers()
     }
 
+    /// A copying tool that copies with ditto, protects part of the copy (an immutable file and a deny-delete ACL, as an
+    /// image can carry) and then holds until it is stopped; `marker` appears once the copy is made.
+    private func holdingCopyTool(marker: URL) throws -> String {
+        let script = root.appendingPathComponent("holding-ditto.sh")
+        try """
+        #!/bin/sh
+        /usr/bin/ditto "$1" "$2" || exit 1
+        /usr/bin/chflags uchg "$2/Contents/Info.plist" || exit 1
+        /bin/chmod +a "everyone deny delete" "$2/Contents" || exit 1
+        : > '\(marker.path)'
+        exec /bin/sleep 600
+        """.write(to: script, atomically: true, encoding: .utf8)
+        chmod(script.path, 0o755)
+        return script.path
+    }
+
+    func testCancellingDuringTheCopyLeavesNothingInstalledOrTheOldCopyInPlace() async throws {
+        for mode in ["install", "update"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = mode == "update" ? try installOld() : nil
+            let receiptBefore = try? Data(contentsOf: receiptFile)
+            let marker = root.appendingPathComponent("copied")
+            var copying = installer()
+            copying.ditto = try holdingCopyTool(marker: marker)
+            let installer = copying
+            let task = Task {
+                if mode == "install" { return try await installer.install(Self.breaks, Self.live) }
+                return try await installer.update(Self.breaks, Self.live, quitAllowed: false)
+            }
+            let deadline = Date().addingTimeInterval(30)
+            while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "\(mode): the copy was made")
+            XCTAssertEqual(names(system).filter { $0.hasPrefix(".Breaks.app.subset-install-") }.count, 1, "\(mode): staged while the tool runs")
+            XCTAssertTrue(verifier.verified.get().isEmpty, mode)
+            let cancelled = Date()
+            task.cancel()
+            var refused: InstallFailure?
+            do { _ = try await task.value } catch { refused = error as? InstallFailure }
+            XCTAssertLessThan(Date().timeIntervalSince(cancelled), 8, "\(mode): the copying tool is stopped promptly")
+            XCTAssertEqual(refused, InstallFailure(.interrupted, "it was cancelled before it was installed"), mode)
+            XCTAssertEqual(refused?.partial, false, mode)
+            XCTAssertEqual(images.detached.get(), 1, mode)
+            if let old {
+                XCTAssertEqual(AppInstaller.identity(target), old, "\(mode): the old copy is untouched")
+                XCTAssertEqual(version(target), "0.0.9", mode)
+            } else {
+                XCTAssertEqual(names(system), [], mode)
+            }
+            XCTAssertEqual(try? Data(contentsOf: receiptFile), receiptBefore, "\(mode): no new receipt")
+            XCTAssertEqual(names(trashFolder), [], mode)
+            assertNoLeftovers()
+        }
+    }
+
+    func testCancellingWhileARunningAppQuitsChangesNothingElse() async throws {
+        // Update: the app is reopened and the old copy stays.
+        let old = try installOld()
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        running.running.update { $0.insert(target.path) }
+        running.cancelDuringQuit = true
+        let update = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(update?.step, .interrupted)
+        XCTAssertEqual(update?.message, "it was cancelled before it was installed")
+        XCTAssertEqual(update?.partial, true, "the app was quit")
+        XCTAssertEqual(update?.notes, ["Breaks was asked to quit for the update and was reopened."])
+        XCTAssertEqual(running.quits.get(), [target.path])
+        XCTAssertEqual(running.reopened.get(), [target.path])
+        XCTAssertEqual(AppInstaller.identity(target), old, "nothing was swapped")
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        XCTAssertEqual(names(trashFolder), [])
+        XCTAssertEqual(images.detached.get(), 1)
+        assertNoLeftovers()
+
+        // Move to Trash: nothing is moved and the receipt stays.
+        try tearDownWithError()
+        try setUpWithError()
+        let copy = try installOld()
+        let receipt = try Data(contentsOf: receiptFile)
+        running.running.update { $0.insert(target.path) }
+        running.cancelDuringQuit = true
+        let move = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
+        XCTAssertEqual(move?.step, .interrupted)
+        XCTAssertEqual(move?.message, "it was cancelled after part of it was done")
+        XCTAssertEqual(move?.partial, true)
+        XCTAssertEqual(move?.notes, ["Breaks at \(target.path) was asked to quit."])
+        XCTAssertEqual(names(system), ["Breaks.app"])
+        XCTAssertEqual(AppInstaller.identity(target), copy, "nothing was moved")
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receipt)
+        XCTAssertEqual(names(trashFolder), [])
+        assertNoLeftovers()
+    }
+
     // MARK: - Move to Trash
 
     func testMoveToTrashMovesEveryCopyAndRemovesTheReceipt() async throws {

@@ -41,7 +41,7 @@ public struct HdiutilDiskImages: DiskImageAttaching {
             }
             if left.isEmpty { return true }
             devices = left
-            if attempt < 2 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            if attempt < 2 { await ToolRunner.pause(nanoseconds: 1_000_000_000) }
         }
         return false
     }
