@@ -79,7 +79,7 @@ final class CatalogFeedTests: XCTestCase {
 
     func testEveryValidReceiptFixtureDecodes() throws {
         let valid = try fixtures("receipt-valid-")
-        XCTAssertEqual(valid.map(name), ["receipt-valid-beta", "receipt-valid-live"])
+        XCTAssertEqual(valid.map(name), ["receipt-valid-beta", "receipt-valid-live", "receipt-valid-written-by-install"])
         let beta = try Receipt.parse(try Data(contentsOf: valid[0])).get()
         XCTAssertEqual(beta.channel, .beta)
         XCTAssertEqual(beta.build, 2)

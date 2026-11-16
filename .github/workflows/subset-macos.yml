@@ -1,7 +1,7 @@
 name: Subset macOS
 
 # Builds and tests the Subset manager app (native/subset) on macOS. No signing credentials are available or needed here:
-# the app is built unsigned, and releases go through release-macos.yml.
+# the app is built unsigned, and releases go through release-macos.yml. No secrets.
 on:
   pull_request:
     paths:
@@ -41,8 +41,18 @@ jobs:
           sudo xcode-select --switch "$xcode/Contents/Developer"
           xcodebuild -version
 
+      # Includes RealInstallTests' refusal of an ad-hoc signed app at the team requirement, with the real hdiutil and
+      # Security framework (SET-247).
       - name: Package tests
         run: swift test
+
+      # SET-247: installs the immutable Breaks 0.1.0 release asset (the fixture feed's live channel and SHA-256) into
+      # temporary folders with the real hdiutil, ditto, Security framework and Gatekeeper, verifies it, and moves it to a
+      # test Trash folder. The one download these checks make.
+      - name: Install Breaks 0.1.0 with the real tools
+        env:
+          SUBSET_LIVE_INSTALL: '1'
+        run: swift test --filter RealInstallTests
 
       - name: Generated project is current
         run: |

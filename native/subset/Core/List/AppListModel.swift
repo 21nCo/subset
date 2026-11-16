@@ -15,6 +15,9 @@ public struct AppRow: Equatable, Identifiable, Sendable {
     public var beta: String?
     /// The release the Update available badge offers (0.1.1, or 0.1.1-beta.4 with betas shown), or nil for no badge.
     public var update: String?
+    /// The release Install puts in place (the newest live release, or with betas shown the newer of it and the beta), or
+    /// nil when there is none to install.
+    public var install: String?
 
     public var updateAvailable: Bool { update != nil }
 }
@@ -74,7 +77,8 @@ public final class AppListModel: ObservableObject {
             return AppRow(
                 id: app.id, name: app.name, summary: app.summary, appName: app.appName, installed: copies,
                 live: app.live?.version, beta: showBetas ? app.beta?.label : nil,
-                update: Self.offeredUpdate(app, copies, showBetas: showBetas)
+                update: Self.offeredRelease(app, copies, showBetas: showBetas)?.label,
+                install: Self.installRelease(app, showBetas: showBetas)?.label
             )
         }
     }
@@ -154,21 +158,33 @@ public final class AppListModel: ObservableObject {
         installed = found
     }
 
-    // The newest release that is an update for some installed copy: from the live channel, or the live or beta channel
-    // when betas are shown.
-    static func offeredUpdate(_ app: CatalogApp, _ copies: [InstalledCopy], showBetas: Bool) -> String? {
+    /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog.
+    public func reloadInstalled() async {
+        guard let apps = catalog?.apps else { return }
+        let finder = finder
+        let found = await Task.detached { finder.detect(apps) }.value
+        installed = found
+    }
+
+    /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel
+    /// when betas are shown.
+    public static func offeredRelease(_ app: CatalogApp, _ copies: [InstalledCopy], showBetas: Bool) -> ChosenRelease? {
         let updates = { (channel: ReleaseChannel) in
             copies.contains { UpdateRule.decide($0, app, channel: channel) == .update }
         }
-        let live = updates(.live) ? app.live : nil
-        let beta = showBetas && updates(.beta) ? app.beta : nil
-        switch (live, beta) {
-        case let (live?, beta?):
-            // At the same version the release is newer than its betas.
-            return UpdateRule.compareVersions(beta.version, live.version) > 0 ? beta.label : live.version
-        case let (live?, nil): return live.version
-        case let (nil, beta?): return beta.label
-        case (nil, nil): return nil
-        }
+        let live = updates(.live) ? ChosenRelease(app, channel: .live) : nil
+        let beta = showBetas && updates(.beta) ? ChosenRelease(app, channel: .beta) : nil
+        return newer(live, beta)
+    }
+
+    /// The release Install offers: the live release, or with betas shown the newer of it and the beta.
+    public static func installRelease(_ app: CatalogApp, showBetas: Bool) -> ChosenRelease? {
+        newer(ChosenRelease(app, channel: .live), showBetas ? ChosenRelease(app, channel: .beta) : nil)
+    }
+
+    // At the same version the release is newer than its betas.
+    private static func newer(_ live: ChosenRelease?, _ beta: ChosenRelease?) -> ChosenRelease? {
+        guard let live, let beta else { return live ?? beta }
+        return UpdateRule.compareVersions(beta.version, live.version) > 0 ? beta : live
     }
 }

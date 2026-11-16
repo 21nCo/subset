@@ -228,14 +228,14 @@ final class AppListModelTests: XCTestCase {
         let beta = InstalledCopy(path: "/Applications/Breaks.app", folder: "/Applications", version: "0.1.1", build: "3", channel: .beta)
         let noReceipt = InstalledCopy(path: "/Applications/Breaks.app", folder: "/Applications", version: "0.1.1", build: "3", channel: nil)
         // Live is 0.1.0, older than this beta, so there is no live update; with betas shown, build 4 is newer than 3.
-        XCTAssertNil(AppListModel.offeredUpdate(app, [beta], showBetas: false))
-        XCTAssertEqual(AppListModel.offeredUpdate(app, [beta], showBetas: true), "0.1.1-beta.4")
-        XCTAssertNil(AppListModel.offeredUpdate(app, [noReceipt], showBetas: true), "without a receipt builds are not compared")
+        XCTAssertNil(AppListModel.offeredRelease(app, [beta], showBetas: false)?.label)
+        XCTAssertEqual(AppListModel.offeredRelease(app, [beta], showBetas: true)?.label, "0.1.1-beta.4")
+        XCTAssertNil(AppListModel.offeredRelease(app, [noReceipt], showBetas: true)?.label, "without a receipt builds are not compared")
         var released = app
         released.live?.version = "0.1.1"
-        XCTAssertEqual(AppListModel.offeredUpdate(released, [beta], showBetas: false), "0.1.1")
-        XCTAssertEqual(AppListModel.offeredUpdate(released, [beta], showBetas: true), "0.1.1", "a release is newer than its betas")
-        XCTAssertNil(AppListModel.offeredUpdate(released, [noReceipt], showBetas: true))
+        XCTAssertEqual(AppListModel.offeredRelease(released, [beta], showBetas: false)?.label, "0.1.1")
+        XCTAssertEqual(AppListModel.offeredRelease(released, [beta], showBetas: true)?.label, "0.1.1", "a release is newer than its betas")
+        XCTAssertNil(AppListModel.offeredRelease(released, [noReceipt], showBetas: true)?.label)
     }
 
     func testVersionsCompareByNumberNotText() {

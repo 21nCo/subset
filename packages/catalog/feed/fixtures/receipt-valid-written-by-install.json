@@ -1,0 +1,9 @@
+{
+  "schema": "subset.receipt@1",
+  "channel": "beta",
+  "version": "0.1.1",
+  "build": 4,
+  "sha256": "6d37efbe0af41ce3b1acbdff2b70990988be4318799e40f99dcedf417c612f4d",
+  "installedAt": "2026-11-13T12:00:05Z",
+  "path": "/Applications/Breaks.app"
+}

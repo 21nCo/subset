@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { receiptFor } from '../src/commands/install.mjs';
 import { ApplicationsFoldersError, applicationsFolders, detectApps, PLUTIL, receiptFile } from '../src/macos/apps.mjs';
 import { linkApp, makeApp, stubPlutil, stubPlutilSkip, writeReceipt } from './helpers.mjs';
 
@@ -110,6 +111,21 @@ for (const [label, plutil] of plutils) {
     const asAlex = folders.map((folder, index) => (index === 1 ? { ...folder, path: '/Users/alex/Applications' } : folder));
     const [[beta]] = await detectApps([TIMER], { folders: asAlex, home, plutil });
     assert.equal(beta.channel, 'beta');
+  });
+
+  // SET-247: subset install and the Subset manager app (native/subset, AppInstallerTests) write the same text for the same
+  // install, the shared fixture, so each reads the other's receipt (the SET-227 schema).
+  test(`writes and reads the receipt the Subset manager app writes (${label})`, async () => {
+    const { home, system, folders } = setup();
+    makeApp(system, 'Breaks', { bundleId: 'dev.subset.breaks', version: '0.1.1', build: '4' });
+    const fixture = readFileSync(new URL('../../catalog/feed/fixtures/receipt-valid-written-by-install.json', import.meta.url), 'utf8');
+    const at = Date.parse('2026-11-13T12:00:05Z');
+    const release = { version: '0.1.1', build: 4, sha256: '6d37efbe0af41ce3b1acbdff2b70990988be4318799e40f99dcedf417c612f4d' };
+    const receipt = receiptFor({ app: BREAKS, release, beta: true, folder: folders[0], home, now: at, clock: () => at });
+    assert.equal(`${JSON.stringify(receipt.document(), null, 2)}\n`, fixture);
+    writeReceipt(home, 'dev.subset.breaks', fixture);
+    const [[copy]] = await detectApps([BREAKS], { folders, home, plutil });
+    assert.equal(copy.channel, 'beta');
   });
 
   test(`ignores a receipt for another copy, version or build, and an invalid or unreadable one (${label})`, async () => {

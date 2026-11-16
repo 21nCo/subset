@@ -1,0 +1,586 @@
+import CryptoKit
+import Darwin
+import Foundation
+
+/// Where an install looks and writes.
+public struct InstallSetup: Sendable {
+    /// /Applications, then ~/Applications (temporary folders in tests).
+    public var folders: [ApplicationsFolder]
+    /// ~/Library/Application Support/Subset/receipts.
+    public var receipts: URL
+    /// ~/Library/Application Support/Subset/locks, shared with the `subset` command.
+    public var locks: URL
+    /// Where each install makes its private folder.
+    public var temporary: URL
+
+    public init(folders: [ApplicationsFolder], receipts: URL, locks: URL, temporary: URL) {
+        self.folders = folders
+        self.receipts = receipts
+        self.locks = locks
+        self.temporary = temporary
+    }
+
+    public static func standard(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> InstallSetup {
+        let finder = InstalledAppFinder.standard(home: home)
+        return InstallSetup(
+            folders: finder.folders, receipts: finder.receipts,
+            locks: home.appendingPathComponent("Library/Application Support/Subset/locks", isDirectory: true),
+            temporary: FileManager.default.temporaryDirectory
+        )
+    }
+}
+
+/// What a finished operation did: the installed app (nil for a move to the Trash) and notes worth showing.
+public struct InstallOutcome: Equatable, Sendable {
+    public var path: String?
+    public var notes: [String]
+}
+
+/// Installs, updates and moves to the Trash the catalog's Mac apps by the rules of `subset install`, `subset update` and
+/// `subset uninstall` (SET-230, SET-231), with the same lock, hidden names and receipts, so the command and this app can
+/// take turns on one app:
+///   1. download the channel's image into a new private folder (mode 0700) and check its SHA-256;
+///   2. attach it read-only and hidden, and require exactly one `.app` at its root, named `<appName>.app`;
+///   3. copy it with ditto to a hidden staging name in the destination and clear its ACLs and user file flags;
+///   4. verify the staged copy (AppVerifying);
+///   5. install: rename it to `<appName>.app`, never over anything, and rename its receipt into place;
+///      update: rename the installed copy aside (it must still be the copy checked), rename the new one into place,
+///      write the receipt, and only then move the old copy to the Trash.
+/// Step 5 is synchronous, so nothing in this app runs between its renames. A failure or a cancel before it removes the
+/// staged copy and writes no receipt; the private folder goes once the image is detached. So the old app or the new
+/// verified one is always in place: only a crash between the two renames of an update can leave `<appName>.app`
+/// missing, and then the next install, update or move to the Trash (here or by `subset`) renames the copy back.
+/// No downgrade, no administrator rights, nothing deleted permanently. A running app is quit (terminate(), never a
+/// force quit) only when the caller says the user agreed, and is reopened after an update.
+public struct AppInstaller: Sendable {
+    public static let downloadPrefix = "https://github.com/21nCo/subset/releases/download/"
+    static let ditto = "/usr/bin/ditto"
+
+    public var setup: InstallSetup
+    public var downloader: any ImageDownloading
+    public var images: any DiskImageAttaching
+    public var verifier: any AppVerifying
+    public var trash: any Trashing
+    public var running: any RunningAppControlling
+    public var clock: @Sendable () -> Date
+    /// How long an app asked to quit has to exit.
+    public var quitTimeout: TimeInterval
+
+    public init(
+        setup: InstallSetup, downloader: any ImageDownloading = URLSessionImageDownloader(),
+        images: any DiskImageAttaching = HdiutilDiskImages(), verifier: any AppVerifying = SecurityAppVerifier(),
+        trash: any Trashing = SystemTrash(), running: any RunningAppControlling = WorkspaceRunningApps(),
+        clock: @escaping @Sendable () -> Date = Date.init, quitTimeout: TimeInterval = 10
+    ) {
+        self.setup = setup
+        self.downloader = downloader
+        self.images = images
+        self.verifier = verifier
+        self.trash = trash
+        self.running = running
+        self.clock = clock
+        self.quitTimeout = quitTimeout
+    }
+
+    var finder: InstalledAppFinder { InstalledAppFinder(folders: setup.folders, receipts: setup.receipts) }
+
+    /// Whether some installed copy of `app` is running, so the caller can ask before updating or moving it.
+    public func isRunning(_ app: CatalogApp) -> Bool {
+        finder.copies(of: app).contains { !running.processes(inside: URL(fileURLWithPath: $0.path)).isEmpty }
+    }
+
+    // MARK: - Install
+
+    /// Installs `release` of `app` into /Applications when it is writable, otherwise ~/Applications.
+    public func install(_ app: CatalogApp, _ release: ChosenRelease, progress: @escaping @Sendable (InstallProgress) -> Void = { _ in }) async throws -> InstallOutcome {
+        try await locked(app) { notes in
+            let copies = finder.copies(of: app)
+            if let newer = Self.downgrade(copies, release) {
+                throw InstallFailure(.downgrade, "\(newer), and Subset does not downgrade")
+            }
+            let folder = try destination()
+            let target = folder.directory.appendingPathComponent("\(app.appName).app")
+            if Self.identity(target) != nil {
+                throw InstallFailure(.install, "\(target.path) already exists; use Update to change its version")
+            }
+            let receipt = ReceiptDocument(app, release, folder: folder, receipts: setup.receipts)
+            try await stage(app, release, in: folder.directory, notes: notes, progress: progress, ready: {}) { staged in
+                try commitInstall(staged, target: target, receipt: receipt)
+            }
+            if receipt != nil, let other = copies.first(where: { $0.folder != folder.label }) {
+                notes.add("\(app.name) \(other.versionLabel) is also installed in \(other.folder); the receipt now describes the copy in \(folder.label).")
+            }
+            return target.path
+        }
+    }
+
+    // MARK: - Update
+
+    /// Updates each installed copy of `app` that is older than `release` (UpdateRule), replacing it only once the new
+    /// copy is verified. A running copy is quit just before the swap when `quitAllowed`, otherwise the update is refused.
+    public func update(
+        _ app: CatalogApp, _ release: ChosenRelease, quitAllowed: Bool, progress: @escaping @Sendable (InstallProgress) -> Void = { _ in }
+    ) async throws -> InstallOutcome {
+        try await locked(app) { notes in
+            let (copies, identities) = try checkedCopies(app)
+            let updates = copies.filter { UpdateRule.decide($0, app, channel: release.channel) == .update }
+            guard !updates.isEmpty else {
+                throw InstallFailure(.install, "no installed copy of \(app.name) is older than \(release.label)")
+            }
+            for copy in updates {
+                let target = URL(fileURLWithPath: copy.path)
+                let identity = identities[copy.path]!
+                if !quitAllowed, !running.processes(inside: target).isEmpty {
+                    throw InstallFailure(.running, "\(app.name) is running; quit it to update it")
+                }
+                let folder = setup.folders.first { $0.label == copy.folder }
+                let receipt = folder.flatMap { ReceiptDocument(app, release, folder: $0, receipts: setup.receipts) }
+                var quit = false
+                var old: URL?
+                do {
+                    try await stage(app, release, in: target.deletingLastPathComponent(), notes: notes, progress: progress, ready: {
+                        let pids = running.processes(inside: target)
+                        guard !pids.isEmpty else { return }
+                        guard quitAllowed else { throw InstallFailure(.running, "\(app.name) is running (\(Self.pids(pids))); quit it to update it") }
+                        guard Self.identity(target) == identity else {
+                            throw InstallFailure(.running, "\(copy.path) was replaced since it was checked, so it was not quit or updated")
+                        }
+                        quit = true
+                        progress(.quitting)
+                        let left = await running.quit(target, timeout: quitTimeout)
+                        if !left.isEmpty {
+                            throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
+                        }
+                    }) { staged in
+                        old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
+                    }
+                } catch {
+                    if quit, let why = await running.reopen(target) { notes.add("\(app.name) could not be reopened (\(why)).") }
+                    throw error
+                }
+                if let old {
+                    progress(.movingToTrash)
+                    do {
+                        let trashed = try trash.trash(old, appName: app.appName, at: clock())
+                        notes.add("Moved \(app.name) \(copy.versionLabel) to the Trash: \(trashed.path)")
+                    } catch let failure as InstallFailure {
+                        notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
+                    }
+                }
+                if quit, let why = await running.reopen(target) { notes.add("\(app.name) could not be reopened (\(why)).") }
+            }
+            return updates.last.map(\.path)
+        }
+    }
+
+    // MARK: - Move to Trash
+
+    /// Moves every installed copy of `app` to the Trash and removes its receipt; its data stays. A running copy is quit
+    /// first when `quitAllowed`, otherwise nothing is moved.
+    public func moveToTrash(
+        _ app: CatalogApp, quitAllowed: Bool, progress: @escaping @Sendable (InstallProgress) -> Void = { _ in }
+    ) async throws -> InstallOutcome {
+        try await locked(app) { notes in
+            let (copies, identities) = try checkedCopies(app)
+            // Every copy is checked, and quit when allowed, before any is moved.
+            for copy in copies {
+                let bundle = URL(fileURLWithPath: copy.path)
+                let pids = running.processes(inside: bundle)
+                guard !pids.isEmpty else { continue }
+                guard quitAllowed else { throw InstallFailure(.running, "\(app.name) is running from \(copy.path); quit it to move it to the Trash") }
+                guard Self.identity(bundle) == identities[copy.path] else {
+                    throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was not quit or moved")
+                }
+                progress(.quitting)
+                let left = await running.quit(bundle, timeout: quitTimeout)
+                if !left.isEmpty {
+                    throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
+                }
+            }
+            progress(.movingToTrash)
+            for copy in copies {
+                try Task.checkCancellation()
+                let bundle = URL(fileURLWithPath: copy.path)
+                if !running.processes(inside: bundle).isEmpty {
+                    throw InstallFailure(.running, "\(app.name) is running from \(copy.path) again; quit it and try again")
+                }
+                let aside = AppLock.hiddenName(in: bundle.deletingLastPathComponent(), appName: app.appName, kind: "trash")
+                guard renamex_np(bundle.path, aside.path, UInt32(RENAME_EXCL)) == 0 else {
+                    throw InstallFailure(.trash, "\(copy.path) cannot be set aside to move it to the Trash (\(Self.errnoText()))")
+                }
+                guard Self.identity(aside) == identities[copy.path] else {
+                    throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was left in place\(Self.putBack(aside, bundle))")
+                }
+                do {
+                    let trashed = try trash.trash(aside, appName: app.appName, at: clock())
+                    notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)")
+                } catch let failure as InstallFailure {
+                    throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle))
+                }
+            }
+            // The receipt goes only when no copy of the app is in either folder any more.
+            let file = setup.receipts.appendingPathComponent("\(app.bundleID).json")
+            if !finder.copies(of: app).isEmpty {
+                notes.add("\(app.name) was installed again meanwhile, so its receipt stays.")
+            } else if unlink(file.path) != 0, errno != ENOENT, errno != ENAMETOOLONG {
+                notes.add("Its receipt \(file.path) could not be removed (\(Self.errnoText())); remove it by hand.")
+            }
+            return nil
+        }
+    }
+
+    // MARK: - Steps
+
+    /// Takes the app's lock, puts back what an interrupted update or move to the Trash left, runs `body` and releases the
+    /// lock. A cancel is reported as interrupted, and an unexpected error as a failure.
+    private func locked(_ app: CatalogApp, _ body: (Notes) async throws -> String?) async throws -> InstallOutcome {
+        do {
+            try Task.checkCancellation()
+            let lock = try AppLock(app, in: setup.locks)
+            defer { lock.release() }
+            let notes = Notes()
+            for note in recover(app) { notes.add(note) }
+            let path = try await body(notes)
+            return InstallOutcome(path: path, notes: notes.lines)
+        } catch let failure as InstallFailure {
+            throw failure
+        } catch is CancellationError {
+            throw InstallFailure(.interrupted, "it was cancelled before anything was changed")
+        } catch {
+            throw InstallFailure(.install, error.localizedDescription)
+        }
+    }
+
+    /// The installed copies of `app`, each identified (device and inode) before and after its Info.plist was read; throws
+    /// when one was replaced in between (its version may not be its own) or none is installed.
+    private func checkedCopies(_ app: CatalogApp) throws -> ([InstalledCopy], [String: FileIdentity]) {
+        let bundles = setup.folders.map { $0.directory.appendingPathComponent("\(app.appName).app") }
+        let before = Dictionary(uniqueKeysWithValues: bundles.map { ($0.path, Self.identity($0)) })
+        let copies = finder.copies(of: app)
+        guard !copies.isEmpty else { throw InstallFailure(.notInstalled, "\(app.name) is not installed in /Applications or ~/Applications") }
+        var identities: [String: FileIdentity] = [:]
+        for copy in copies {
+            guard let now = Self.identity(URL(fileURLWithPath: copy.path)), before[copy.path] == now else {
+                throw InstallFailure(.install, "\(copy.path) was replaced while its version was read; try again")
+            }
+            identities[copy.path] = now
+        }
+        return (copies, identities)
+    }
+
+    /// Steps 1 to 4 and then `ready` and `commit` (step 5, synchronous), with the cleanup of a failure or cancel.
+    private func stage(
+        _ app: CatalogApp, _ release: ChosenRelease, in dir: URL, notes: Notes, progress: @escaping @Sendable (InstallProgress) -> Void,
+        ready: () async throws -> Void, commit: (URL) throws -> Void
+    ) async throws {
+        guard release.url.hasPrefix(Self.downloadPrefix), let url = URL(string: release.url) else {
+            throw InstallFailure(.download, "the feed's download URL is not a \(Self.downloadPrefix) URL")
+        }
+        var template = Array(setup.temporary.appendingPathComponent("subset-install-XXXXXX").path.utf8CString)
+        guard mkdtemp(&template) != nil else { throw InstallFailure(.download, "a private folder cannot be made (\(Self.errnoText()))") }
+        let work = URL(fileURLWithPath: String(decoding: template.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        let mountRoot = work.appendingPathComponent("mnt")
+        let image = work.appendingPathComponent("image.dmg")
+        let staged = dir.appendingPathComponent(".\(app.appName).app.subset-install-\(AppLock.random())")
+        var step = InstallFailure.Step.download
+        var attachTried = false
+        var devices: [String] = []
+        var stagedCreated = false
+        var installed = false
+        do {
+            guard mkdir(mountRoot.path, 0o700) == 0 else { throw InstallFailure(.download, "\(mountRoot.path) cannot be made (\(Self.errnoText()))") }
+            try Task.checkCancellation()
+            progress(.downloading(received: 0, total: nil))
+            try await downloader.download(url, to: image) { progress(.downloading(received: $0, total: $1)) }
+            try Task.checkCancellation()
+            step = .checksum
+            let digest = try Self.sha256(of: image)
+            guard digest == release.sha256 else {
+                throw InstallFailure(.checksum, "the download's SHA-256 is \(digest), not \(release.sha256) as the feed lists")
+            }
+
+            step = .image
+            attachTried = true
+            devices = try await images.attach(image, mountRoot: mountRoot)
+            try Task.checkCancellation()
+            let source = try Self.findApp(in: mountRoot, appName: app.appName)
+
+            step = .copy
+            guard mkdir(staged.path, 0o700) == 0 else { throw InstallFailure(.copy, "\(staged.path) cannot be made (\(Self.errnoText()))") }
+            stagedCreated = true
+            let copy = try await ToolRunner.run(Self.ditto, [source.path, staged.path], timeout: 600)
+            guard copy.status == 0 else { throw InstallFailure(.copy, "ditto could not copy \(app.appName).app into \(dir.path) (\(copy.lastLine))") }
+            // The installed app carries no deny-delete ACL or immutable flag from the image, so it can be updated and removed.
+            if let why = try await Self.clearProtections(staged, cancellable: true) {
+                throw InstallFailure(.copy, "the ACLs and file flags of the copy in \(dir.path) cannot be cleared (\(why))")
+            }
+            var status = stat()
+            lstat(source.path, &status)
+            let mode = status.st_mode & 0o755
+
+            step = .signature
+            progress(.verifying)
+            try await verifier.verify(staged, expected: ExpectedApp(bundleID: app.bundleID, version: release.version, build: release.build))
+            try await ready()
+
+            step = .install
+            try Task.checkCancellation()
+            progress(.installing)
+            chmod(staged.path, mode)
+            try commit(staged)
+            installed = true
+        } catch {
+            let left = await cleanup(work: work, mountRoot: mountRoot, image: image, attachTried: attachTried, devices: devices, staged: stagedCreated && !installed ? staged : nil)
+            var failure: InstallFailure
+            switch error {
+            case let known as InstallFailure: failure = known
+            case is CancellationError: failure = InstallFailure(.interrupted, "it was cancelled before it was installed")
+            default: failure = InstallFailure(step, error.localizedDescription)
+            }
+            if !left.isEmpty { failure.message += "; " + left.joined(separator: "; ") }
+            throw failure
+        }
+        for line in await cleanup(work: work, mountRoot: mountRoot, image: image, attachTried: attachTried, devices: devices, staged: nil) {
+            notes.add(line)
+        }
+    }
+
+    /// Removes the staged copy (when given), detaches the image and removes the private folder once the image is no longer
+    /// attached. Never cancelled. Returns what could not be cleaned up.
+    private func cleanup(work: URL, mountRoot: URL, image: URL, attachTried: Bool, devices: [String], staged: URL?) async -> [String] {
+        var left: [String] = []
+        if let staged, !(await Self.removeStaged(staged)) {
+            left.append("the staged copy \(staged.path) could not be removed; remove it by hand")
+        }
+        if attachTried, !(await images.detach(image, devices: devices)) {
+            left.append("the disk image \(image.path) could not be detached; it stays attached, with the folder \(work.path)")
+            return left
+        }
+        // The mount folders hdiutil made must be empty, so nothing still mounted is touched.
+        let mounts = (try? FileManager.default.contentsOfDirectory(atPath: mountRoot.path)) ?? []
+        let emptied = mounts.allSatisfy { rmdir(mountRoot.appendingPathComponent($0).path) == 0 }
+        if !emptied || (try? FileManager.default.removeItem(at: work)) == nil {
+            left.append("the folder \(work.path) could not be removed; remove it by hand")
+        }
+        return left
+    }
+
+    /// Step 5 of an install: the staged copy is renamed to `target`, never over anything, and its receipt renamed into
+    /// place; when the receipt cannot be, the app is taken back out (no app without its receipt).
+    private func commitInstall(_ staged: URL, target: URL, receipt: ReceiptDocument?) throws {
+        let taken = InstallFailure(.install, "\(target.path) already exists; use Update to change its version")
+        let temporary = try receipt?.writeTemporary(installedAt: clock())
+        guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
+            let code = errno
+            if let temporary { unlink(temporary.path) }
+            if code == EEXIST { throw taken }
+            throw InstallFailure(.install, "\(target.lastPathComponent) cannot be renamed into place (\(String(cString: strerror(code))))")
+        }
+        guard let temporary, let receipt else { return }
+        guard rename(temporary.path, receipt.file.path) == 0 else {
+            let reason = "the receipt \(receipt.file.path) cannot be written (\(Self.errnoText()))"
+            unlink(temporary.path)
+            if renamex_np(target.path, staged.path, UInt32(RENAME_EXCL)) == 0 { throw InstallFailure(.receipt, reason) }
+            throw InstallFailure(.receipt, "\(reason), and \(target.path) could not be taken back out; remove it by hand")
+        }
+    }
+
+    /// Step 5 of an update (swapApp in update.mjs): `target`, still `identity`, is renamed aside, the verified copy renamed
+    /// into place and the old one renamed to a hidden `old` name that is never put back; then the receipt is written.
+    /// Returns the old copy. Throws leaving `target` as it was and `staged` where it was.
+    private func swap(_ staged: URL, target: URL, identity: FileIdentity, appName: String, receipt: ReceiptDocument?, notes: Notes) throws -> URL {
+        let dir = target.deletingLastPathComponent()
+        let backup = AppLock.hiddenName(in: dir, appName: appName, kind: "update")
+        let changed = "\(target.path) was changed or removed while it was being updated (by the subset command?)"
+        guard renamex_np(target.path, backup.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw InstallFailure(.install, errno == ENOENT ? changed : "\(target.path) cannot be moved aside (\(Self.errnoText()))")
+        }
+        guard Self.identity(backup) == identity else { throw InstallFailure(.install, changed + Self.putBack(backup, target)) }
+        guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target))")
+        }
+        let placed = Self.identity(target)
+        var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
+        if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
+        // A receipt is advisory: when it cannot be written, the one there (describing the old copy) is removed.
+        if let receipt {
+            do {
+                let temporary = try receipt.writeTemporary(installedAt: clock())
+                if Self.identity(target) != placed || rename(temporary.path, receipt.file.path) != 0 {
+                    unlink(temporary.path)
+                    unlink(receipt.file.path)
+                    notes.add("The receipt \(receipt.file.path) was not written; the app is updated without one.")
+                }
+            } catch let failure as InstallFailure {
+                unlink(receipt.file.path)
+                notes.add("\(failure.message); the app is updated without one.")
+            }
+        }
+        return old
+    }
+
+    /// What an interrupted update or move to the Trash (here or by `subset`) left beside `<appName>.app` under a hidden
+    /// name, handled as recoverApps in update.mjs does: when `<appName>.app` is missing and exactly one `update` or `trash`
+    /// copy of a process that no longer runs is there, it is renamed back; when `<appName>.app` is there, such copies are
+    /// renamed to `old` names. `old` copies are never put back, only named. Staged copies are never touched.
+    func recover(_ app: CatalogApp) -> [String] {
+        let escaped = NSRegularExpression.escapedPattern(for: app.appName)
+        guard let pattern = try? NSRegularExpression(pattern: #"^\.\#(escaped)\.app\.subset-(update|trash|old)-([0-9]+)-[0-9a-f]{12}$"#) else { return [] }
+        var notes: [String] = []
+        for folder in setup.folders {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.directory.path)) ?? []
+            let found = names.compactMap { name -> (file: URL, kind: String, pid: pid_t)? in
+                guard let match = pattern.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
+                      let kind = Range(match.range(at: 1), in: name), let pid = Range(match.range(at: 2), in: name)
+                else { return nil }
+                return (folder.directory.appendingPathComponent(name), String(name[kind]), pid_t(name[pid]) ?? 0)
+            }
+            guard !found.isEmpty else { continue }
+            let target = folder.directory.appendingPathComponent("\(app.appName).app")
+            var present = Self.identity(target) != nil
+            if present, !BoundedFile.isDirectory(target.path) { continue }
+            let busy = found.first { $0.pid != getpid() && AppLock.processRuns($0.pid) }
+            let unfinished = found.filter { $0.kind != "old" }
+            if !present, !unfinished.isEmpty {
+                if busy == nil, unfinished.count == 1, BoundedFile.isDirectory(unfinished[0].file.path),
+                   renamex_np(unfinished[0].file.path, target.path, UInt32(RENAME_EXCL)) == 0 {
+                    notes.append("\(app.name) was put back at \(target.path): an interrupted update had left it at \(unfinished[0].file.path).")
+                    present = true
+                } else {
+                    notes.append("\(app.name) is missing from \(folder.label), and an interrupted update left it at \(unfinished.map(\.file.path).joined(separator: ", ")); rename the copy to keep to \(target.path).")
+                    continue
+                }
+            }
+            if busy != nil { continue }
+            let left = found.filter { Self.identity($0.file) != nil }.map { entry -> String in
+                guard entry.kind != "old" else { return entry.file.path }
+                let old = AppLock.hiddenName(in: folder.directory, appName: app.appName, kind: "old")
+                return renamex_np(entry.file.path, old.path, UInt32(RENAME_EXCL)) == 0 ? old.path : entry.file.path
+            }
+            if !left.isEmpty {
+                notes.append("A previous copy of \(app.name) that was not moved to the Trash is at \(left.joined(separator: ", ")); it is not used any more and can be moved to the Trash.")
+            }
+        }
+        return notes
+    }
+
+    /// /Applications when it is a writable folder, otherwise ~/Applications (created when missing).
+    private func destination() throws -> ApplicationsFolder {
+        let system = setup.folders[0]
+        let user = setup.folders[1]
+        let writable = { (url: URL) in access(url.path, W_OK) == 0 && FileManager.default.isDirectory(url) }
+        if writable(system.directory) { return system }
+        do {
+            try FileManager.default.createDirectory(at: user.directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        } catch {
+            throw InstallFailure(.destination, "\(user.directory.path) cannot be created (\(error.localizedDescription))")
+        }
+        guard writable(user.directory) else { throw InstallFailure(.destination, "\(user.directory.path) is not a writable folder") }
+        return user
+    }
+
+    // MARK: - Helpers
+
+    /// Why installing `release` would be a downgrade of an installed copy, or nil.
+    static func downgrade(_ copies: [InstalledCopy], _ release: ChosenRelease) -> String? {
+        for copy in copies {
+            guard let version = copy.version, FeedPattern.version.matches(version) else { continue }
+            let order = UpdateRule.compareVersions(release.version, version)
+            var olderBuild = false
+            if order == 0, let build = release.build, let copyBuild = copy.build, !copyBuild.isEmpty,
+               copyBuild.utf8.allSatisfy({ (0x30...0x39).contains($0) }) {
+                olderBuild = UpdateRule.compareNumbers(copyBuild, String(build)) > 0
+            }
+            if order < 0 || olderBuild {
+                return "\(InstalledCopy.displayable(version))\(olderBuild ? " (build \(InstalledCopy.displayable(copy.build ?? "")))" : "") is installed in \(copy.folder)"
+            }
+        }
+        return nil
+    }
+
+    /// The one volume the image mounted in `mountRoot`, and in it the one app, which must be `<appName>.app`.
+    static func findApp(in mountRoot: URL, appName: String) throws -> URL {
+        let volumes = (try? FileManager.default.contentsOfDirectory(atPath: mountRoot.path)) ?? []
+        guard volumes.count == 1 else { throw InstallFailure(.image, "the image mounted \(volumes.count) volumes, not one") }
+        let volume = mountRoot.appendingPathComponent(volumes[0])
+        let apps = ((try? FileManager.default.contentsOfDirectory(atPath: volume.path)) ?? []).filter { $0.lowercased().hasSuffix(".app") }
+        let expected = "\(appName).app"
+        guard apps.count == 1 else { throw InstallFailure(.image, "the image holds \(apps.count) apps at its root, not exactly one (\(expected))") }
+        guard apps[0] == expected else { throw InstallFailure(.image, "the image holds \"\(InstalledCopy.displayable(apps[0]))\", not \(expected)") }
+        let source = volume.appendingPathComponent(expected)
+        guard BoundedFile.isDirectory(source.path) else { throw InstallFailure(.image, "\(expected) in the image is not a folder") }
+        return source
+    }
+
+    /// Clears the user file flags that block removal (uchg, uappnd) and the ACLs of everything in `tree`, never following
+    /// a symbolic link. Returns the first failure, or nil.
+    static func clearProtections(_ tree: URL, cancellable: Bool) async throws -> String? {
+        for (tool, change) in [("/usr/bin/chflags", ["-h", "nouchg,nouappnd"]), ("/bin/chmod", ["-h", "-N"])] {
+            let run = try await ToolRunner.run("/usr/bin/find", ["-P", tree.path, "-exec", tool] + change + ["{}", "+"], timeout: 120, cancellable: cancellable)
+            if run.status != 0 { return "\((tool as NSString).lastPathComponent): \(run.lastLine)" }
+        }
+        return nil
+    }
+
+    /// Removes a staged copy whatever ditto copied from the image: flags and ACLs cleared and folders made writable, in up
+    /// to three passes. Never cancelled. Returns whether it is gone.
+    static func removeStaged(_ staged: URL) async -> Bool {
+        for _ in 0..<3 {
+            if identity(staged) == nil { return true }
+            _ = try? await clearProtections(staged, cancellable: false)
+            var pending = [staged.path]
+            while let dir = pending.popLast() {
+                var status = stat()
+                guard lstat(dir, &status) == 0, status.st_mode & S_IFMT == S_IFDIR else { continue }
+                if status.st_mode & 0o700 != 0o700 { chmod(dir, (status.st_mode & 0o7777) | 0o700) }
+                pending += ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).map { "\(dir)/\($0)" }
+            }
+            if (try? FileManager.default.removeItem(at: staged)) != nil { return true }
+        }
+        return identity(staged) == nil
+    }
+
+    static func sha256(of file: URL) throws -> String {
+        guard let handle = FileHandle(forReadingAtPath: file.path) else { throw InstallFailure(.checksum, "the download cannot be read") }
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { hash.update(data: chunk) }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The device and inode of whatever is at `url` (not following a link), or nil when nothing is.
+    static func identity(_ url: URL) -> FileIdentity? {
+        var status = stat()
+        guard lstat(url.path, &status) == 0 else { return nil }
+        return FileIdentity(device: status.st_dev, inode: status.st_ino)
+    }
+
+    /// Renames `from` back to `to` after a failed step; returns what to add to the message when that fails too.
+    static func putBack(_ from: URL, _ to: URL) -> String {
+        if renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 { return "" }
+        return ", and the previous copy could not be put back (\(errnoText())): it is at \(from.path); rename it to \(to.path)"
+    }
+
+    static func pids(_ pids: [pid_t]) -> String { "pid " + pids.map(String.init).joined(separator: ", ") }
+
+    static func errnoText() -> String { String(cString: strerror(errno)) }
+}
+
+/// A file's device and inode: the copy checked is the copy changed.
+struct FileIdentity: Equatable, Sendable {
+    var device: dev_t
+    var inode: ino_t
+}
+
+/// Notes an operation collects while it runs (on one task at a time).
+final class Notes: @unchecked Sendable {
+    private(set) var lines: [String] = []
+    func add(_ line: String) { lines.append(line) }
+}
+
+extension FileManager {
+    func isDirectory(_ url: URL) -> Bool {
+        var directory: ObjCBool = false
+        return fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue
+    }
+}
