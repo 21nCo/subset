@@ -50,14 +50,14 @@ public final class AppActions: ObservableObject {
     public func update(_ appID: String) { start(appID, kind: .update, quitAllowed: false) }
     public func moveToTrash(_ appID: String) { start(appID, kind: .moveToTrash, quitAllowed: false) }
 
-    /// The user agreed to quit the app: the waiting operation starts.
-    public func confirmQuit() {
-        guard let request = quitRequest else { return }
-        quitRequest = nil
+    /// The user agreed to quit the app in `request`, the one the alert presented: its operation starts. It does not
+    /// read `quitRequest`, which the alert may already have cleared when it was dismissed.
+    public func confirmQuit(_ request: QuitRequest) {
+        if quitRequest == request { quitRequest = nil }
         start(request.appID, kind: request.kind, quitAllowed: true)
     }
 
-    /// Stops a running operation; before its last step nothing is changed.
+    /// Stops a running operation; its message then says what it had already changed, if anything.
     public func cancel(_ appID: String) { tasks[appID]?.cancel() }
 
     /// Hides a finished operation's message.
@@ -90,7 +90,8 @@ public final class AppActions: ObservableObject {
         }
         if kind != .moveToTrash, release == nil { return }
         let installer = installer
-        if let kind, !quitAllowed, installer.isRunning(app) {
+        // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that reason.
+        if let kind, !quitAllowed, (try? installer.isRunning(app)) == true {
             quitRequest = QuitRequest(appID: appID, appName: app.name, kind: kind)
             return
         }
@@ -115,13 +116,14 @@ public final class AppActions: ObservableObject {
                 }
             } catch {
                 let failure = error as? InstallFailure ?? InstallFailure(.install, error.localizedDescription)
+                // What was already changed is said, not reported as nothing done.
                 let what: String
                 switch kind {
                 case nil: what = "\(app.name) was not installed"
-                case .update: what = "\(app.name) was not updated to \(release!.label)"
-                case .moveToTrash: what = "\(app.name) was not moved to the Trash"
+                case .update: what = "\(app.name) was \(failure.partial ? "only partly" : "not") updated to \(release!.label)"
+                case .moveToTrash: what = "\(app.name) was \(failure.partial ? "only partly" : "not") moved to the Trash"
                 }
-                message = .failed("\(what): \(failure.explanation).")
+                message = .failed(Self.join("\(what): \(failure.explanation).", failure.notes))
             }
             await self?.finish(appID, message)
         }

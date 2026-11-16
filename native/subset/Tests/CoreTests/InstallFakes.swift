@@ -101,18 +101,21 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     let quits = Recorder<[String]>([])
     let reopened = Recorder<[String]>([])
     var stubborn = false
+    /// The list of processes cannot be read (libproc failed).
+    var unreadable = false
     /// Runs when an app is asked to quit (to check what has happened by then).
     var onQuit: (@Sendable () -> Void)?
 
-    func processes(inside bundle: URL) -> [pid_t] {
-        running.get().contains(bundle.path) ? [4242] : []
+    func processes(inside bundle: URL) throws -> [pid_t] {
+        if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake), so nothing was changed") }
+        return running.get().contains(bundle.path) ? [4242] : []
     }
 
-    func quit(_ bundle: URL, timeout _: TimeInterval) async -> [pid_t] {
+    func quit(_ bundle: URL, timeout _: TimeInterval) async throws -> [pid_t] {
         onQuit?()
         quits.update { $0.append(bundle.path) }
         if !stubborn { running.update { $0.remove(bundle.path) } }
-        return processes(inside: bundle)
+        return try processes(inside: bundle)
     }
 
     func reopen(_ bundle: URL) async -> String? {

@@ -16,6 +16,10 @@ public struct InstallFailure: Error, Equatable, Sendable {
 
     public var step: Step
     public var message: String
+    /// Whether the operation had already changed something (updated or moved a copy, or quit the app) when it stopped.
+    public var partial = false
+    /// The notes it had collected, with what it had changed when `partial`.
+    public var notes: [String] = []
 
     public init(_ step: Step, _ message: String) {
         self.step = step

@@ -419,6 +419,126 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(refused?.step, .notInstalled)
         assertNoLeftovers()
     }
+
+    func testMoveToTrashKeepsTheReceiptWhileACopyThatMayBeTheAppStays() async throws {
+        // The copy the receipt describes cannot be read (no Info.plist), or its folder cannot be searched: it may be
+        // Breaks, so the readable copy in ~/Applications is moved and the receipt stays, as `subset uninstall` decides.
+        let cases: [(String, String, (AppInstallerTests) throws -> Void)] = [
+            ("unreadable Info.plist", "its Info.plist could not be read", {
+                try FileManager.default.removeItem(at: $0.target.appendingPathComponent("Contents/Info.plist"))
+            }),
+            ("unsearchable folder", "it could not be looked into: Permission denied", {
+                try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: $0.system.path)
+            })
+        ]
+        for (name, why, change) in cases {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            try makeBundle(user.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.8")
+            try change(self)
+            let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: system.path)
+            XCTAssertEqual(refused?.step, .trash, name)
+            XCTAssertEqual(refused?.message, "\(target.path) was not moved to the Trash: it may be Breaks (\(why)), so the receipt \(receiptFile.path) stays; remove the receipt by hand if that is not Breaks", name)
+            XCTAssertEqual(refused?.partial, true, "\(name): the copy in ~/Applications was moved")
+            XCTAssertEqual(refused?.notes.count, 1, "\(name): \(refused?.notes ?? [])")
+            XCTAssertTrue(refused?.notes.first?.hasPrefix("Moved Breaks 0.0.8 (~/Applications) to the Trash: ") == true, name)
+            XCTAssertEqual(AppInstaller.identity(target), old, "\(name): the copy that may be Breaks stays")
+            XCTAssertEqual(names(user), [], name)
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, "\(name): the receipt stays")
+            assertNoLeftovers()
+        }
+    }
+
+    func testMoveToTrashOfAnotherAppWithTheSameNameRemovesTheReceipt() async throws {
+        // An app with another bundle ID at Breaks.app is not Breaks: it neither keeps the receipt nor is moved.
+        try makeBundle(target, bundleID: "com.example.other", version: "1.0")
+        try makeBundle(user.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.8")
+        try Data("{}".utf8).write(to: receiptFile)
+        _ = try await installer().moveToTrash(Self.breaks, quitAllowed: false)
+        XCTAssertEqual(names(system), ["Breaks.app"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: receiptFile.path))
+    }
+
+    func testAnUnreadableProcessListRefusesBeforeAnythingChanges() async throws {
+        // A running app must never be taken for one that is not: when the processes cannot be read, nothing is changed.
+        let old = try installOld()
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        running.unreadable = true
+        for quitAllowed in [false, true] {
+            let update = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: quitAllowed) }
+            XCTAssertEqual(update?.step, .running)
+            XCTAssertEqual(update?.partial, false)
+            // Without leave to quit it is refused before the download; with it, just before the swap.
+            XCTAssertEqual(downloader.calls.get(), quitAllowed ? 1 : 0)
+            let trashed = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: quitAllowed) }
+            XCTAssertEqual(trashed?.step, .running)
+        }
+        XCTAssertThrowsError(try installer().isRunning(Self.breaks))
+        XCTAssertEqual(running.quits.get(), [])
+        XCTAssertEqual(AppInstaller.identity(target), old)
+        XCTAssertEqual(names(trashFolder), [])
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        assertNoLeftovers()
+    }
+
+    func testTheProcessListIsReadWholeOrNotAtAll() throws {
+        XCTAssertThrowsError(try WorkspaceRunningApps.allPids { _, _ in -1 }, "libproc failing is an error, not no process")
+        XCTAssertThrowsError(try WorkspaceRunningApps.allPids { buffer, size in
+            buffer == nil ? 3 : Int32(Int(size) / MemoryLayout<pid_t>.size)
+        }, "a list that always fills its buffer may be cut short")
+        // The list grew past the size libproc first gave and filled the first buffer: it is read again in a larger one.
+        var calls = 0
+        let pids = try WorkspaceRunningApps.allPids { buffer, size in
+            guard let buffer else { return 3 }
+            calls += 1
+            let count = calls == 1 ? Int(size) / MemoryLayout<pid_t>.size : 5
+            let list = buffer.assumingMemoryBound(to: pid_t.self)
+            for index in 0..<count { list[index] = pid_t(index + 1) }
+            return Int32(count)
+        }
+        XCTAssertEqual(pids, [1, 2, 3, 4, 5])
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(try WorkspaceRunningApps.allPids().contains(getpid()), "the real list holds this process")
+    }
+
+    func testAnUpdateThatFailsAfterUpdatingOneCopySaysWhatItChanged() async throws {
+        try installOld()
+        let second = user.appendingPathComponent("Breaks.app")
+        try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+        let secondBefore = AppInstaller.identity(second)
+        let userPath = user.path
+        verifier.during = { staged in
+            if staged.path.hasPrefix(userPath) { throw InstallFailure(.team, "TeamIdentifier: ABCDE12345") }
+        }
+        let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: false) }
+        XCTAssertEqual(refused?.step, .team)
+        XCTAssertEqual(refused?.partial, true)
+        XCTAssertEqual(refused?.notes.first, "Updated the copy in /Applications from 0.0.9 to 0.1.0.")
+        XCTAssertTrue(refused?.notes.last?.hasPrefix("Moved Breaks 0.0.9 (/Applications) to the Trash: ") == true, "\(refused?.notes ?? [])")
+        XCTAssertEqual(version(target), "0.1.0", "the first copy stays updated")
+        XCTAssertEqual(AppInstaller.identity(second), secondBefore, "the second copy is untouched")
+        assertNoLeftovers()
+    }
+
+    func testMoveToTrashCancelledAfterTheFirstCopySaysWhatItChanged() async throws {
+        try installOld()
+        let second = user.appendingPathComponent("Breaks.app")
+        try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+        trash = CancellingTrash(inner: trash)
+        let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+        XCTAssertEqual(refused?.step, .interrupted)
+        XCTAssertEqual(refused?.message, "it was cancelled after part of it was done")
+        XCTAssertEqual(refused?.partial, true)
+        XCTAssertEqual(refused?.notes.count, 1)
+        XCTAssertTrue(refused?.notes.first?.hasPrefix("Moved Breaks 0.0.9 (/Applications) to the Trash: ") == true, "\(refused?.notes ?? [])")
+        XCTAssertEqual(names(system), [])
+        XCTAssertEqual(names(user), ["Breaks.app"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: receiptFile.path), "a copy is left, so the receipt stays")
+        assertNoLeftovers()
+    }
 }
 
 /// The fields one refusal case changes.
@@ -437,6 +557,16 @@ struct CheckingTrash: Trashing {
 
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
         versionsInPlace.update { $0.append(InstalledAppFinder.infoPlist(target.path)?["CFBundleShortVersionString"] as? String) }
+        return try inner.trash(bundle, appName: appName, at: date)
+    }
+}
+
+/// Moves a copy to the Trash, then cancels the task, as Cancel pressed just after the first copy went would.
+struct CancellingTrash: Trashing {
+    var inner: any Trashing
+
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
+        defer { cancelCurrentTask() }
         return try inner.trash(bundle, appName: appName, at: date)
     }
 }

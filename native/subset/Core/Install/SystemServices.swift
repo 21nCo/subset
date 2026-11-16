@@ -55,11 +55,12 @@ public struct FolderTrash: Trashing {
 
 /// Finds and quits the processes of an installed copy; `WorkspaceRunningApps` asks the system, tests a stand-in.
 public protocol RunningAppControlling: Sendable {
-    /// The pids of the processes whose executable is inside `bundle` (its helpers too).
-    func processes(inside bundle: URL) -> [pid_t]
+    /// The pids of the processes whose executable is inside `bundle` (its helpers too). Throws when the list of running
+    /// processes cannot be read, so a running app is never taken for one that is not.
+    func processes(inside bundle: URL) throws -> [pid_t]
     /// Asks each running app at `bundle` to quit (NSRunningApplication.terminate(), never a force quit), then waits up
     /// to `timeout` seconds for every process inside it to exit; returns the pids still running.
-    func quit(_ bundle: URL, timeout: TimeInterval) async -> [pid_t]
+    func quit(_ bundle: URL, timeout: TimeInterval) async throws -> [pid_t]
     /// Opens the app at `bundle` again after it was quit for an update; returns why it could not, or nil.
     func reopen(_ bundle: URL) async -> String?
 }
@@ -68,20 +69,34 @@ public protocol RunningAppControlling: Sendable {
 public struct WorkspaceRunningApps: RunningAppControlling {
     public init() {}
 
-    public func processes(inside bundle: URL) -> [pid_t] {
+    public func processes(inside bundle: URL) throws -> [pid_t] {
         let roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path]).map { $0 + "/" }
-        var pids = [pid_t](repeating: 0, count: 8192)
-        let count = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
         var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        return pids.prefix(max(0, count)).filter { pid in
+        return try Self.allPids().filter { pid in
             guard pid > 0, pid != getpid(), proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
             let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             return roots.contains { executable.hasPrefix($0) }
         }
     }
 
-    public func quit(_ bundle: URL, timeout: TimeInterval) async -> [pid_t] {
-        let mine = Set(processes(inside: bundle))
+    /// Every pid, from a buffer sized by asking libproc first; a list that fills the buffer may be cut short, so it is
+    /// read again in a larger one. Throws when libproc fails (as update.mjs refuses when ps fails).
+    static func allPids(list: (UnsafeMutableRawPointer?, Int32) -> Int32 = { proc_listallpids($0, $1) }) throws -> [pid_t] {
+        let unreadable = { (why: String) in InstallFailure(.running, "whether the app is running cannot be read (\(why)), so nothing was changed") }
+        var capacity = Int(list(nil, 0))
+        guard capacity > 0 else { throw unreadable(String(cString: strerror(errno))) }
+        for _ in 0..<4 {
+            capacity += capacity / 4 + 64
+            var pids = [pid_t](repeating: 0, count: capacity)
+            let count = Int(pids.withUnsafeMutableBytes { list($0.baseAddress, Int32($0.count)) })
+            guard count > 0 else { throw unreadable(String(cString: strerror(errno))) }
+            if count < capacity { return Array(pids.prefix(count)) }
+        }
+        throw unreadable("the list of processes kept growing")
+    }
+
+    public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> [pid_t] {
+        let mine = Set(try processes(inside: bundle))
         await MainActor.run {
             for app in NSWorkspace.shared.runningApplications where mine.contains(app.processIdentifier) {
                 app.terminate()
@@ -89,7 +104,7 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         }
         let until = Date().addingTimeInterval(timeout)
         while true {
-            let left = processes(inside: bundle)
+            let left = try processes(inside: bundle)
             if left.isEmpty || Date() >= until { return left }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }

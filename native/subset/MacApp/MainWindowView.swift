@@ -33,7 +33,7 @@ struct MainWindowView: View {
             actions.quitRequest?.title ?? "", isPresented: Binding(get: { actions.quitRequest != nil }, set: { if !$0 { actions.quitRequest = nil } }),
             presenting: actions.quitRequest
         ) { request in
-            Button("Quit \(request.appName)") { actions.confirmQuit() }
+            Button("Quit \(request.appName)") { actions.confirmQuit(request) }
             Button("Cancel", role: .cancel) { actions.quitRequest = nil }
         } message: { request in
             Text(request.message)

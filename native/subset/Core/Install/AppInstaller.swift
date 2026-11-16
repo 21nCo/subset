@@ -84,9 +84,10 @@ public struct AppInstaller: Sendable {
 
     var finder: InstalledAppFinder { InstalledAppFinder(folders: setup.folders, receipts: setup.receipts) }
 
-    /// Whether some installed copy of `app` is running, so the caller can ask before updating or moving it.
-    public func isRunning(_ app: CatalogApp) -> Bool {
-        finder.copies(of: app).contains { !running.processes(inside: URL(fileURLWithPath: $0.path)).isEmpty }
+    /// Whether some installed copy of `app` is running, so the caller can ask before updating or moving it. Throws when
+    /// that cannot be read; the operation itself then refuses with the same reason.
+    public func isRunning(_ app: CatalogApp) throws -> Bool {
+        try finder.copies(of: app).contains { try !running.processes(inside: URL(fileURLWithPath: $0.path)).isEmpty }
     }
 
     // MARK: - Install
@@ -130,7 +131,7 @@ public struct AppInstaller: Sendable {
             for copy in updates {
                 let target = URL(fileURLWithPath: copy.path)
                 let identity = identities[copy.path]!
-                if !quitAllowed, !running.processes(inside: target).isEmpty {
+                if !quitAllowed, try !running.processes(inside: target).isEmpty {
                     throw InstallFailure(.running, "\(app.name) is running; quit it to update it")
                 }
                 let folder = setup.folders.first { $0.label == copy.folder }
@@ -139,7 +140,7 @@ public struct AppInstaller: Sendable {
                 var old: URL?
                 do {
                     try await stage(app, release, in: target.deletingLastPathComponent(), notes: notes, progress: progress, ready: {
-                        let pids = running.processes(inside: target)
+                        let pids = try running.processes(inside: target)
                         guard !pids.isEmpty else { return }
                         guard quitAllowed else { throw InstallFailure(.running, "\(app.name) is running (\(Self.pids(pids))); quit it to update it") }
                         guard Self.identity(target) == identity else {
@@ -147,7 +148,7 @@ public struct AppInstaller: Sendable {
                         }
                         quit = true
                         progress(.quitting)
-                        let left = await running.quit(target, timeout: quitTimeout)
+                        let left = try await running.quit(target, timeout: quitTimeout)
                         if !left.isEmpty {
                             throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
                         }
@@ -155,14 +156,17 @@ public struct AppInstaller: Sendable {
                         old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
                 } catch {
-                    if quit, let why = await running.reopen(target) { notes.add("\(app.name) could not be reopened (\(why)).") }
+                    if quit, let why = await running.reopen(target) {
+                        notes.add("\(app.name) was quit and could not be reopened (\(why)).", changed: true)
+                    }
                     throw error
                 }
+                notes.add("Updated the copy in \(copy.folder) from \(copy.versionLabel) to \(release.label).", changed: true, onlyWhenPartial: true)
                 if let old {
                     progress(.movingToTrash)
                     do {
                         let trashed = try trash.trash(old, appName: app.appName, at: clock())
-                        notes.add("Moved \(app.name) \(copy.versionLabel) to the Trash: \(trashed.path)")
+                        notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)")
                     } catch let failure as InstallFailure {
                         notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
                     }
@@ -185,14 +189,16 @@ public struct AppInstaller: Sendable {
             // Every copy is checked, and quit when allowed, before any is moved.
             for copy in copies {
                 let bundle = URL(fileURLWithPath: copy.path)
-                let pids = running.processes(inside: bundle)
+                let pids = try running.processes(inside: bundle)
                 guard !pids.isEmpty else { continue }
                 guard quitAllowed else { throw InstallFailure(.running, "\(app.name) is running from \(copy.path); quit it to move it to the Trash") }
                 guard Self.identity(bundle) == identities[copy.path] else {
                     throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was not quit or moved")
                 }
                 progress(.quitting)
-                let left = await running.quit(bundle, timeout: quitTimeout)
+                // Quitting changes something even when nothing is moved afterwards.
+                notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true)
+                let left = try await running.quit(bundle, timeout: quitTimeout)
                 if !left.isEmpty {
                     throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
                 }
@@ -201,7 +207,7 @@ public struct AppInstaller: Sendable {
             for copy in copies {
                 try Task.checkCancellation()
                 let bundle = URL(fileURLWithPath: copy.path)
-                if !running.processes(inside: bundle).isEmpty {
+                if try !running.processes(inside: bundle).isEmpty {
                     throw InstallFailure(.running, "\(app.name) is running from \(copy.path) again; quit it and try again")
                 }
                 let aside = AppLock.hiddenName(in: bundle.deletingLastPathComponent(), appName: app.appName, kind: "trash")
@@ -213,13 +219,17 @@ public struct AppInstaller: Sendable {
                 }
                 do {
                     let trashed = try trash.trash(aside, appName: app.appName, at: clock())
-                    notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)")
+                    notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)", changed: true)
                 } catch let failure as InstallFailure {
                     throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle))
                 }
             }
-            // The receipt goes only when no copy of the app is in either folder any more.
+            // The receipt goes only when no copy that is or may be the app is in either folder any more (as `subset
+            // uninstall` decides): a copy whose Info.plist cannot be read may be the app the receipt describes.
             let file = setup.receipts.appendingPathComponent("\(app.bundleID).json")
+            if let (path, why) = unresolvedCopy(app) {
+                throw InstallFailure(.trash, "\(path) was not moved to the Trash: it may be \(app.name) (\(why)), so the receipt \(file.path) stays; remove the receipt by hand if that is not \(app.name)")
+            }
             if !finder.copies(of: app).isEmpty {
                 notes.add("\(app.name) was installed again meanwhile, so its receipt stays.")
             } else if unlink(file.path) != 0, errno != ENOENT, errno != ENAMETOOLONG {
@@ -233,22 +243,44 @@ public struct AppInstaller: Sendable {
 
     /// Takes the app's lock, puts back what an interrupted update or move to the Trash left, runs `body` and releases the
     /// lock. A cancel is reported as interrupted, and an unexpected error as a failure.
+    /// A failure carries the notes collected so far and whether something was already changed (`partial`).
     private func locked(_ app: CatalogApp, _ body: (Notes) async throws -> String?) async throws -> InstallOutcome {
+        let notes = Notes()
         do {
             try Task.checkCancellation()
             let lock = try AppLock(app, in: setup.locks)
             defer { lock.release() }
-            let notes = Notes()
             for note in recover(app) { notes.add(note) }
             let path = try await body(notes)
             return InstallOutcome(path: path, notes: notes.lines)
-        } catch let failure as InstallFailure {
-            throw failure
-        } catch is CancellationError {
-            throw InstallFailure(.interrupted, "it was cancelled before anything was changed")
         } catch {
-            throw InstallFailure(.install, error.localizedDescription)
+            var failure: InstallFailure
+            switch error {
+            case let known as InstallFailure: failure = known
+            case is CancellationError:
+                failure = InstallFailure(.interrupted, notes.changed ? "it was cancelled after part of it was done" : "it was cancelled before anything was changed")
+            default: failure = InstallFailure(.install, error.localizedDescription)
+            }
+            failure.partial = notes.changed
+            failure.notes = notes.changed ? notes.partialLines : notes.lines
+            throw failure
         }
+    }
+
+    /// The first `<appName>.app` in either folder that may be `app` but is not known to be: its Info.plist cannot be
+    /// read, or the folder cannot be looked into. A copy with another bundle ID is another app.
+    func unresolvedCopy(_ app: CatalogApp) -> (path: String, why: String)? {
+        for folder in setup.folders {
+            let bundle = folder.directory.appendingPathComponent("\(app.appName).app").path
+            var status = stat()
+            if lstat(bundle, &status) != 0 {
+                if errno == ENOENT || errno == ENOTDIR { continue }
+                return (bundle, "it could not be looked into: \(Self.errnoText())")
+            }
+            guard let info = InstalledAppFinder.infoPlist(bundle) else { return (bundle, "its Info.plist could not be read") }
+            if info["CFBundleIdentifier"] as? String != app.bundleID { continue }
+        }
+        return nil
     }
 
     /// The installed copies of `app`, each identified (device and inode) before and after its Info.plist was read; throws
@@ -572,10 +604,22 @@ struct FileIdentity: Equatable, Sendable {
     var inode: ino_t
 }
 
-/// Notes an operation collects while it runs (on one task at a time).
+/// Notes an operation collects while it runs (on one task at a time), and whether it has changed something yet.
 final class Notes: @unchecked Sendable {
-    private(set) var lines: [String] = []
-    func add(_ line: String) { lines.append(line) }
+    private var entries: [(line: String, onlyWhenPartial: Bool)] = []
+    private(set) var changed = false
+
+    /// The notes of an operation that finished.
+    var lines: [String] { entries.filter { !$0.onlyWhenPartial }.map(\.line) }
+    /// The notes of one that failed or was cancelled after changing something: what it changed, too.
+    var partialLines: [String] { entries.map(\.line) }
+
+    /// Adds a note; `changed` when it reports a change, `onlyWhenPartial` when it is worth saying only if the operation
+    /// then fails (a finished one says it in its own message).
+    func add(_ line: String, changed: Bool = false, onlyWhenPartial: Bool = false) {
+        entries.append((line, onlyWhenPartial))
+        if changed { self.changed = true }
+    }
 }
 
 extension FileManager {
