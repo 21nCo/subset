@@ -87,15 +87,19 @@ test_target.build_configurations.each do |config|
   config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
 end
 
-def add_sources(group, target, pattern)
-  Dir.glob(pattern).sort.each do |path|
-    target.add_file_references([group.new_file(File.basename(path))])
+# Adds the Swift files under `folder` to `target`, each in a group for its subfolder (Core/Feed, Core/Installed).
+def add_sources(group, target, folder)
+  Dir.glob("**/*.swift", base: folder).sort.each do |path|
+    parent = File.dirname(path).split("/").reject { |part| part == "." }.reduce(group) do |outer, part|
+      outer.children.find { |child| child.isa == "PBXGroup" && child.path == part } || outer.new_group(part, part)
+    end
+    target.add_file_references([parent.new_file(File.basename(path))])
   end
 end
 
-add_sources(core_group, core_target, "Core/*.swift")
-add_sources(app_group, app_target, "MacApp/*.swift")
-add_sources(tests_group, test_target, "Tests/CoreTests/*.swift")
+add_sources(core_group, core_target, "Core")
+add_sources(app_group, app_target, "MacApp")
+add_sources(tests_group, test_target, "Tests/CoreTests")
 app_group.new_file("Info.plist")
 app_group.new_file("Subset.entitlements")
 

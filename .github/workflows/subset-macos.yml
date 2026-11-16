@@ -6,11 +6,13 @@ on:
   pull_request:
     paths:
       - 'native/subset/**'
+      - 'packages/catalog/feed/**'
       - '.github/workflows/subset-macos.yml'
   push:
     branches: [dev, main]
     paths:
       - 'native/subset/**'
+      - 'packages/catalog/feed/**'
       - '.github/workflows/subset-macos.yml'
 
 permissions:
