@@ -627,6 +627,32 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: receiptFile.path), "a copy is left, so the receipt stays")
         assertNoLeftovers()
     }
+
+    // hdiutil info may name an image by the path it was attached with or by its real path (/private/var/... for a
+    // /var/folders temporary image), so cleanup looks for both, as install.mjs does; Foundation's resolving drops /private.
+    func testTheDiskImageIsLookedUpByItsAttachPathAndItsRealPath() throws {
+        let real = FileManager.default.temporaryDirectory.appendingPathComponent("subset-image-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false)
+        let link = FileManager.default.temporaryDirectory.appendingPathComponent("subset-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        defer {
+            try? FileManager.default.removeItem(at: link)
+            try? FileManager.default.removeItem(at: real)
+        }
+        let realFolder = try XCTUnwrap(AppInstaller.realPath(real.path))
+
+        let viaTemporary = HdiutilDiskImages.imagePaths(of: real.appendingPathComponent("image.dmg"))
+        XCTAssertTrue(viaTemporary.contains(real.path + "/image.dmg"), "\(viaTemporary)")
+        XCTAssertTrue(viaTemporary.contains(realFolder + "/image.dmg"), "\(viaTemporary)")
+        if real.path.hasPrefix("/var/") {
+            XCTAssertTrue(viaTemporary.contains("/private" + real.path + "/image.dmg"), "\(viaTemporary)")
+        }
+
+        let viaLink = HdiutilDiskImages.imagePaths(of: link.appendingPathComponent("image.dmg"))
+        XCTAssertTrue(viaLink.contains(link.path + "/image.dmg"), "\(viaLink)")
+        XCTAssertTrue(viaLink.contains(realFolder + "/image.dmg"), "\(viaLink)")
+        XCTAssertTrue(realFolder.hasPrefix("/private/") || !real.path.hasPrefix("/var/"), realFolder)
+    }
 }
 
 /// The fields one refusal case changes.

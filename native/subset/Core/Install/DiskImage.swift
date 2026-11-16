@@ -46,15 +46,25 @@ public struct HdiutilDiskImages: DiskImageAttaching {
         return false
     }
 
-    // The devices `hdiutil info` lists for `image` (by the path it was attached with or its real path), or nil when
-    // hdiutil info fails.
+    // The devices `hdiutil info` lists for `image` (by any name `imagePaths` gives it), or nil when hdiutil info fails.
     private func attachedDevices(of image: URL) async -> [String]? {
         guard let run = try? await ToolRunner.run(Self.hdiutil, ["info", "-plist"], timeout: 60, cancellable: false),
               run.status == 0, let info = Self.plist(run.stdout)
         else { return nil }
-        let names: Set<String> = [image.path, image.resolvingSymlinksInPath().path]
+        let names = Self.imagePaths(of: image)
         let images = info["images"] as? [[String: Any]] ?? []
         return images.filter { names.contains($0["image-path"] as? String ?? "") }.flatMap { Self.wholeDisks(in: $0["system-entities"]) }
+    }
+
+    /// The names `hdiutil info` may give `image`, as install.mjs matches them: the path it was attached with and its
+    /// real path, the folder resolved by realpath(3) so /var/folders/... is also /private/var/folders/... (Foundation's
+    /// resolvingSymlinksInPath drops /private instead), plus Foundation's spelling.
+    static func imagePaths(of image: URL) -> Set<String> {
+        var names: Set<String> = [image.path, image.resolvingSymlinksInPath().path]
+        if let folder = AppInstaller.realPath(image.deletingLastPathComponent().path) {
+            names.insert((folder as NSString).appendingPathComponent(image.lastPathComponent))
+        }
+        return names
     }
 
     private static func plist(_ data: Data) -> [String: Any]? {
