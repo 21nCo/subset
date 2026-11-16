@@ -65,12 +65,16 @@ public struct AppInstaller: Sendable {
     public var clock: @Sendable () -> Date
     /// How long an app asked to quit has to exit.
     public var quitTimeout: TimeInterval
+    /// The executable of this running Subset app: a copy holding it is never replaced or moved, because quitting it
+    /// would end the operation (tests give another path).
+    public var ownExecutable: String?
 
     public init(
         setup: InstallSetup, downloader: any ImageDownloading = URLSessionImageDownloader(),
         images: any DiskImageAttaching = HdiutilDiskImages(), verifier: any AppVerifying = SecurityAppVerifier(),
         trash: any Trashing = SystemTrash(), running: any RunningAppControlling = WorkspaceRunningApps(),
-        clock: @escaping @Sendable () -> Date = Date.init, quitTimeout: TimeInterval = 10
+        clock: @escaping @Sendable () -> Date = Date.init, quitTimeout: TimeInterval = 10,
+        ownExecutable: String? = WorkspaceRunningApps.ownExecutable()
     ) {
         self.setup = setup
         self.downloader = downloader
@@ -80,14 +84,31 @@ public struct AppInstaller: Sendable {
         self.running = running
         self.clock = clock
         self.quitTimeout = quitTimeout
+        self.ownExecutable = ownExecutable
     }
 
     var finder: InstalledAppFinder { InstalledAppFinder(folders: setup.folders, receipts: setup.receipts) }
 
     /// Whether some installed copy of `app` is running, so the caller can ask before updating or moving it. Throws when
-    /// that cannot be read; the operation itself then refuses with the same reason.
+    /// that cannot be read, or when a copy is this running Subset app; the operation itself then refuses with that reason.
     public func isRunning(_ app: CatalogApp) throws -> Bool {
-        try finder.copies(of: app).contains { try !running.processes(inside: URL(fileURLWithPath: $0.path)).isEmpty }
+        let copies = finder.copies(of: app)
+        try refuseOwnCopy(copies, app, doing: "changed")
+        return try copies.contains { try !running.processes(inside: URL(fileURLWithPath: $0.path)).isEmpty }
+    }
+
+    /// Refuses, before anything changes, when one of `copies` holds this running Subset app: it cannot be quit for the
+    /// swap or the move without ending the operation, so the `subset` command has to do it.
+    func refuseOwnCopy(_ copies: [InstalledCopy], _ app: CatalogApp, doing: String) throws {
+        guard let ownExecutable else { return }
+        // Compared as given and with every link resolved (realpath), on both sides.
+        let own = Set([ownExecutable, Self.realPath(ownExecutable)].compactMap { $0 })
+        for copy in copies {
+            let roots = Set([copy.path, Self.realPath(copy.path)].compactMap { $0 }).map { $0 + "/" }
+            if own.contains(where: { path in roots.contains { path.hasPrefix($0) } }) {
+                throw InstallFailure(.running, "\(copy.path) is this running \(app.name) app, which cannot quit itself to be \(doing); quit it and use the subset command in Terminal")
+            }
+        }
     }
 
     // MARK: - Install
@@ -123,11 +144,12 @@ public struct AppInstaller: Sendable {
         _ app: CatalogApp, _ release: ChosenRelease, quitAllowed: Bool, progress: @escaping @Sendable (InstallProgress) -> Void = { _ in }
     ) async throws -> InstallOutcome {
         try await locked(app) { notes in
-            let (copies, identities) = try checkedCopies(app)
+            let (copies, identities, _) = try checkedCopies(app)
             let updates = copies.filter { UpdateRule.decide($0, app, channel: release.channel) == .update }
             guard !updates.isEmpty else {
                 throw InstallFailure(.install, "no installed copy of \(app.name) is older than \(release.label)")
             }
+            try refuseOwnCopy(updates, app, doing: "updated")
             for copy in updates {
                 let target = URL(fileURLWithPath: copy.path)
                 let identity = identities[copy.path]!
@@ -185,7 +207,8 @@ public struct AppInstaller: Sendable {
         _ app: CatalogApp, quitAllowed: Bool, progress: @escaping @Sendable (InstallProgress) -> Void = { _ in }
     ) async throws -> InstallOutcome {
         try await locked(app) { notes in
-            let (copies, identities) = try checkedCopies(app)
+            let (copies, identities, before) = try checkedCopies(app)
+            try refuseOwnCopy(copies, app, doing: "moved to the Trash")
             // Every copy is checked, and quit when allowed, before any is moved.
             for copy in copies {
                 let bundle = URL(fileURLWithPath: copy.path)
@@ -224,14 +247,16 @@ public struct AppInstaller: Sendable {
                     throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle))
                 }
             }
-            // The receipt goes only when no copy that is or may be the app is in either folder any more (as `subset
-            // uninstall` decides): a copy whose Info.plist cannot be read may be the app the receipt describes.
+            // The receipt goes only when no copy that is or may be the app is in either folder any more, decided as
+            // `subset uninstall` decides it (receiptDecision).
             let file = setup.receipts.appendingPathComponent("\(app.bundleID).json")
-            if let (path, why) = unresolvedCopy(app) {
-                throw InstallFailure(.trash, "\(path) was not moved to the Trash: it may be \(app.name) (\(why)), so the receipt \(file.path) stays; remove the receipt by hand if that is not \(app.name)")
+            let (again, maybe) = receiptDecision(app, moved: Set(identities.keys), before: before)
+            if !maybe.isEmpty {
+                let each = maybe.map { "\($0.path) was not moved to the Trash: it may be \(app.name) (\($0.why))" }.joined(separator: "; ")
+                throw InstallFailure(.trash, "\(each), so the receipt \(file.path) stays; remove the receipt by hand if that is not \(app.name)")
             }
-            if !finder.copies(of: app).isEmpty {
-                notes.add("\(app.name) was installed again meanwhile, so its receipt stays.")
+            if !again.isEmpty {
+                for path in again { notes.add("\(path) was installed again while \(app.name) was moved to the Trash, so its receipt stays.") }
             } else if unlink(file.path) != 0, errno != ENOENT, errno != ENAMETOOLONG {
                 notes.add("Its receipt \(file.path) could not be removed (\(Self.errnoText())); remove it by hand.")
             }
@@ -267,25 +292,82 @@ public struct AppInstaller: Sendable {
         }
     }
 
-    /// The first `<appName>.app` in either folder that may be `app` but is not known to be: its Info.plist cannot be
-    /// read, or the folder cannot be looked into. A copy with another bundle ID is another app.
-    func unresolvedCopy(_ app: CatalogApp) -> (path: String, why: String)? {
+    /// What each folder's `<appName>.app` says about the receipt after the moves, each looked at as `subset uninstall`
+    /// looks (uninstall.mjs):
+    /// - absent, or not this app: an entry unchanged (device and inode) since the copies were identified that is a link,
+    ///   a file, a folder without a Contents folder or Contents/Info.plist file, or another app;
+    /// - installed again: something at a moved copy's path, or new or changed since the copies were identified, or
+    ///   replaced while it was looked into;
+    /// - maybe this app: an unchanged bundle folder (not a link) whose folder or Contents cannot be looked into, whose
+    ///   Info.plist cannot be read, or whose Info.plist names this bundle ID, or an entry that cannot be looked at.
+    func receiptDecision(_ app: CatalogApp, moved: Set<String>, before: [String: FileIdentity?]) -> (again: [String], maybe: [(path: String, why: String)]) {
+        var again: [String] = []
+        var maybe: [(path: String, why: String)] = []
         for folder in setup.folders {
             let bundle = folder.directory.appendingPathComponent("\(app.appName).app").path
-            var status = stat()
-            if lstat(bundle, &status) != 0 {
-                if errno == ENOENT || errno == ENOTDIR { continue }
-                return (bundle, "it could not be looked into: \(Self.errnoText())")
+            let current: Entry
+            switch Self.look(bundle) {
+            case .failed(let why):
+                maybe.append((bundle, "it could not be looked into: \(why)"))
+                continue
+            case .absent: continue
+            case .present(let entry): current = entry
             }
-            guard let info = InstalledAppFinder.infoPlist(bundle) else { return (bundle, "its Info.plist could not be read") }
-            if info["CFBundleIdentifier"] as? String != app.bundleID { continue }
+            if moved.contains(bundle) || (before[bundle] ?? nil) != current.identity {
+                again.append(bundle)
+                continue
+            }
+            let reason = current.isDirectory ? mayBeApp(bundle, app) : nil
+            // Looked at again: removed while it was looked into, it is absent; replaced, what is there now was not.
+            switch Self.look(bundle) {
+            case .failed(let why): maybe.append((bundle, "it could not be looked into: \(why)"))
+            case .absent: continue
+            case .present(let after):
+                if after.identity != current.identity { again.append(bundle) } else if let reason { maybe.append((bundle, reason)) }
+            }
         }
-        return nil
+        return (again, maybe)
+    }
+
+    /// Why an unchanged bundle folder may be `app`, or nil when it is not (uninstall.mjs mayBeApp).
+    func mayBeApp(_ bundle: String, _ app: CatalogApp) -> String? {
+        for (file, kind) in [("\(bundle)/Contents", S_IFDIR), ("\(bundle)/Contents/Info.plist", S_IFREG)] {
+            switch Self.look(file) {
+            case .failed(let why): return "\(file) could not be looked into: \(why)"
+            case .absent: return nil
+            case .present(let entry) where entry.type != kind: return nil
+            case .present: continue
+            }
+        }
+        guard let info = InstalledAppFinder.infoPlist(bundle) else { return "its Info.plist could not be read" }
+        return info["CFBundleIdentifier"] as? String == app.bundleID ? "its Info.plist names \(app.bundleID)" : nil
+    }
+
+    /// One lstat of a path: what is there (never following a link), nothing, or why it cannot be seen.
+    enum Look {
+        case absent
+        case present(Entry)
+        case failed(String)
+    }
+
+    struct Entry {
+        var identity: FileIdentity
+        var type: mode_t
+        var isDirectory: Bool { type == S_IFDIR }
+    }
+
+    static func look(_ path: String) -> Look {
+        var status = stat()
+        guard lstat(path, &status) == 0 else {
+            return errno == ENOENT || errno == ENOTDIR ? .absent : .failed(errnoText())
+        }
+        return .present(Entry(identity: FileIdentity(device: status.st_dev, inode: status.st_ino), type: status.st_mode & S_IFMT))
     }
 
     /// The installed copies of `app`, each identified (device and inode) before and after its Info.plist was read; throws
     /// when one was replaced in between (its version may not be its own) or none is installed.
-    private func checkedCopies(_ app: CatalogApp) throws -> ([InstalledCopy], [String: FileIdentity]) {
+    /// Also returns each folder's `<appName>.app` identity (nil when absent) from before the copies were read.
+    private func checkedCopies(_ app: CatalogApp) throws -> ([InstalledCopy], [String: FileIdentity], [String: FileIdentity?]) {
         let bundles = setup.folders.map { $0.directory.appendingPathComponent("\(app.appName).app") }
         let before = Dictionary(uniqueKeysWithValues: bundles.map { ($0.path, Self.identity($0)) })
         let copies = finder.copies(of: app)
@@ -297,7 +379,7 @@ public struct AppInstaller: Sendable {
             }
             identities[copy.path] = now
         }
-        return (copies, identities)
+        return (copies, identities, before)
     }
 
     /// Steps 1 to 4 and then `ready` and `commit` (step 5, synchronous), with the cleanup of a failure or cancel.
@@ -591,6 +673,13 @@ public struct AppInstaller: Sendable {
     static func putBack(_ from: URL, _ to: URL) -> String {
         if renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 { return "" }
         return ", and the previous copy could not be put back (\(errnoText())): it is at \(from.path); rename it to \(to.path)"
+    }
+
+    /// `path` with every link resolved, or nil when it cannot be (it does not exist).
+    static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     static func pids(_ pids: [pid_t]) -> String { "pid " + pids.map(String.init).joined(separator: ", ") }

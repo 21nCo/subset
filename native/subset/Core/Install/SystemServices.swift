@@ -69,14 +69,24 @@ public protocol RunningAppControlling: Sendable {
 public struct WorkspaceRunningApps: RunningAppControlling {
     public init() {}
 
+    /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
     public func processes(inside bundle: URL) throws -> [pid_t] {
         let roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path]).map { $0 + "/" }
-        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return try Self.allPids().filter { pid in
-            guard pid > 0, pid != getpid(), proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
-            let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            guard pid > 0, let executable = Self.executable(of: pid) else { return false }
             return roots.contains { executable.hasPrefix($0) }
         }
+    }
+
+    /// The executable of this process (libproc, else the main bundle's), or nil when neither can be read.
+    public static func ownExecutable() -> String? {
+        executable(of: getpid()) ?? Bundle.main.executablePath
+    }
+
+    static func executable(of pid: pid_t) -> String? {
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        return String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     /// Every pid, from a buffer sized by asking libproc first; a list that fills the buffer may be cut short, so it is
@@ -98,7 +108,8 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> [pid_t] {
         let mine = Set(try processes(inside: bundle))
         await MainActor.run {
-            for app in NSWorkspace.shared.runningApplications where mine.contains(app.processIdentifier) {
+            // This app is never asked to quit itself (the installer refuses such a copy first); it stays in what is left.
+            for app in NSWorkspace.shared.runningApplications where mine.contains(app.processIdentifier) && app.processIdentifier != getpid() {
                 app.terminate()
             }
         }

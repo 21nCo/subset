@@ -39,6 +39,8 @@ final class AppInstallerTests: XCTestCase {
     private var verifier = FakeVerifier()
     private var running = FakeRunning()
     private var trash: any Trashing = FolderTrash(folder: URL(fileURLWithPath: "/nonexistent"))
+    /// The executable of the running Subset app the installer is told it is (by default one outside both folders).
+    private var ownExecutable: String? = "/nonexistent/Subset.app/Contents/MacOS/Subset"
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("subset-installer-\(UUID().uuidString)")
@@ -54,6 +56,7 @@ final class AppInstallerTests: XCTestCase {
         verifier = FakeVerifier()
         running = FakeRunning()
         trash = FolderTrash(folder: trashFolder)
+        ownExecutable = "/nonexistent/Subset.app/Contents/MacOS/Subset"
     }
 
     override func tearDownWithError() throws {
@@ -77,7 +80,7 @@ final class AppInstallerTests: XCTestCase {
                 receipts: receipts, locks: locks, temporary: temporary
             ),
             downloader: downloader, images: images, verifier: verifier, trash: trash, running: running,
-            clock: { Self.installedAt }, quitTimeout: 1
+            clock: { Self.installedAt }, quitTimeout: 1, ownExecutable: ownExecutable
         )
     }
 
@@ -421,11 +424,14 @@ final class AppInstallerTests: XCTestCase {
     }
 
     func testMoveToTrashKeepsTheReceiptWhileACopyThatMayBeTheAppStays() async throws {
-        // The copy the receipt describes cannot be read (no Info.plist), or its folder cannot be searched: it may be
-        // Breaks, so the readable copy in ~/Applications is moved and the receipt stays, as `subset uninstall` decides.
+        // The copy the receipt describes cannot be read or looked into: it may be Breaks, so the readable copy in
+        // ~/Applications is moved and the receipt stays, as `subset uninstall` decides.
         let cases: [(String, String, (AppInstallerTests) throws -> Void)] = [
             ("unreadable Info.plist", "its Info.plist could not be read", {
-                try FileManager.default.removeItem(at: $0.target.appendingPathComponent("Contents/Info.plist"))
+                try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: $0.target.appendingPathComponent("Contents/Info.plist").path)
+            }),
+            ("unsearchable Contents", "TARGET/Contents/Info.plist could not be looked into: Permission denied", {
+                try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: $0.target.appendingPathComponent("Contents").path)
             }),
             ("unsearchable folder", "it could not be looked into: Permission denied", {
                 try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: $0.system.path)
@@ -440,8 +446,10 @@ final class AppInstallerTests: XCTestCase {
             try change(self)
             let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: system.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.appendingPathComponent("Contents").path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.appendingPathComponent("Contents/Info.plist").path)
             XCTAssertEqual(refused?.step, .trash, name)
-            XCTAssertEqual(refused?.message, "\(target.path) was not moved to the Trash: it may be Breaks (\(why)), so the receipt \(receiptFile.path) stays; remove the receipt by hand if that is not Breaks", name)
+            XCTAssertEqual(refused?.message, "\(target.path) was not moved to the Trash: it may be Breaks (\(why.replacingOccurrences(of: "TARGET", with: target.path))), so the receipt \(receiptFile.path) stays; remove the receipt by hand if that is not Breaks", name)
             XCTAssertEqual(refused?.partial, true, "\(name): the copy in ~/Applications was moved")
             XCTAssertEqual(refused?.notes.count, 1, "\(name): \(refused?.notes ?? [])")
             XCTAssertTrue(refused?.notes.first?.hasPrefix("Moved Breaks 0.0.8 (~/Applications) to the Trash: ") == true, name)
@@ -450,6 +458,83 @@ final class AppInstallerTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, "\(name): the receipt stays")
             assertNoLeftovers()
         }
+    }
+
+    func testMoveToTrashTreatsWhatIsNotABundleAsAnotherApp() async throws {
+        // A link (even to Breaks), a dangling link, a file, an empty folder or one without Contents/Info.plist at
+        // Breaks.app is not Breaks (uninstall.mjs mayBeApp): it stays, and the receipt goes with the moved copy.
+        let elsewhere = FileManager.default.temporaryDirectory.appendingPathComponent("subset-elsewhere-\(UUID().uuidString)/Breaks.app")
+        defer { try? FileManager.default.removeItem(at: elsewhere.deletingLastPathComponent()) }
+        try makeBundle(elsewhere, bundleID: "dev.subset.breaks", version: "0.0.9")
+        let cases: [(String, (AppInstallerTests) throws -> Void)] = [
+            ("link to Breaks", { try FileManager.default.createSymbolicLink(atPath: $0.target.path, withDestinationPath: elsewhere.path) }),
+            ("dangling link", { try FileManager.default.createSymbolicLink(atPath: $0.target.path, withDestinationPath: $0.root.appendingPathComponent("gone").path) }),
+            ("file", { try Data("not an app".utf8).write(to: $0.target) }),
+            ("empty folder", { try FileManager.default.createDirectory(at: $0.target, withIntermediateDirectories: false) }),
+            ("folder without Info.plist", {
+                try FileManager.default.createDirectory(at: $0.target.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+            }),
+            ("Info.plist that is a folder", {
+                try FileManager.default.createDirectory(at: $0.target.appendingPathComponent("Contents/Info.plist"), withIntermediateDirectories: true)
+            })
+        ]
+        for (name, make) in cases {
+            try tearDownWithError()
+            try setUpWithError()
+            try make(self)
+            let before = AppInstaller.identity(target)
+            try makeBundle(user.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.8")
+            try Data("{}".utf8).write(to: receiptFile)
+            let outcome = try await installer().moveToTrash(Self.breaks, quitAllowed: false)
+            XCTAssertEqual(outcome.notes.filter { !$0.hasPrefix("Moved Breaks 0.0.8 (~/Applications) to the Trash: ") }, [], name)
+            XCTAssertEqual(names(user), [], name)
+            XCTAssertNotNil(before, name)
+            XCTAssertEqual(AppInstaller.identity(target), before, "\(name) stays where it is")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: receiptFile.path), "\(name): the receipt goes")
+            assertNoLeftovers()
+        }
+    }
+
+    func testThisRunningSubsetIsNeverUpdatedOrMovedToTheTrash() async throws {
+        // The copy holding this app cannot be quit for the swap without ending the operation: Update and Move to Trash
+        // refuse before anything changes (even with leave to quit), and no consent prompt is offered for it.
+        let old = try installOld()
+        try makeBundle(user.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.8")
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        ownExecutable = target.appendingPathComponent("Contents/MacOS/Breaks").path
+        try Data().write(to: URL(fileURLWithPath: ownExecutable!))
+        running.running.update { $0.insert(target.path) }
+        let message = { (doing: String) in
+            "\(self.target.path) is this running Breaks app, which cannot quit itself to be \(doing); quit it and use the subset command in Terminal"
+        }
+        for quitAllowed in [false, true] {
+            let update = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: quitAllowed) }
+            XCTAssertEqual(update?.step, .running)
+            XCTAssertEqual(update?.message, message("updated"))
+            XCTAssertEqual(update?.partial, false)
+            let trashed = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: quitAllowed) }
+            XCTAssertEqual(trashed?.step, .running)
+            XCTAssertEqual(trashed?.message, message("moved to the Trash"))
+            XCTAssertEqual(trashed?.partial, false)
+        }
+        XCTAssertThrowsError(try installer().isRunning(Self.breaks)) { error in
+            XCTAssertEqual((error as? InstallFailure)?.message, message("changed"))
+        }
+        XCTAssertEqual(downloader.calls.get(), 0)
+        XCTAssertEqual(running.quits.get(), [])
+        XCTAssertEqual(AppInstaller.identity(target), old)
+        XCTAssertEqual(version(user.appendingPathComponent("Breaks.app")), "0.0.8", "the other copy is not moved either")
+        XCTAssertEqual(names(trashFolder), [])
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        assertNoLeftovers()
+
+        // Through a link to the folder, the copy is still this app's.
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: system.path)
+        ownExecutable = link.appendingPathComponent("Breaks.app/Contents/MacOS/Breaks").path
+        let viaLink = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
+        XCTAssertEqual(viaLink?.step, .running)
+        XCTAssertEqual(AppInstaller.identity(target), old)
     }
 
     func testMoveToTrashOfAnotherAppWithTheSameNameRemovesTheReceipt() async throws {
@@ -502,6 +587,9 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(pids, [1, 2, 3, 4, 5])
         XCTAssertEqual(calls, 2)
         XCTAssertTrue(try WorkspaceRunningApps.allPids().contains(getpid()), "the real list holds this process")
+        // This process counts as running from the bundle that holds it, so its copy is never taken for a stopped one.
+        let own = try XCTUnwrap(WorkspaceRunningApps.ownExecutable())
+        XCTAssertTrue(try WorkspaceRunningApps().processes(inside: URL(fileURLWithPath: own).deletingLastPathComponent()).contains(getpid()))
     }
 
     func testAnUpdateThatFailsAfterUpdatingOneCopySaysWhatItChanged() async throws {
