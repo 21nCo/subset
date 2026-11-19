@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 @testable import SubsetCore
 import XCTest
@@ -170,5 +171,34 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         guard case .failed? = actions.activities["breaks"] else { return XCTFail("\(String(describing: actions.activities["breaks"]))") }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: system.path), [])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [])
+    }
+
+    func testARowIsEnabledAgainOnlyOnceItsNewStateIsListed() async throws {
+        let (actions, model) = await actions()
+        var seen: [String?] = []
+        let watch = actions.$activities.sink { activities in
+            if case .succeeded? = activities["breaks"] { seen.append(model.installed["breaks"]?.first?.versionLabel) }
+        }
+        actions.install("breaks")
+        await actions.wait("breaks")
+        watch.cancel()
+        XCTAssertEqual(seen, ["0.1.0"], "the install's message and the enabled row come with the app listed")
+    }
+
+    func testOnceQuittingStartsNoOperationOrPendingQuitStarts() async throws {
+        try makeBundle(system.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.9")
+        let running = FakeRunning()
+        running.running.update { $0.insert(self.system.appendingPathComponent("Breaks.app").path) }
+        let (actions, _) = await actions(running: running)
+        actions.update("breaks")
+        let pending = try XCTUnwrap(actions.quitRequest)
+        await actions.cancelAll()
+        XCTAssertNil(actions.quitRequest, "the question is withdrawn")
+        actions.confirmQuit(pending)
+        actions.moveToTrash("breaks")
+        actions.install("breaks")
+        XCTAssertFalse(actions.isWorking)
+        XCTAssertNil(actions.activities["breaks"])
+        XCTAssertEqual(running.quits.get(), [])
     }
 }

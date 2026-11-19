@@ -5,7 +5,18 @@ import Foundation
 /// Moves an app to the Trash; `SystemTrash` uses the user's Trash, tests a folder.
 public protocol Trashing: Sendable {
     /// Moves `bundle` to the Trash and returns where it is there. Never deletes it.
-    func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed
+}
+
+/// Where a moved copy is in the Trash, and why it still has its hidden name there when it could not be renamed.
+public struct Trashed: Sendable {
+    public var url: URL
+    public var renameFailure: String?
+
+    /// What to tell the user when the copy kept its hidden name (Finder does not show it), or nil.
+    var hiddenNote: String? {
+        renameFailure.map { "It is in the Trash under the hidden name \(url.path) because it could not be renamed there (\($0)); in Finder, press Command-Shift-Period to see it." }
+    }
 }
 
 /// The user's Trash, through FileManager.trashItem (the Trash of the bundle's volume). A copy set aside under a hidden
@@ -13,7 +24,7 @@ public protocol Trashing: Sendable {
 public struct SystemTrash: Trashing {
     public init() {}
 
-    public func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
+    public func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         var result: NSURL?
         do {
             try FileManager.default.trashItem(at: bundle, resultingItemURL: &result)
@@ -21,8 +32,17 @@ public struct SystemTrash: Trashing {
             throw InstallFailure(.trash, "\(bundle.path) cannot be moved to the Trash (\(error.localizedDescription))")
         }
         guard let trashed = result as URL? else { throw InstallFailure(.trash, "the Trash did not say where \(bundle.path) went") }
-        guard trashed.lastPathComponent.hasPrefix(".") else { return trashed }
-        return (try? FolderTrash.renameInto(trashed.deletingLastPathComponent(), trashed, appName: appName, at: date)) ?? trashed
+        return Self.name(trashed, appName: appName, at: date)
+    }
+
+    /// Renames a copy that reached the Trash under its hidden name; the move is done, so a failure is only reported.
+    static func name(_ trashed: URL, appName: String, at date: Date) -> Trashed {
+        guard trashed.lastPathComponent.hasPrefix(".") else { return Trashed(url: trashed) }
+        do {
+            return Trashed(url: try FolderTrash.renameInto(trashed.deletingLastPathComponent(), trashed, appName: appName, at: date))
+        } catch {
+            return Trashed(url: trashed, renameFailure: (error as? InstallFailure)?.message ?? error.localizedDescription)
+        }
     }
 }
 
@@ -35,8 +55,8 @@ public struct FolderTrash: Trashing {
         self.folder = folder
     }
 
-    public func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
-        try Self.renameInto(folder, bundle, appName: appName, at: date)
+    public func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
+        Trashed(url: try Self.renameInto(folder, bundle, appName: appName, at: date))
     }
 
     static func renameInto(_ folder: URL, _ bundle: URL, appName: String, at date: Date) throws -> URL {
@@ -56,11 +76,13 @@ public struct FolderTrash: Trashing {
 /// Finds and quits the processes of an installed copy; `WorkspaceRunningApps` asks the system, tests a stand-in.
 public protocol RunningAppControlling: Sendable {
     /// The pids of the processes whose executable is inside `bundle` (its helpers too). Throws when the list of running
-    /// processes cannot be read, so a running app is never taken for one that is not.
+    /// processes, or the executable of one that still runs, cannot be read, so a running app is never taken for one that
+    /// is not.
     func processes(inside bundle: URL) throws -> [pid_t]
     /// Asks each running app at `bundle` to quit (NSRunningApplication.terminate(), never a force quit), then waits up
-    /// to `timeout` seconds for every process inside it to exit; returns the pids still running.
-    func quit(_ bundle: URL, timeout: TimeInterval) async throws -> [pid_t]
+    /// to `timeout` seconds for every process inside it to exit. Returns the pids still running and whether an app was
+    /// asked to quit; when none was (only helpers run), it returns at once. Throws only before any app is asked.
+    func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool)
     /// Opens the app at `bundle` again after it was quit for an update; returns why it could not, or nil.
     func reopen(_ bundle: URL) async -> String?
 }
@@ -70,11 +92,25 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     public init() {}
 
     /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
+    /// The bundle is matched as given and by its real path (libproc reports /private/var for /var). A process whose
+    /// executable cannot be read refuses, unless it no longer runs.
     public func processes(inside bundle: URL) throws -> [pid_t] {
-        let roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path]).map { $0 + "/" }
-        return try Self.allPids().filter { pid in
-            guard pid > 0, let executable = Self.executable(of: pid) else { return false }
-            return roots.contains { executable.hasPrefix($0) }
+        try Self.processes(inside: bundle, among: Self.allPids()) { pid in
+            let path = Self.executable(of: pid)
+            return (path, path == nil ? errno : 0)
+        }
+    }
+
+    /// Those of `pids` whose executable (or the errno of reading it) is inside `bundle`.
+    static func processes(inside bundle: URL, among pids: [pid_t], executable: (pid_t) -> (path: String?, errno: Int32)) throws -> [pid_t] {
+        let roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path, AppInstaller.realPath(bundle.path)].compactMap { $0 }).map { $0 + "/" }
+        return try pids.filter { pid in
+            guard pid > 0 else { return false }
+            let (path, code) = executable(pid)
+            if let path { return roots.contains { path.hasPrefix($0) } }
+            // ESRCH: it has exited (or is a zombie); anything else leaves it unknown.
+            if code == ESRCH { return false }
+            throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code)))), so nothing was changed")
         }
     }
 
@@ -105,18 +141,20 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         throw unreadable("the list of processes kept growing")
     }
 
-    public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> [pid_t] {
+    public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool) {
         let mine = Set(try processes(inside: bundle))
-        await MainActor.run {
+        let asked = await MainActor.run {
             // This app is never asked to quit itself (the installer refuses such a copy first); it stays in what is left.
-            for app in NSWorkspace.shared.runningApplications where mine.contains(app.processIdentifier) && app.processIdentifier != getpid() {
-                app.terminate()
-            }
+            let apps = NSWorkspace.shared.runningApplications.filter { mine.contains($0.processIdentifier) && $0.processIdentifier != getpid() }
+            for app in apps { app.terminate() }
+            return !apps.isEmpty
         }
+        guard asked else { return (Array(mine), false) }
         let until = Date().addingTimeInterval(timeout)
         while true {
-            let left = try processes(inside: bundle)
-            if left.isEmpty || Date() >= until { return left }
+            // Once apps were asked, an unreadable list counts as still running, so this no longer throws.
+            let left = (try? processes(inside: bundle)) ?? Array(mine)
+            if left.isEmpty || Date() >= until { return (left, true) }
             await ToolRunner.pause(nanoseconds: 200_000_000)
         }
     }

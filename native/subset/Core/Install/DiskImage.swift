@@ -46,14 +46,21 @@ public struct HdiutilDiskImages: DiskImageAttaching {
         return false
     }
 
-    // The devices `hdiutil info` lists for `image` (by any name `imagePaths` gives it), or nil when hdiutil info fails.
+    // The devices `hdiutil info` lists for `image`, or nil when hdiutil info fails.
     private func attachedDevices(of image: URL) async -> [String]? {
         guard let run = try? await ToolRunner.run(Self.hdiutil, ["info", "-plist"], timeout: 60, cancellable: false),
               run.status == 0, let info = Self.plist(run.stdout)
         else { return nil }
-        let names = Self.imagePaths(of: image)
+        return Self.devices(of: image, in: info)
+    }
+
+    /// The whole-disk devices `hdiutil info` lists for `image`, matched by any name `imagePaths` gives it in either its
+    /// image-path or its image-alias (which may be the only one with the name it was attached by).
+    static func devices(of image: URL, in info: [String: Any]) -> [String] {
+        let names = imagePaths(of: image)
         let images = info["images"] as? [[String: Any]] ?? []
-        return images.filter { names.contains($0["image-path"] as? String ?? "") }.flatMap { Self.wholeDisks(in: $0["system-entities"]) }
+        return images.filter { entry in ["image-path", "image-alias"].contains { names.contains(entry[$0] as? String ?? "") } }
+            .flatMap { wholeDisks(in: $0["system-entities"]) }
     }
 
     /// The names `hdiutil info` may give `image`, as install.mjs matches them: the path it was attached with and its
@@ -67,7 +74,7 @@ public struct HdiutilDiskImages: DiskImageAttaching {
         return names
     }
 
-    private static func plist(_ data: Data) -> [String: Any]? {
+    static func plist(_ data: Data) -> [String: Any]? {
         (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
     }
 

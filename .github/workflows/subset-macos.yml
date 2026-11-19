@@ -41,15 +41,23 @@ jobs:
           sudo xcode-select --switch "$xcode/Contents/Developer"
           xcodebuild -version
 
+      # Built on its own step with a time limit, so a compiler that stops making progress is named (Swift 6.3 hung in
+      # ClosureLifetimeFixup on one test, SET-247) instead of using up the job.
+      - name: Build package tests
+        timeout-minutes: 15
+        run: swift build --build-tests
+
       # Includes RealInstallTests' refusal of an ad-hoc signed app at the team requirement, with the real hdiutil and
       # Security framework (SET-247).
       - name: Package tests
+        timeout-minutes: 10
         run: swift test
 
       # SET-247: installs the immutable Breaks 0.1.0 release asset (the fixture feed's live channel and SHA-256) into
       # temporary folders with the real hdiutil, ditto, Security framework and Gatekeeper, verifies it, and moves it to a
       # test Trash folder. The one download these checks make.
       - name: Install Breaks 0.1.0 with the real tools
+        timeout-minutes: 10
         env:
           SUBSET_LIVE_INSTALL: '1'
         run: swift test --filter RealInstallTests

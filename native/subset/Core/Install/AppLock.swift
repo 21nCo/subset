@@ -36,7 +36,9 @@ struct AppLock {
         }
         for name in names where name != mine {
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
-            guard parts.count == 4, parts[0] == key, parts[3] == "lock", parts[2].count == 12, let pid = pid_t(parts[1]), pid > 0 else { continue }
+            // lock.mjs's grammar, `<key>.<digits>.<12 lowercase hex>.lock`; any other name is left alone.
+            guard parts.count == 4, parts[0] == key, parts[3] == "lock", Self.isRandom(parts[2]), parts[1].allSatisfy({ ("0"..."9").contains($0) }),
+                  let pid = pid_t(parts[1]), pid > 0 else { continue }
             if pid == getpid() || running(pid) {
                 release()
                 let who = pid == getpid() ? "Subset is already installing, updating or moving it to the Trash"
@@ -58,6 +60,10 @@ struct AppLock {
     /// Whether process `pid` runs (one of another user counts).
     static func processRuns(_ pid: pid_t) -> Bool {
         kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    static func isRandom(_ text: Substring) -> Bool {
+        text.count == 12 && text.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
     }
 
     /// 12 lowercase hex digits.

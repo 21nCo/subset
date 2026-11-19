@@ -34,24 +34,17 @@ final class RealInstallTests: XCTestCase {
         )
     }
 
+    /// Runs a tool with a time limit (ToolRunner), so a stuck tool fails the test instead of holding the CI job.
     @discardableResult
-    private func run(_ tool: String, _ arguments: [String]) throws -> String {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: tool)
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let text = String(decoding: data, as: UTF8.self)
-        guard process.terminationStatus == 0 else { throw NSError(domain: tool, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text]) }
+    private func run(_ tool: String, _ arguments: [String]) async throws -> String {
+        let result = try await ToolRunner.run(tool, arguments, timeout: 120)
+        let text = String(decoding: result.stdout, as: UTF8.self)
+        guard result.status == 0 else { throw NSError(domain: tool, code: Int(result.status ?? -1), userInfo: [NSLocalizedDescriptionKey: text + result.stderr]) }
         return text
     }
 
     /// Breaks.app with a real Mach-O executable (a copy of /usr/bin/true), signed ad hoc unless `sign` is false.
-    private func makeProbeApp(in folder: URL, sign: Bool) throws -> URL {
+    private func makeProbeApp(in folder: URL, sign: Bool) async throws -> URL {
         let bundle = folder.appendingPathComponent("Breaks.app")
         try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0", build: "12", minimumMacOS: "14.0")
         let info = bundle.appendingPathComponent("Contents/Info.plist")
@@ -61,7 +54,7 @@ final class RealInstallTests: XCTestCase {
         let executable = bundle.appendingPathComponent("Contents/MacOS/Breaks")
         if sign {
             try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: executable.path)
-            try run("/usr/bin/codesign", ["--force", "--sign", "-", bundle.path])
+            try await run("/usr/bin/codesign", ["--force", "--sign", "-", bundle.path])
         } else {
             try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
             chmod(executable.path, 0o755)
@@ -71,10 +64,10 @@ final class RealInstallTests: XCTestCase {
 
     func testAnAdHocSignedAppIsRefusedAtTheTeamRequirement() async throws {
         let source = root.appendingPathComponent("image")
-        try makeProbeApp(in: source, sign: true)
+        try await makeProbeApp(in: source, sign: true)
         try FileManager.default.createSymbolicLink(atPath: source.appendingPathComponent("Applications").path, withDestinationPath: "/Applications")
         let dmg = root.appendingPathComponent("Breaks.dmg")
-        try run("/usr/bin/hdiutil", ["create", "-quiet", "-srcfolder", source.path, "-volname", "Breaks", "-fs", "HFS+", "-format", "UDZO", dmg.path])
+        try await run("/usr/bin/hdiutil", ["create", "-quiet", "-srcfolder", source.path, "-volname", "Breaks", "-fs", "HFS+", "-format", "UDZO", dmg.path])
         let bytes = try Data(contentsOf: dmg)
         var app = AppInstallerTests.breaks
         app.live?.sha256 = AppInstallerTests.hex(bytes)
@@ -89,11 +82,33 @@ final class RealInstallTests: XCTestCase {
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Applications").path), [])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [], "the private folder is removed")
-        XCTAssertFalse(try run("/usr/bin/hdiutil", ["info"]).contains(root.appendingPathComponent("tmp").resolvingSymlinksInPath().path), "the image is detached")
+        let info = try await run("/usr/bin/hdiutil", ["info"])
+        XCTAssertFalse(info.contains(root.appendingPathComponent("tmp").resolvingSymlinksInPath().path), "the image is detached")
+    }
+
+    // An attach cancelled at any moment, attached or not yet, leaves this test's own image detached.
+    func testACancelledAttachLeavesTheImageDetached() async throws {
+        try Data("probe".utf8).write(to: root.appendingPathComponent("image/probe.txt"))
+        let dmg = root.appendingPathComponent("tmp/probe.dmg")
+        try await run("/usr/bin/hdiutil", ["create", "-quiet", "-srcfolder", root.appendingPathComponent("image").path, "-volname", "Probe", "-fs", "HFS+", "-format", "UDZO", dmg.path])
+        let mountRoot = root.appendingPathComponent("tmp/mnt")
+        try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
+        let images = HdiutilDiskImages()
+        for delay: UInt64 in [0, 150_000_000, 2_000_000_000] {
+            let attach = Task { try await images.attach(dmg, mountRoot: mountRoot) }
+            try await Task.sleep(nanoseconds: delay)
+            attach.cancel()
+            let devices = (try? await attach.value) ?? []
+            let detached = await images.detach(dmg, devices: devices)
+            XCTAssertTrue(detached, "after \(delay) ns")
+            let text = try await run("/usr/bin/hdiutil", ["info", "-plist"])
+            let info = try XCTUnwrap(HdiutilDiskImages.plist(Data(text.utf8)))
+            XCTAssertEqual(HdiutilDiskImages.devices(of: dmg, in: info), [], "after \(delay) ns this test's image is attached nowhere")
+        }
     }
 
     func testAnUnsignedAppIsRefusedAtTheSignatureCheck() async throws {
-        let bundle = try makeProbeApp(in: root.appendingPathComponent("image"), sign: false)
+        let bundle = try await makeProbeApp(in: root.appendingPathComponent("image"), sign: false)
         do {
             try await SecurityAppVerifier().verify(bundle, expected: ExpectedApp(bundleID: "dev.subset.breaks", version: "0.1.0", build: nil))
             XCTFail("an unsigned app passed")
@@ -121,7 +136,8 @@ final class RealInstallTests: XCTestCase {
         XCTAssertEqual(receipt.path, "/Applications/Breaks.app")
         XCTAssertEqual(receipt.sha256, release.sha256)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [])
-        XCTAssertFalse(try run("/usr/bin/hdiutil", ["info"]).contains("/subset-install-"), "the downloaded image is detached")
+        let info = try await run("/usr/bin/hdiutil", ["info"])
+        XCTAssertFalse(info.contains("/subset-install-"), "the downloaded image is detached")
 
         _ = try await installer.moveToTrash(app, quitAllowed: false)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Applications").path), [])

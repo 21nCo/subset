@@ -481,4 +481,20 @@ final class AppListModelTests: XCTestCase {
         model.stopAutoRefresh()
         XCTAssertEqual(loader.loads, 1)
     }
+
+    // A look for installed apps that ends after a later one has published does not take the list back.
+    func testAnOlderScanThatEndsLastDoesNotRevertWhatIsInstalled() async throws {
+        try install("Breaks", "dev.subset.breaks", version: "0.0.9")
+        let gated = GatedFinder(finder, gatedCall: 2)
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+        await model.refresh()
+        let older = Task { await model.reloadInstalled() }
+        try await waitUntil({ gated.isWaiting }, stopping: older, release: { gated.release() })
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        await model.reloadInstalled()
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
+        gated.release()
+        await older.value
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the older, empty scan is not published")
+    }
 }

@@ -337,16 +337,20 @@ final class AppInstallerTests: XCTestCase {
 
     func testARunningAppIsQuitOnlyAfterTheNewCopyIsVerifiedAndThenReopened() async throws {
         try installOld()
-        running.running.update { $0.insert(target.path) }
+        let path = target.path
+        running.running.update { $0.insert(path) }
         let verified = verifier.verified
-        let target = target
+        // The closure captures a plain path and reads before asserting: a local `target` shadowing the property, captured
+        // here, hung Swift 6.3's ClosureLifetimeFixup (Xcode 26.6 on the macos-26 CI runner) while compiling this file.
         running.onQuit = {
-            XCTAssertEqual(verified.get().count, 1, "quit only once the new copy is verified")
-            XCTAssertEqual(InstalledAppFinder.infoPlist(target.path)?["CFBundleShortVersionString"] as? String, "0.0.9")
+            let count = verified.get().count
+            let installed = InstalledAppFinder.infoPlist(path)?["CFBundleShortVersionString"] as? String
+            XCTAssertEqual(count, 1, "quit only once the new copy is verified")
+            XCTAssertEqual(installed, "0.0.9")
         }
         _ = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
-        XCTAssertEqual(running.quits.get(), [target.path])
-        XCTAssertEqual(running.reopened.get(), [target.path])
+        XCTAssertEqual(running.quits.get(), [path])
+        XCTAssertEqual(running.reopened.get(), [path])
         XCTAssertEqual(version(target), "0.1.0")
     }
 
@@ -414,11 +418,7 @@ final class AppInstallerTests: XCTestCase {
             let marker = root.appendingPathComponent("copied")
             var copying = installer()
             copying.ditto = try holdingCopyTool(marker: marker)
-            let installer = copying
-            let task = Task {
-                if mode == "install" { return try await installer.install(Self.breaks, Self.live) }
-                return try await installer.update(Self.breaks, Self.live, quitAllowed: false)
-            }
+            let task = Self.start(copying, update: mode == "update")
             let deadline = Date().addingTimeInterval(30)
             while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
             XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "\(mode): the copy was made")
@@ -442,6 +442,12 @@ final class AppInstallerTests: XCTestCase {
             XCTAssertEqual(names(trashFolder), [], mode)
             assertNoLeftovers()
         }
+    }
+
+    // Outside the test (a Task closure there that captures the loop's values trips Swift 6.3's region-based isolation
+    // checker, Xcode 26.6 on the macos-26 CI runner).
+    private static func start(_ installer: AppInstaller, update: Bool) -> Task<InstallOutcome, Error> {
+        Task { update ? try await installer.update(breaks, live, quitAllowed: false) : try await installer.install(breaks, live) }
     }
 
     func testCancellingWhileARunningAppQuitsChangesNothingElse() async throws {
@@ -746,6 +752,159 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertTrue(viaLink.contains(realFolder + "/image.dmg"), "\(viaLink)")
         XCTAssertTrue(realFolder.hasPrefix("/private/") || !real.path.hasPrefix("/var/"), realFolder)
     }
+
+    func testTheDiskImageIsFoundByItsImagePathOrItsAlias() {
+        let image = URL(fileURLWithPath: "/tmp/subset-alias-test/image.dmg")
+        let ours: [String: Any] = ["image-path": "/elsewhere/other.dmg", "image-alias": image.path,
+                                   "system-entities": [["dev-entry": "/dev/disk42"], ["dev-entry": "/dev/disk42s1"]]]
+        let byPath: [String: Any] = ["image-path": image.path, "system-entities": [["dev-entry": "/dev/disk44"]]]
+        let other: [String: Any] = ["image-path": "/elsewhere/unrelated.dmg", "system-entities": [["dev-entry": "/dev/disk43"]]]
+        XCTAssertEqual(HdiutilDiskImages.devices(of: image, in: ["images": [ours, byPath, other]]), ["/dev/disk42", "/dev/disk44"])
+    }
+
+    // MARK: - Running detection, interruption and reporting
+
+    func testTheDetectorMatchesTheRealPathAndRefusesAPidItCannotRead() throws {
+        // A bundle in /var/folders whose executable libproc reports under /private/var.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-alias-\(UUID().uuidString)")
+        let bundle = folder.appendingPathComponent("Breaks.app")
+        try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let real = try XCTUnwrap(AppInstaller.realPath(bundle.path))
+        let lookup: (pid_t) -> (path: String?, errno: Int32) = { pid in
+            switch pid {
+            case 10: return (real + "/Contents/MacOS/Breaks", 0)
+            case 11: return (nil, ESRCH)
+            case 12: return ("/Applications/Other.app/Contents/MacOS/Other", 0)
+            default: return (nil, EPERM)
+            }
+        }
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12], executable: lookup), [10])
+        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 13], executable: lookup), "a live pid that cannot be read")
+    }
+
+    func testTheRealDetectorFindsAnAppRunningFromATemporaryFolder() throws {
+        // The temporary folder is under /var/folders, which libproc names /private/var.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-detect-\(UUID().uuidString)")
+        try XCTSkipUnless(folder.path.hasPrefix("/var/"), folder.path)
+        let bundle = folder.appendingPathComponent("Breaks.app")
+        try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let executable = bundle.appendingPathComponent("Contents/MacOS/Breaks")
+        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
+        let process = try Process.run(executable, arguments: ["30"])
+        defer { process.terminate(); process.waitUntilExit() }
+        XCTAssertTrue(try WorkspaceRunningApps().processes(inside: bundle).contains(process.processIdentifier))
+    }
+
+    func testHashingStopsWhenCancelled() async throws {
+        let file = temporary.appendingPathComponent("big.dmg")
+        try Data(count: 3 * 1024 * 1024).write(to: file)
+        let task = Task { () throws -> String in
+            cancelCurrentTask()
+            return try AppInstaller.sha256(of: file)
+        }
+        let result = try? await task.value
+        XCTAssertNil(result, "a cancelled hash throws")
+    }
+
+    func testCancellingOnceTheCopyIsVerifiedQuitsNothing() async throws {
+        let old = try installOld()
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        running.running.update { $0.insert(target.path) }
+        verifier.cancelDuring = true
+        let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(refused?.step, .interrupted)
+        XCTAssertEqual(refused?.partial, false)
+        XCTAssertEqual(running.quits.get(), [])
+        XCTAssertEqual(running.reopened.get(), [])
+        XCTAssertEqual(AppInstaller.identity(target), old)
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        assertNoLeftovers()
+    }
+
+    func testCancellingDuringTheFirstOfTwoQuitsStartsNoOther() async throws {
+        let old = try installOld()
+        let second = user.appendingPathComponent("Breaks.app")
+        try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+        let secondBefore = AppInstaller.identity(second)
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        let paths = [target.path, second.path]
+        running.running.update { $0.formUnion(paths) }
+        running.cancelDuringQuit = true
+        let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
+        XCTAssertEqual(refused?.step, .interrupted)
+        XCTAssertEqual(running.quits.get(), [target.path], "the second copy is not asked to quit")
+        XCTAssertEqual(AppInstaller.identity(target), old)
+        XCTAssertEqual(AppInstaller.identity(second), secondBefore)
+        XCTAssertEqual(names(trashFolder), [])
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        assertNoLeftovers()
+    }
+
+    func testAHelperIsNamedAndOnlyAnAppThatQuitIsReopened() async throws {
+        let old = try installOld()
+        let path = target.path
+        running.helpers.update { $0.insert(path) }
+        let update = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(update?.step, .running)
+        XCTAssertEqual(update?.message, "a helper process of Breaks runs from \(path) (pid 4343) and Subset asks only apps to quit; quit it and try again")
+        let trashed = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
+        XCTAssertEqual(trashed?.step, .running)
+        XCTAssertEqual(trashed?.partial, false)
+        XCTAssertEqual(running.reopened.get(), [], "an app that never ran is not opened")
+        // The app quits but its helper stays: refused, and the app that quit is reopened.
+        running.running.update { $0.insert(path) }
+        let both = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(both?.message, "Breaks is still running 1 seconds after it was asked to quit (pid 4343)")
+        XCTAssertEqual(running.quits.get(), [path])
+        XCTAssertEqual(running.reopened.get(), [path])
+        XCTAssertEqual(AppInstaller.identity(target), old)
+        XCTAssertEqual(names(trashFolder), [])
+        assertNoLeftovers()
+    }
+
+    func testACopyLeftUnderItsHiddenNameInTheTrashIsReportedWithWhy() async throws {
+        try installOld()
+        trash = HiddenTrash(folder: trashFolder)
+        let outcome = try await installer().moveToTrash(Self.breaks, quitAllowed: false)
+        let hidden = try XCTUnwrap(names(trashFolder).first)
+        XCTAssertEqual(outcome.notes.last, "It is in the Trash under the hidden name \(trashFolder.path)/\(hidden) because it could not be renamed there (name taken); in Finder, press Command-Shift-Period to see it.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: receiptFile.path))
+        // SystemTrash's naming step in a Trash folder where the copy cannot be renamed keeps the hidden name and says why.
+        let folder = root.appendingPathComponent("ReadOnlyTrash")
+        let moved = folder.appendingPathComponent(".Breaks.app.subset-trash-1-aaaaaaaaaaaa")
+        try makeBundle(moved, bundleID: "dev.subset.breaks", version: "0.0.9")
+        chmod(folder.path, 0o555)
+        defer { chmod(folder.path, 0o755) }
+        let named = SystemTrash.name(moved, appName: "Breaks", at: Self.installedAt)
+        XCTAssertEqual(named.url, moved)
+        XCTAssertNotNil(named.renameFailure)
+    }
+
+    func testCopiesBesideAnAppPathThatIsNotAFolderAreNamedNotMoved() throws {
+        for kind in ["file", "link"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let saved = system.appendingPathComponent(".Breaks.app.subset-update-99999-aaaaaaaaaaaa")
+            try makeBundle(saved, bundleID: "dev.subset.breaks", version: "0.0.9")
+            if kind == "file" { try Data("x".utf8).write(to: target) } else { try FileManager.default.createSymbolicLink(at: target, withDestinationURL: user) }
+            let notes = installer().recover(Self.breaks)
+            XCTAssertEqual(notes, ["\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of Breaks beside it at \(saved.path)."], kind)
+            XCTAssertEqual(names(system), [saved.lastPathComponent, "Breaks.app"], kind)
+            XCTAssertEqual(version(saved), "0.0.9", kind)
+        }
+    }
+
+    func testLockFilesOutsideTheSharedGrammarAreLeftAlone() async throws {
+        try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: true)
+        let key = Self.hex(Data("dev.subset.breaks".utf8))
+        let live = getppid()
+        let malformed = ["\(key).\(live).ABCDEF012345.lock", "\(key).+\(live).abcdef012345.lock", "\(key).99999.abcdef01234z.lock"].sorted()
+        for name in malformed { FileManager.default.createFile(atPath: locks.appendingPathComponent(name).path, contents: Data()) }
+        _ = try await installer().install(Self.breaks, Self.live)
+        XCTAssertEqual(names(locks), malformed, "neither refused by nor removed")
+    }
 }
 
 /// The fields one refusal case changes.
@@ -762,7 +921,7 @@ struct CheckingTrash: Trashing {
     var target: URL
     let versionsInPlace = Recorder<[String?]>([])
 
-    func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         versionsInPlace.update { $0.append(InstalledAppFinder.infoPlist(target.path)?["CFBundleShortVersionString"] as? String) }
         return try inner.trash(bundle, appName: appName, at: date)
     }
@@ -772,8 +931,19 @@ struct CheckingTrash: Trashing {
 struct CancellingTrash: Trashing {
     var inner: any Trashing
 
-    func trash(_ bundle: URL, appName: String, at date: Date) throws -> URL {
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         defer { cancelCurrentTask() }
         return try inner.trash(bundle, appName: appName, at: date)
+    }
+}
+
+/// Moves a copy into `folder` under its own (hidden) name, as the Trash does when the rename there fails.
+struct HiddenTrash: Trashing {
+    var folder: URL
+
+    func trash(_ bundle: URL, appName _: String, at _: Date) throws -> Trashed {
+        let moved = folder.appendingPathComponent(bundle.lastPathComponent)
+        try FileManager.default.moveItem(at: bundle, to: moved)
+        return Trashed(url: moved, renameFailure: "name taken")
     }
 }

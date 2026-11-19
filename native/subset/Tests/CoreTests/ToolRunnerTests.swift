@@ -51,6 +51,39 @@ final class ToolRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "done\n")
     }
 
+    func testOutputPastTheCapIsNotKeptAndAWriterIgnoringSIGTERMStillEnds() async throws {
+        let started = Date()
+        let result = try await ToolRunner.run("/bin/sh", ["-c", "trap '' TERM; /usr/bin/yes"], timeout: 60)
+        XCTAssertLessThan(Date().timeIntervalSince(started), ToolRunner.killAfter, "the closed pipe ends it before SIGKILL")
+        XCTAssertNil(result.status)
+        XCTAssertLessThanOrEqual(result.stdout.count, ToolRunner.maxOutputBytes)
+        XCTAssertTrue(result.stderr.contains("stopped: it wrote more than"), result.stderr)
+    }
+
+    func testAStopRacingTheToolsExitAlwaysSettles() async throws {
+        for _ in 0..<40 {
+            let result = try await ToolRunner.run("/usr/bin/true", [], timeout: 0)
+            XCTAssertTrue(result.status == 0 || result.stderr.contains("stopped: it did not finish"), result.stderr)
+        }
+    }
+
+    func testACancelOrTimeoutStopsWhatTheToolStartedWhetherItKeepsOrClosesTheOutput() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-tool-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for (n, redirect) in ["", " >/dev/null 2>&1"].enumerated() {
+            for cancel in [true, false] {
+                let file = folder.appendingPathComponent("\(n)-\(cancel)").path
+                let task = Task { try await ToolRunner.run("/bin/sh", ["-c", "sleep 600\(redirect) & echo $! > \(file).new && mv \(file).new \(file); sleep 600"], timeout: cancel ? 60 : 0.5) }
+                while !FileManager.default.fileExists(atPath: file) { try await Task.sleep(nanoseconds: 20_000_000) }
+                if cancel { task.cancel() }
+                let result = try? await task.value
+                XCTAssertEqual(result == nil, cancel, "a cancel throws, a timeout returns")
+                try assertGone(ToolResult(status: nil, stdout: try Data(contentsOf: URL(fileURLWithPath: file)), stderr: ""))
+            }
+        }
+    }
+
     /// The background sleep whose pid the tool printed no longer runs.
     private func assertGone(_ result: ToolResult, file: StaticString = #filePath, line: UInt = #line) throws {
         let text = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)

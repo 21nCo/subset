@@ -58,6 +58,10 @@ public final class AppListModel: ObservableObject {
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
+    /// Looks for installed apps are numbered as they start; one that ends after a later one has published does not
+    /// publish, so what is shown never goes back to an older state.
+    private var scans = 0
+    private var publishedScan = 0
 
     public init(
         loader: any CatalogLoading, finder: any InstalledAppDetecting, defaults: UserDefaults = .standard,
@@ -147,6 +151,8 @@ public final class AppListModel: ObservableObject {
             }
         }
         var found: [String: [InstalledCopy]] = [:]
+        scans += 1
+        let scan = scans
         if let apps = nextCatalog?.apps {
             let finder = finder
             found = await Task.detached { finder.detect(apps) }.value
@@ -155,15 +161,23 @@ public final class AppListModel: ObservableObject {
         catalog = nextCatalog
         fetchedAt = nextFetchedAt
         status = nextStatus
-        installed = found
+        if scan > publishedScan {
+            publishedScan = scan
+            installed = found
+        }
     }
 
     /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog.
     public func reloadInstalled() async {
         guard let apps = catalog?.apps else { return }
+        scans += 1
+        let scan = scans
         let finder = finder
         let found = await Task.detached { finder.detect(apps) }.value
-        installed = found
+        if scan > publishedScan {
+            publishedScan = scan
+            installed = found
+        }
     }
 
     /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel

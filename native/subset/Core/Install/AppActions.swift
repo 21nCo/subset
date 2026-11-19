@@ -37,6 +37,8 @@ public final class AppActions: ObservableObject {
     private let installer: AppInstaller
     private let model: AppListModel
     private var tasks: [String: Task<Void, Never>] = [:]
+    /// Set once Subset is quitting: no operation starts any more.
+    private var closed = false
 
     public init(installer: AppInstaller, model: AppListModel) {
         self.installer = installer
@@ -68,19 +70,20 @@ public final class AppActions: ObservableObject {
     /// Whether any operation is running.
     public var isWorking: Bool { !tasks.isEmpty }
 
-    /// Cancels every running operation and waits until each has cleaned up (when Subset quits): before its last step
-    /// nothing is changed, and after it the app is in place.
+    /// Stops new operations (and drops a pending quit question), cancels every running one and waits until each has
+    /// cleaned up (when Subset quits): before its last step nothing is changed, and after it the app is in place.
     public func cancelAll() async {
-        let running = Array(tasks.values)
-        for task in running { task.cancel() }
-        for task in running { await task.value }
+        closed = true
+        quitRequest = nil
+        for task in tasks.values { task.cancel() }
+        while let task = tasks.values.first { await task.value }
     }
 
     /// Waits for the app's running operation, if any (tests).
     public func wait(_ appID: String) async { await tasks[appID]?.value }
 
     private func start(_ appID: String, kind: QuitRequest.Kind?, quitAllowed: Bool) {
-        guard tasks[appID] == nil, let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
+        guard !closed, tasks[appID] == nil, let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
         let copies = model.installed[appID] ?? []
         let release: ChosenRelease?
         switch kind {
@@ -142,10 +145,11 @@ public final class AppActions: ObservableObject {
         }
     }
 
+    /// The row is enabled again only once what is installed has been looked for again, so its next action sees it.
     private func finish(_ appID: String, _ message: AppActivity) async {
+        await model.reloadInstalled()
         tasks[appID] = nil
         activities[appID] = message
-        await model.reloadInstalled()
     }
 
     private nonisolated static func join(_ first: String, _ notes: [String]) -> String {

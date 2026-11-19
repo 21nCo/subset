@@ -169,12 +169,13 @@ public struct AppInstaller: Sendable {
                         guard Self.identity(target) == identity else {
                             throw InstallFailure(.running, "\(copy.path) was replaced since it was checked, so it was not quit or updated")
                         }
-                        quit = true
+                        // A cancel once the copy is verified quits nothing.
+                        try Task.checkCancellation()
                         progress(.quitting)
-                        let left = try await running.quit(target, timeout: quitTimeout)
-                        if !left.isEmpty {
-                            throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
-                        }
+                        let (left, asked) = try await running.quit(target, timeout: quitTimeout)
+                        // Only an app that was asked to quit is reopened.
+                        quit = asked
+                        try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
                     }) { staged in
                         old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
@@ -194,7 +195,8 @@ public struct AppInstaller: Sendable {
                     progress(.movingToTrash)
                     do {
                         let trashed = try trash.trash(old, appName: app.appName, at: clock())
-                        notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)")
+                        notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)")
+                        if let hidden = trashed.hiddenNote { notes.add(hidden) }
                     } catch let failure as InstallFailure {
                         notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
                     }
@@ -224,13 +226,13 @@ public struct AppInstaller: Sendable {
                 guard Self.identity(bundle) == identities[copy.path] else {
                     throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was not quit or moved")
                 }
+                // A cancel during one quit starts no other.
+                try Task.checkCancellation()
                 progress(.quitting)
+                let (left, asked) = try await running.quit(bundle, timeout: quitTimeout)
                 // Quitting changes something even when nothing is moved afterwards.
-                notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true)
-                let left = try await running.quit(bundle, timeout: quitTimeout)
-                if !left.isEmpty {
-                    throw InstallFailure(.running, "\(app.name) is still running \(Int(quitTimeout)) seconds after it was asked to quit (\(Self.pids(left)))")
-                }
+                if asked { notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true) }
+                try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
             }
             progress(.movingToTrash)
             for copy in copies {
@@ -248,7 +250,8 @@ public struct AppInstaller: Sendable {
                 }
                 do {
                     let trashed = try trash.trash(aside, appName: app.appName, at: clock())
-                    notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.path)", changed: true)
+                    notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)", changed: true)
+                    if let hidden = trashed.hiddenNote { notes.add(hidden, changed: true) }
                 } catch let failure as InstallFailure {
                     throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle))
                 }
@@ -558,7 +561,11 @@ public struct AppInstaller: Sendable {
             guard !found.isEmpty else { continue }
             let target = folder.directory.appendingPathComponent("\(app.appName).app")
             var present = Self.identity(target) != nil
-            if present, !BoundedFile.isDirectory(target.path) { continue }
+            if present, !BoundedFile.isDirectory(target.path) {
+                // Not an app folder (a link or a file): nothing is put back over it or renamed beside it, only named.
+                notes.append("\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of \(app.name) beside it at \(found.map(\.file.path).joined(separator: ", ")).")
+                continue
+            }
             let busy = found.first { $0.pid != getpid() && AppLock.processRuns($0.pid) }
             let unfinished = found.filter { $0.kind != "old" }
             if !present, !unfinished.isEmpty {
@@ -664,7 +671,10 @@ public struct AppInstaller: Sendable {
         guard let handle = FileHandle(forReadingAtPath: file.path) else { throw InstallFailure(.checksum, "the download cannot be read") }
         defer { try? handle.close() }
         var hash = SHA256()
-        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { hash.update(data: chunk) }
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try Task.checkCancellation()
+            hash.update(data: chunk)
+        }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
@@ -689,6 +699,16 @@ public struct AppInstaller: Sendable {
     }
 
     static func pids(_ pids: [pid_t]) -> String { "pid " + pids.map(String.init).joined(separator: ", ") }
+
+    /// Refuses when processes of the copy still run after the quit: helpers alone (no app to ask, and force quit is never
+    /// used), or an app that did not exit in time.
+    static func refuseLeft(_ left: [pid_t], asked: Bool, _ app: CatalogApp, at path: String, _ timeout: TimeInterval) throws {
+        guard !left.isEmpty else { return }
+        guard asked else {
+            throw InstallFailure(.running, "a helper process of \(app.name) runs from \(path) (\(pids(left))) and Subset asks only apps to quit; quit it and try again")
+        }
+        throw InstallFailure(.running, "\(app.name) is still running \(Int(timeout)) seconds after it was asked to quit (\(pids(left)))")
+    }
 
     static func errnoText() -> String { String(cString: strerror(errno)) }
 }

@@ -170,6 +170,7 @@ private struct AppRowView: View {
             Label(text, systemImage: symbol).font(.caption).foregroundStyle(color).textSelection(.enabled)
             Button { actions.dismiss(row.id) } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless).font(.caption).help("Dismiss")
+                .accessibilityLabel("Dismiss message")
         }
     }
 

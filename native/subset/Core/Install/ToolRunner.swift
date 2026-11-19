@@ -17,7 +17,8 @@ struct ToolResult: Sendable {
 /// an answer to a licence prompt), as `runTool` in verify.mjs does. The tool runs in its own process group, so it and
 /// every process it starts are stopped together: after `timeout`, when it writes more than 1 MiB, or when the calling
 /// task is cancelled and `cancellable` is true, the group is sent SIGTERM, then SIGKILL 5 seconds later, and the result
-/// has no status. A stopped tool settles once its output has ended and its group is empty, or 5 seconds after the
+/// has no status. Past 1 MiB nothing more is kept and the output pipes are closed, so a writer that ignores SIGTERM ends
+/// on SIGPIPE. A stopped tool settles once its output has ended and its group is empty, or 5 seconds after the
 /// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
@@ -54,8 +55,10 @@ private final class ToolRun: @unchecked Sendable {
     private var stderr = Data()
     /// The output pipes not yet at their end.
     private var open = 2
-    /// The wait status once the tool has exited and been reaped.
+    /// The wait status once the tool has exited and been reaped (on `queue`, so a signal never reaches a reused pid).
     private var waitStatus: Int32?
+    /// Why the tool's exit status could not be read, when waiting for it failed.
+    private var waitFailure: String?
     private var stopping: String?
     private var givenUp = false
     private var finished: ToolResult?
@@ -119,11 +122,14 @@ private final class ToolRun: @unchecked Sendable {
             }
             queue.asyncAfter(deadline: .now() + timeout) { [self] in stopOnQueue("it did not finish in \(String(format: "%g", timeout)) seconds") }
         }
-        // Reaps the tool; a blocking wait on its own thread, as Process does.
+        // Waits for the tool to exit on its own thread without reaping it (WNOWAIT): it stays a zombie holding its pid and
+        // group until `reap` runs on `queue`, where every signal is sent, so no signal reaches a pid reused meanwhile.
         Thread { [self, child] in
-            var status: Int32 = 0
-            while waitpid(child, &status, 0) == -1, errno == EINTR {}
-            queue.async { [self] in exited(status) }
+            var info = siginfo_t()
+            var code: Int32 = 0
+            repeat { code = waitid(P_PID, id_t(child), &info, WEXITED | WNOWAIT) } while code == -1 && errno == EINTR
+            let failure = code == 0 ? nil : String(cString: strerror(errno))
+            queue.async { [self] in reap(failure) }
         }.start()
     }
 
@@ -140,23 +146,32 @@ private final class ToolRun: @unchecked Sendable {
         queue.async { [self] in stopOnQueue(reason) }
     }
 
+    /// One read per event, so the timers and stop requests queued meanwhile run between reads.
     private func read(_ fd: Int32, from source: DispatchSourceRead, isOut: Bool) {
         var buffer = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let count = Darwin.read(fd, &buffer, buffer.count)
-            if count > 0 {
-                if isOut { stdout.append(contentsOf: buffer[0..<count]) } else { stderr.append(contentsOf: buffer[0..<count]) }
-                if stdout.count + stderr.count > ToolRunner.maxOutputBytes {
-                    stopOnQueue("it wrote more than \(ToolRunner.maxOutputBytes) bytes")
-                }
-                continue
-            }
-            if count < 0, errno == EINTR { continue }
-            if count < 0, errno == EAGAIN { return }
+        var count: Int
+        repeat { count = Darwin.read(fd, &buffer, buffer.count) } while count < 0 && errno == EINTR
+        if count < 0, errno == EAGAIN { return }
+        guard count > 0 else {
             // The end of the output, or an error reading it.
             source.cancel()
             return
         }
+        let room = max(0, ToolRunner.maxOutputBytes - stdout.count - stderr.count)
+        if isOut { stdout.append(contentsOf: buffer[0..<min(count, room)]) } else { stderr.append(contentsOf: buffer[0..<min(count, room)]) }
+        guard count > room else { return }
+        // Nothing more is kept: the pipes close (a process still writing gets SIGPIPE) and the group is stopped.
+        stopOnQueue("it wrote more than \(ToolRunner.maxOutputBytes) bytes")
+        for source in sources where !source.isCancelled { source.cancel() }
+    }
+
+    /// Reaps the exited tool (on `queue`); a failed wait leaves no status rather than one that looks like success.
+    private func reap(_ failure: String?) {
+        var status: Int32 = 0
+        var reaped: pid_t = -1
+        if failure == nil { repeat { reaped = waitpid(pid, &status, WNOHANG) } while reaped == -1 && errno == EINTR }
+        if reaped != pid { waitFailure = failure ?? (reaped == -1 ? String(cString: strerror(errno)) : "it was not reaped") }
+        exited(status)
     }
 
     private func exited(_ status: Int32) {
@@ -185,8 +200,10 @@ private final class ToolRun: @unchecked Sendable {
         }
     }
 
-    /// Signals the tool's group, even when the tool itself has exited; the tool alone when it left its group.
+    /// Signals the tool's group, even when the tool itself has exited; the tool alone (still unreaped, so its pid is
+    /// its own) when it left its group. Once the tool is reaped and its group is empty, nothing is signalled.
     private func signal(_ signal: Int32) {
+        if waitStatus != nil, groupGone { return }
         if killpg(pid, signal) != 0, waitStatus == nil { kill(pid, signal) }
     }
 
@@ -206,7 +223,7 @@ private final class ToolRun: @unchecked Sendable {
         guard settled else { return }
         var text = String(decoding: stderr, as: UTF8.self)
         var status: Int32?
-        if let waitStatus, stopping == nil {
+        if let waitFailure { text += "\nits exit status could not be read (\(waitFailure))" } else if let waitStatus, stopping == nil {
             // WIFEXITED and WEXITSTATUS, which Swift does not import.
             if waitStatus & 0x7f == 0 { status = (waitStatus >> 8) & 0xff } else { text += "\nended by signal \(waitStatus & 0x7f)" }
         }
