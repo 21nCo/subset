@@ -771,30 +771,42 @@ final class AppInstallerTests: XCTestCase {
         try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
         defer { try? FileManager.default.removeItem(at: folder) }
         let real = try XCTUnwrap(AppInstaller.realPath(bundle.path))
-        let lookup: (pid_t) -> (path: String?, errno: Int32) = { pid in
+        let look: (pid_t) -> WorkspaceRunningApps.ProcessLook = { pid in
             switch pid {
-            case 10: return (real + "/Contents/MacOS/Breaks", 0)
-            case 11: return (nil, ESRCH)
-            case 12: return ("/Applications/Other.app/Contents/MacOS/Other", 0)
-            default: return (nil, EPERM)
+            case 10: return .path(real + "/Contents/MacOS/Breaks")
+            case 11: return .exited
+            case 12: return .path("/Applications/Other.app/Contents/MacOS/Other")
+            case 13: return .otherUser
+            default: return .unknown(EPERM)
             }
         }
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12], executable: lookup), [10])
-        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 13], executable: lookup), "a live pid that cannot be read")
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13], look: look), [10])
+        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 14], look: look), "a live process of this user that cannot be named")
     }
 
-    func testTheRealDetectorFindsAnAppRunningFromATemporaryFolder() throws {
-        // The temporary folder is under /var/folders, which libproc names /private/var.
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-detect-\(UUID().uuidString)")
-        try XCTSkipUnless(folder.path.hasPrefix("/var/"), folder.path)
+    // A real process in a /var/folders bundle is found by the bundle's real path. Once its executable is deleted libproc
+    // cannot name it (ESRCH, as for one that exited); the path it was started with still does, so it is still found
+    // inside its bundle and blocks nothing else.
+    func testAProcessWhoseExecutableWasDeletedIsStillFoundByTheBundle() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-deleted-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
         let bundle = folder.appendingPathComponent("Breaks.app")
         try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
-        defer { try? FileManager.default.removeItem(at: folder) }
         let executable = bundle.appendingPathComponent("Contents/MacOS/Breaks")
         try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
-        let process = try Process.run(executable, arguments: ["30"])
-        defer { process.terminate(); process.waitUntilExit() }
-        XCTAssertTrue(try WorkspaceRunningApps().processes(inside: bundle).contains(process.processIdentifier))
+        let signed = try await ToolRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", executable.path], timeout: 60)
+        XCTAssertEqual(signed.status, 0, signed.stderr)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["30"]
+        try process.run()
+        defer { process.terminate() }
+        // Running: libproc names it under /private/var, the bundle's real path, for this /var/folders bundle.
+        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [process.processIdentifier])
+        try FileManager.default.removeItem(at: executable)
+        XCTAssertNil(WorkspaceRunningApps.executable(of: process.processIdentifier), "libproc no longer names it")
+        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [process.processIdentifier])
+        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: folder.appendingPathComponent("Other.app")), [])
     }
 
     func testHashingStopsWhenCancelled() async throws {
@@ -866,9 +878,14 @@ final class AppInstallerTests: XCTestCase {
 
     func testACancelAsksNoFurtherAppToQuit() async throws {
         let asked = await Task { () -> [Int] in
-            WorkspaceRunningApps.ask([1, 2, 3]) { app in if app == 1 { cancelCurrentTask() } }
+            WorkspaceRunningApps.ask([1, 2, 3]) { app in
+                if app == 1 { cancelCurrentTask() }
+                return true
+            }
         }.value
         XCTAssertEqual(asked, [1], "the request made is kept; no further one is made")
+        // terminate() is false for an app that exited before it was asked: it does not count as asked (nor reopened).
+        XCTAssertEqual(WorkspaceRunningApps.ask([1, 2, 3]) { $0 != 2 }, [1, 3])
     }
 
     func testAHelperThatExitedBeforeTheQuitIsNotAReasonToRefuse() async throws {

@@ -68,30 +68,42 @@ final class GatedLoader: CatalogLoading, @unchecked Sendable {
     }
 }
 
-/// Detects with `finder`, except that call number `gatedCall` (from 1) waits until `release`, then finds nothing.
+/// Detects with `finder`, except that call numbers `gatedCalls` (from 1) wait until `release`, then find nothing.
 final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
     private let finder: InstalledAppFinder
-    private let gatedCall: Int
+    private let gatedCalls: Set<Int>
     private let lock = NSLock()
     private let gate = DispatchSemaphore(value: 0)
     private var calls = 0
     private var waiting = false
+    private var held = 0
 
-    init(_ finder: InstalledAppFinder, gatedCall: Int) {
+    convenience init(_ finder: InstalledAppFinder, gatedCall: Int) {
+        self.init(finder, gatedCalls: [gatedCall])
+    }
+
+    init(_ finder: InstalledAppFinder, gatedCalls: Set<Int>) {
         self.finder = finder
-        self.gatedCall = gatedCall
+        self.gatedCalls = gatedCalls
     }
 
     var isWaiting: Bool { lock.withLock { waiting } }
+    /// How many gated calls wait now, and how many calls were made.
+    var holding: Int { lock.withLock { held } }
+    var callCount: Int { lock.withLock { calls } }
 
     func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
         let call = lock.withLock { () -> Int in
             calls += 1
-            if calls == gatedCall { waiting = true }
+            if gatedCalls.contains(calls) {
+                waiting = true
+                held += 1
+            }
             return calls
         }
-        guard call == gatedCall else { return finder.detect(apps) }
+        guard gatedCalls.contains(call) else { return finder.detect(apps) }
         gate.wait()
+        lock.withLock { held -= 1 }
         return [:]
     }
 
@@ -509,16 +521,24 @@ final class AppListModelTests: XCTestCase {
         let url = CatalogLocation.defaultURL
         let old = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [breaks], tools: []), url: url, fetchedAt: clock.now, cached: false)
         let new = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-13T00:00:00Z", apps: [breaks, other], tools: []), url: url, fetchedAt: clock.now, cached: false)
-        let gated = GatedFinder(finder, gatedCall: 2)
+        // Calls 2 and 4 (the refresh's look and its first look again) are held; 3 and 5 are reloads over the old feed.
+        let gated = GatedFinder(finder, gatedCalls: [2, 4])
         let model = AppListModel(loader: RecordedLoader([.success(old), .success(new)]), finder: gated, defaults: defaults)
         await model.refresh()
         let refresh = Task { await model.refresh(force: true) }
-        try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
+        let release = { gated.release(); gated.release() }
+        try await waitUntil({ gated.callCount == 2 && gated.holding == 1 }, stopping: refresh, release: release)
         await model.reloadInstalled()
+        gated.release()
+        try await waitUntil({ gated.callCount == 4 && gated.holding == 1 }, stopping: refresh, release: release)
+        // An operation updates Breaks while the refresh looks again; its reload publishes first.
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        await model.reloadInstalled()
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
         gated.release()
         await refresh.value
         XCTAssertEqual(model.catalog?.apps.map(\.id), ["breaks", "other"])
         XCTAssertEqual(model.installed["other"]?.map(\.versionLabel), ["1.0.0"])
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.0.9"])
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the older look does not undo the update")
     }
 }

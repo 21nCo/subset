@@ -93,26 +93,58 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     public init() {}
 
     /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
-    /// The bundle is matched as given and by its real path (libproc reports /private/var for /var). A process whose
-    /// executable cannot be read refuses, unless it no longer runs.
+    /// The bundle is matched as given and by its real path (libproc reports /private/var for /var). A process is named
+    /// by libproc's path of its executable, else by the path it was started with (KERN_PROCARGS2, which `ps` shows the
+    /// `subset` command, and which stays when the executable was deleted or replaced since). One of this user's that
+    /// still runs and cannot be named either way refuses; one that has exited or is another user's (which `ps` cannot
+    /// name either, and Subset cannot ask to quit) does not.
     public func processes(inside bundle: URL) throws -> [pid_t] {
-        try Self.processes(inside: bundle, among: Self.allPids()) { pid in
-            let path = Self.executable(of: pid)
-            return (path, path == nil ? errno : 0)
-        }
+        try Self.processes(inside: bundle, among: Self.allPids(), look: Self.look)
     }
 
-    /// Those of `pids` whose executable (or the errno of reading it) is inside `bundle`.
-    static func processes(inside bundle: URL, among pids: [pid_t], executable: (pid_t) -> (path: String?, errno: Int32)) throws -> [pid_t] {
+    /// What is known of a process: the path of its executable, or why there is none.
+    enum ProcessLook: Equatable {
+        case path(String)
+        case exited
+        case otherUser
+        case unknown(Int32)
+    }
+
+    /// Those of `pids` whose executable is inside `bundle`, as `look` names them.
+    static func processes(inside bundle: URL, among pids: [pid_t], look: (pid_t) -> ProcessLook) throws -> [pid_t] {
         let roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path, AppInstaller.realPath(bundle.path)].compactMap { $0 }).map { $0 + "/" }
         return try pids.filter { pid in
             guard pid > 0 else { return false }
-            let (path, code) = executable(pid)
-            if let path { return roots.contains { path.hasPrefix($0) } }
-            // ESRCH: it has exited (or is a zombie); anything else leaves it unknown.
-            if code == ESRCH { return false }
-            throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code)))), so nothing was changed")
+            switch look(pid) {
+            case let .path(path): return roots.contains { path.hasPrefix($0) }
+            case .exited, .otherUser: return false
+            case let .unknown(code):
+                throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code)))), so nothing was changed")
+            }
         }
+    }
+
+    static func look(_ pid: pid_t) -> ProcessLook {
+        if let path = executable(of: pid) { return .path(path) }
+        let code = errno
+        if let path = startPath(of: pid), path.hasPrefix("/") { return .path(path) }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return errno == ESRCH ? .exited : .unknown(errno) }
+        // SZOMB (5): exited, not yet reaped.
+        if info.pbi_status == 5 { return .exited }
+        return info.pbi_uid == getuid() ? .unknown(code) : .otherUser
+    }
+
+    /// The path process `pid` was started with (the exec path at the head of KERN_PROCARGS2), or nil when it cannot be read.
+    static func startPath(of pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        let text = buffer[MemoryLayout<Int32>.size..<size]
+        return String(decoding: text.prefix { $0 != 0 }, as: UTF8.self)
     }
 
     /// The executable of this process (libproc, else the main bundle's), or nil when neither can be read.
@@ -164,13 +196,13 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         }
     }
 
-    /// Asks each of `apps` to quit with `terminate` until the task is cancelled; returns those asked.
-    static func ask<App>(_ apps: [App], _ terminate: (App) -> Void) -> [App] {
+    /// Asks each of `apps` to quit with `terminate` until the task is cancelled; returns those the request reached
+    /// (terminate() is false for an app that had already exited).
+    static func ask<App>(_ apps: [App], _ terminate: (App) -> Bool) -> [App] {
         var asked: [App] = []
         for app in apps {
             if Task.isCancelled { break }
-            terminate(app)
-            asked.append(app)
+            if terminate(app) { asked.append(app) }
         }
         return asked
     }

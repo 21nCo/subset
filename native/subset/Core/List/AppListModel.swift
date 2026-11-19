@@ -156,8 +156,8 @@ public final class AppListModel: ObservableObject {
         if let apps = nextCatalog?.apps {
             found = await scan(apps)
             if Task.isCancelled { return }
-            // A later look published meanwhile for another catalog's apps: look again, with these, after it.
-            if found.number < publishedScan, publishedApps != apps {
+            // A later look published meanwhile for another catalog's apps: look again, with these, until none did.
+            while found.number < publishedScan, publishedApps != apps {
                 found = await scan(apps)
                 if Task.isCancelled { return }
             }
