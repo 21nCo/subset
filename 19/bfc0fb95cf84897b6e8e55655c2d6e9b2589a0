@@ -1,0 +1,41 @@
+native/subset/Core/Install/AppActions.swift
+  s_255cc75f75f836::t_3bf4bf6937dc36 39,41-42,66,73-74,77-78,82-89,115,141-145,162-163,165-167
+native/subset/Core/Install/AppInstaller.swift
+  s_255cc75f75f836::t_977518bc9eed72 164,182,186-190,209-216,300-301,527-531,559,566-567,570,584,592,595,600,604-606,609
+native/subset/Core/Install/AppLock.swift
+  s_255cc75f75f836::t_c65ff8c844c396 40,65,67
+native/subset/Core/Install/SystemServices.swift
+  s_255cc75f75f836::t_c4227248e8d02a 16-21,102-107,117-119,125-129,133,135-140,148-160,203,205-208,225-234,255-315
+native/subset/Core/List/AppListModel.swift
+  s_255cc75f75f836::t_f130cdfb9fab06 61-64,66,192,197-203
+native/subset/README.md
+  s_255cc75f75f836::t_ffdfb3fd26d788 61,65
+native/subset/Subset.xcodeproj/project.pbxproj
+  s_255cc75f75f836::t_afe0d1bc2212c9 15-16,19-20,23,31-32,34,37,43,46-49,61,71-75,80,83,86,91,98,102,107,112,135,139,174,177-189,271,305-322,350,375,381,398-417,465,469,501,518,745,748-749
+native/subset/Subset.xcodeproj/xcshareddata/xcschemes/Subset.xcscheme
+  s_255cc75f75f836::t_8512468978db1d 31,58
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_255cc75f75f836::t_4ff4afcdadf9eb 368-421,744-757,839-840,848-849,853-874,889-890,892,896-897,899-902,904-907,1024-1025,1035-1039,1066-1078
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_255cc75f75f836::t_fa6a497fd9df11 75-77,88,91,111,501-520,523-524,533,537-539,543,546
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_255cc75f75f836::t_822159905ed5a7 60-63,66,179-201
+native/subset/Tests/CoreTests/PublicTrashingTests.swift
+  s_255cc75f75f836::t_1d095393103510 1-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "19bfc0fb95cf84897b6e8e55655c2d6e9b2589a0",
+  "prompts": {},
+  "sessions": {
+    "s_255cc75f75f836": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ffa88c36-7bd8-4086-90af-73923dd6a087",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
