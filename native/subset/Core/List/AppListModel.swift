@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import os
 
 /// One feed app as the main window lists it.
 public struct AppRow: Equatable, Identifiable, Sendable {
@@ -61,9 +62,11 @@ public final class AppListModel: ObservableObject {
     /// Looks for installed apps run one after another, each once the one before it has ended, and are numbered in that
     /// order, so a higher number is a later look at every app. One that ends after a later one has published does not
     /// publish, so what is shown never goes back to an older state, and `installed` always comes from the apps of the
-    /// catalog shown (`publishedApps`).
+    /// catalog shown (`publishedApps`). A look held up (a stalled folder) holds the next one up for `scanWait` at most;
+    /// the next then looks for itself, and the held one, numbered before it, never publishes over it.
     private var scans = 0
     private var lastScan: Task<[String: [InstalledCopy]], Never>?
+    var scanWait: Duration = .seconds(10)
     private var publishedScan = 0
     private var publishedApps: [CatalogApp]?
 
@@ -195,12 +198,29 @@ public final class AppListModel: ObservableObject {
         let number = scans
         let finder = finder
         let previous = lastScan
+        let wait = scanWait
         let look = Task.detached { () -> [String: [InstalledCopy]] in
-            _ = await previous?.value
+            if let previous { await Self.end(of: previous, orAfter: wait) }
             return finder.detect(apps)
         }
         lastScan = look
         return (number, await look.value)
+    }
+
+    /// Returns once `task` has ended or `wait` has passed, whichever is first.
+    private nonisolated static func end(of task: Task<[String: [InstalledCopy]], Never>, orAfter wait: Duration) async {
+        let resumed = OSAllocatedUnfairLock(initialState: false)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resume: @Sendable () -> Void = { if resumed.withLock({ (done: inout Bool) in defer { done = true }; return !done }) { continuation.resume() } }
+            Task.detached {
+                _ = await task.value
+                resume()
+            }
+            Task.detached {
+                try? await Task.sleep(for: wait)
+                resume()
+            }
+        }
     }
 
     /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel

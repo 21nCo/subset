@@ -117,7 +117,13 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
         return (running.get().contains(bundle.path) ? [4242] : []) + (helpers.get().contains(bundle.path) ? [4343] : [])
     }
 
-    func quit(_ bundle: URL, timeout _: TimeInterval) async throws -> (left: [pid_t], asked: Bool) {
+    /// Runs just before an app would be asked to quit, or reopened (to replace the copy then).
+    var beforeQuit: (@Sendable () -> Void)?
+    var beforeReopen: (@Sendable () -> Void)?
+
+    func quit(_ bundle: URL, timeout _: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool) {
+        beforeQuit?()
+        guard isChecked() else { throw InstallFailure(.running, "\(bundle.path) was replaced while it was being quit, so nothing was asked to quit") }
         let asked = running.get().contains(bundle.path)
         if helperExitsOnQuit { helpers.update { $0.remove(bundle.path) } }
         guard asked else { return (try processes(inside: bundle), false) }
@@ -128,7 +134,9 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
         return (try processes(inside: bundle), true)
     }
 
-    func reopen(_ bundle: URL) async -> String? {
+    func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String? {
+        beforeReopen?()
+        guard isExpected() else { return "\(bundle.path) is not the copy expected there" }
         reopened.update { $0.append(bundle.path) }
         return nil
     }

@@ -88,10 +88,12 @@ public protocol RunningAppControlling: Sendable {
     /// Asks each running app at `bundle` to quit (NSRunningApplication.terminate(), never a force quit), then waits up
     /// to `timeout` seconds for every process inside it to exit. Returns the pids still running and whether an app was
     /// asked to quit; when none was (only helpers run), it returns at once with the processes running then. A cancel
-    /// asks no further app and waits only for those asked. Throws only when no app was asked.
-    func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool)
-    /// Opens the app at `bundle` again after it was quit for an update; returns why it could not, or nil.
-    func reopen(_ bundle: URL) async -> String?
+    /// asks no further app and waits only for those asked. `isChecked` says whether `bundle` is still the copy the caller
+    /// checked; asked just before any app is, it refuses when it is not. Throws only when no app was asked.
+    func quit(_ bundle: URL, timeout: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool)
+    /// Opens the app at `bundle` again after it was quit for an update, when `isExpected` (asked just before it is
+    /// opened) says it is the copy expected there; returns why it was not opened, or nil.
+    func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String?
 }
 
 /// The processes from libproc (each pid's executable path), quit with NSRunningApplication.terminate().
@@ -128,7 +130,11 @@ public struct WorkspaceRunningApps: RunningAppControlling {
             switch look(pid) {
             case let .path(path): return matcher.contains(path)
             // As saved (the file may have been replaced by a link elsewhere since) or as it resolves now.
-            case let .started(path): return matcher.contains(BundleMatcher.lexical(path)) || matcher.contains(BundleMatcher.canonical(path))
+            // As it resolves now, and with only its folder resolved (its file may have been replaced by a link since).
+            case let .started(path):
+                let folder = (path as NSString).deletingLastPathComponent
+                return matcher.contains(BundleMatcher.canonical(path))
+                    || matcher.contains(BundleMatcher.canonical(folder) + "/" + (path as NSString).lastPathComponent)
             case .exited, .otherUser: return false
             case let .unknown(code):
                 throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code))))")
@@ -204,14 +210,13 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         throw unreadable("the list of processes kept growing")
     }
 
-    public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool) {
-        // The copy the caller checked, and each of its processes by when it started too.
-        let copy = AppInstaller.identity(bundle)
+    public func quit(_ bundle: URL, timeout: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool) {
+        // Each process of the copy, by when it started too.
         let mine = try processes(inside: bundle)
         let found = Dictionary(mine.map { ($0, Self.startTime(of: $0)) }, uniquingKeysWith: { first, _ in first })
         let matcher = BundleMatcher(bundle)
         let asked = try await MainActor.run { () throws -> [pid_t] in
-            guard AppInstaller.identity(bundle) == copy else {
+            guard isChecked() else {
                 throw InstallFailure(.running, "\(bundle.path) was replaced while it was being quit, so nothing was asked to quit")
             }
             let apps = Self.targets(NSWorkspace.shared.runningApplications, found: found, matcher: matcher, own: getpid(), startTime: Self.startTime) {
@@ -260,7 +265,8 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         return asked
     }
 
-    public func reopen(_ bundle: URL) async -> String? {
+    public func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String? {
+        guard isExpected() else { return "\(bundle.path) is not the copy expected there" }
         do {
             _ = try await NSWorkspace.shared.openApplication(at: bundle, configuration: NSWorkspace.OpenConfiguration())
             return nil
@@ -301,7 +307,7 @@ struct BundleMatcher: Sendable {
         return lexical(path)
     }
 
-    /// `path` (absolute) with `.`, `..` and repeated slashes removed, no link followed.
+    /// `path` (absolute) with `.`, `..` and repeated slashes removed, no link followed (for what does not exist).
     static func lexical(_ path: String) -> String {
         var result: [Substring] = []
         for part in path.split(separator: "/") {

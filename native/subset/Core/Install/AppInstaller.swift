@@ -173,7 +173,7 @@ public struct AppInstaller: Sendable {
                         // A cancel once the copy is verified quits nothing.
                         try Task.checkCancellation()
                         progress(.quitting)
-                        let (left, asked) = try await running.quit(target, timeout: quitTimeout)
+                        let (left, asked) = try await running.quit(target, timeout: quitTimeout) { Self.identity(target) == identity }
                         // Only an app that was asked to quit is reopened.
                         quit = asked
                         try Task.checkCancellation()
@@ -185,10 +185,8 @@ public struct AppInstaller: Sendable {
                     if quit {
                         // Quitting changed something even when the update then failed or was cancelled. Only the copy
                         // that was quit is opened again, never something put at its path since.
-                        if Self.identity(target) != identity {
-                            notes.add("\(app.name) was quit for the update and was not reopened: \(copy.path) is no longer the copy that was quit.", changed: true)
-                        } else if let why = await running.reopen(target) {
-                            notes.add("\(app.name) was quit and could not be reopened (\(why)).", changed: true)
+                        if let why = await running.reopen(target, isExpected: { Self.identity(target) == identity }) {
+                            notes.add("\(app.name) was quit for the update and was not reopened (\(why)).", changed: true)
                         } else {
                             notes.add("\(app.name) was asked to quit for the update and was reopened.", changed: true)
                         }
@@ -206,13 +204,9 @@ public struct AppInstaller: Sendable {
                         notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
                     }
                 }
-                if quit {
-                    // Only the verified copy put in place is opened, never something put at its path since.
-                    if placed == nil || Self.identity(target) != placed {
-                        notes.add("\(app.name) was not reopened: \(copy.path) was changed after it was updated.")
-                    } else if let why = await running.reopen(target) {
-                        notes.add("\(app.name) could not be reopened (\(why)).")
-                    }
+                // Only the verified copy put in place is opened, never something put at its path since.
+                if quit, let why = await running.reopen(target, isExpected: { [placed] in placed != nil && Self.identity(target) == placed }) {
+                    notes.add("\(app.name) could not be reopened (\(why)).")
                 }
             }
             return updates.last.map(\.path)
@@ -241,7 +235,8 @@ public struct AppInstaller: Sendable {
                 // A cancel during one quit starts no other.
                 try Task.checkCancellation()
                 progress(.quitting)
-                let (left, asked) = try await running.quit(bundle, timeout: quitTimeout)
+                let checked = identities[copy.path]
+                let (left, asked) = try await running.quit(bundle, timeout: quitTimeout) { Self.identity(bundle) == checked }
                 // Quitting changes something even when nothing is moved afterwards.
                 if asked { notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true) }
                 try Task.checkCancellation()

@@ -378,10 +378,26 @@ final class AppInstallerTests: XCTestCase {
         let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(failed?.step, .install)
         XCTAssertEqual(failed?.partial, true)
-        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened: \(quitPath) is no longer the copy that was quit."])
+        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened (\(quitPath) is not the copy expected there)."])
         XCTAssertEqual(running.reopened.get(), [])
         XCTAssertEqual(version(target), "0.3.0", "what was put there stays")
         assertNoLeftovers()
+
+        // Replaced just before it would be reopened, after an app that did not quit kept the update from running.
+        try tearDownWithError()
+        try setUpWithError()
+        try installOld()
+        let stubbornPath = target.path
+        running.running.update { $0.insert(stubbornPath) }
+        running.stubborn = true
+        running.beforeReopen = {
+            try? FileManager.default.removeItem(atPath: stubbornPath)
+            try? makeBundle(URL(fileURLWithPath: stubbornPath), bundleID: "dev.subset.breaks", version: "0.3.0")
+        }
+        let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(refused?.step, .running)
+        XCTAssertEqual(refused?.notes, ["Breaks was quit for the update and was not reopened (\(stubbornPath) is not the copy expected there)."])
+        XCTAssertEqual(running.reopened.get(), [])
 
         try tearDownWithError()
         try setUpWithError()
@@ -390,8 +406,44 @@ final class AppInstallerTests: XCTestCase {
         running.running.update { $0.insert(updatedPath) }
         trash = ReplacingTrash(inner: trash, path: updatedPath)
         let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
-        XCTAssertEqual(outcome.notes.last, "Breaks was not reopened: \(updatedPath) was changed after it was updated.")
+        XCTAssertEqual(outcome.notes.last, "Breaks could not be reopened (\(updatedPath) is not the copy expected there).")
         XCTAssertEqual(running.reopened.get(), [])
+    }
+
+    // A copy replaced after it was checked and before its app is asked to quit is not quit, updated or moved: the
+    // request is never sent to the replacement's app.
+    func testACopyReplacedJustBeforeTheQuitIsNotQuit() async throws {
+        for operation in ["update", "moveToTrash"] {
+            try tearDownWithError()
+            try setUpWithError()
+            try installOld()
+            let replacedPath = target.path
+            running.running.update { $0.insert(replacedPath) }
+            running.beforeQuit = {
+                try? FileManager.default.removeItem(atPath: replacedPath)
+                try? makeBundle(URL(fileURLWithPath: replacedPath), bundleID: "dev.subset.breaks", version: "0.3.0")
+            }
+            let refused = await failure { installer in
+                operation == "update" ? try await installer.update(Self.breaks, Self.live, quitAllowed: true)
+                    : try await installer.moveToTrash(Self.breaks, quitAllowed: true)
+            }
+            XCTAssertEqual(refused?.step, .running, operation)
+            XCTAssertEqual(running.quits.get(), [], operation)
+            XCTAssertEqual(version(target), "0.3.0", operation)
+            XCTAssertEqual(names(trashFolder), [], operation)
+        }
+        // The system's quit refuses the same way before asking any app.
+        let bundle = root.appendingPathComponent("Idle.app")
+        try makeBundle(bundle, bundleID: "dev.subset.idle", version: "1.0")
+        do {
+            _ = try await WorkspaceRunningApps().quit(bundle, timeout: 1) { false }
+            XCTFail("a replaced copy is not quit")
+        } catch let failure as InstallFailure {
+            XCTAssertEqual(failure.step, .running)
+        }
+        let quit = try await WorkspaceRunningApps().quit(bundle, timeout: 1) { true }
+        XCTAssertEqual(quit.left, [])
+        XCTAssertFalse(quit.asked)
     }
 
     // Putting back what an interrupted update left is a change: an update or a move to the Trash that then fails or is
@@ -856,11 +908,16 @@ final class AppInstallerTests: XCTestCase {
             // Started from the bundle, whose file there is now a link to one outside it: the saved path still counts.
             case 14: return .started(bundle.path + "/Contents/MacOS/Helper")
             case 15: return .started(bundle.path + "/Contents/MacOS/../../../Other.app/Contents/MacOS/Other")
+            // Started through a link to another folder and `..`: it runs from that folder's Breaks.app, not this one.
+            case 17: return .started(folder.path + "/Route/../Breaks.app/Contents/MacOS/Helper")
             default: return .unknown(EPERM)
             }
         }
         try FileManager.default.createSymbolicLink(atPath: bundle.appendingPathComponent("Contents/MacOS/Helper").path, withDestinationPath: "/usr/bin/true")
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15], look: look), [10, 14])
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("Tools/Child"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("Tools/Breaks.app/Contents/MacOS"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("Route").path, withDestinationPath: folder.appendingPathComponent("Tools/Child").path)
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17], look: look), [10, 14])
         XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 16], look: look), "a live process of this user that cannot be named")
         for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
             XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)

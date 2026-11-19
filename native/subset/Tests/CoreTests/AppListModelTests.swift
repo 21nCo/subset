@@ -520,6 +520,23 @@ final class AppListModelTests: XCTestCase {
         }
     }
 
+    // A look held up for good (a stalled folder) holds the next one up only for a while: the later reload then looks and
+    // publishes, and the held look, when it ends, does not publish over it.
+    func testALookHeldUpForGoodDoesNotHoldUpTheNextForever() async throws {
+        let gated = GatedFinder(finder, gatedCalls: [2])
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        let held = Task { await model.reloadInstalled() }
+        try await waitUntil({ gated.isWaiting }, stopping: held, release: { gated.release() })
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        await model.reloadInstalled()
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
+        gated.release()
+        await held.value
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the held, older look is not published")
+    }
+
     // A refresh with a new feed and a reload over the old feed: the list shows the new feed with what is installed for it.
     func testARefreshWithANewFeedAndAReloadOverTheOldOneListTheNewFeedsApps() async throws {
         try install("Breaks", "dev.subset.breaks", version: "0.0.9")
