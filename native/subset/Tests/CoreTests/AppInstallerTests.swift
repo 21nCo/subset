@@ -413,6 +413,7 @@ final class AppInstallerTests: XCTestCase {
             }
             XCTAssertEqual(refused?.step, .running, operation)
             XCTAssertEqual(refused?.partial, true, operation)
+            XCTAssertEqual(refused?.onlyRecovered, true, "the \(operation) itself did not run")
             XCTAssertEqual(refused?.notes, ["Breaks was put back at \(target.path): an interrupted update had left it at \(aside.path)."], operation)
             XCTAssertEqual(AppInstaller.identity(target), copy, operation)
             XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, operation)
@@ -748,8 +749,16 @@ final class AppInstallerTests: XCTestCase {
     // Every process on this Mac, other users' included (PROC_PIDTBSDINFO refuses those with EPERM), is classified, so
     // one that is not the bundle's never refuses an update or a move to the Trash of an app nothing runs from.
     func testEveryRealProcessIsClassifiedAndNoneBlocksAnAppThatIsNotRunning() throws {
-        for pid in try WorkspaceRunningApps.allPids() where pid > 0 {
-            if case .unknown(let code) = WorkspaceRunningApps.look(pid) { XCTFail("pid \(pid): \(String(cString: strerror(code)))") }
+        let unknown = { (pid: pid_t) -> Int32? in
+            if case .unknown(let code) = WorkspaceRunningApps.look(pid) { return code }
+            return nil
+        }
+        // One that exits while it is looked at is not one that cannot be read.
+        for pid in try WorkspaceRunningApps.allPids() where pid > 0 && unknown(pid) != nil {
+            usleep(200_000)
+            guard let code = unknown(pid) else { continue }
+            let record = WorkspaceRunningApps.record(of: pid).record
+            XCTFail("pid \(pid) (uid \(record.map { String($0.kp_eproc.e_ucred.cr_uid) } ?? "?"), parent \(record.map { String($0.kp_eproc.e_ppid) } ?? "?")): \(String(cString: strerror(code)))")
         }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-idle-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -837,7 +846,6 @@ final class AppInstallerTests: XCTestCase {
         try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: bundle.appendingPathComponent("Contents/MacOS/Breaks").path, contents: Data(), attributes: [.posixPermissions: 0o755])
         let real = try XCTUnwrap(AppInstaller.realPath(bundle.path))
         let look: (pid_t) -> WorkspaceRunningApps.ProcessLook = { pid in
             switch pid {
@@ -845,22 +853,23 @@ final class AppInstallerTests: XCTestCase {
             case 11: return .exited
             case 12: return .path("/Applications/Other.app/Contents/MacOS/Other")
             case 13: return .otherUser
-            case 14: return .unnamed(command: "Breaks", code: EPERM)
-            case 15: return .unnamed(command: "Other", code: EPERM)
+            // Started from the bundle, whose file there is now a link to one outside it: the saved path still counts.
+            case 14: return .started(bundle.path + "/Contents/MacOS/Helper")
+            case 15: return .started(bundle.path + "/Contents/MacOS/../../../Other.app/Contents/MacOS/Other")
             default: return .unknown(EPERM)
             }
         }
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 15], look: look), [10], "an unnamed process that is not the bundle's")
-        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 14], look: look), "a live process of this user that may be the bundle's")
-        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [16], look: look), "a process nothing can be read of")
+        try FileManager.default.createSymbolicLink(atPath: bundle.appendingPathComponent("Contents/MacOS/Helper").path, withDestinationPath: "/usr/bin/true")
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15], look: look), [10, 14])
+        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 16], look: look), "a live process of this user that cannot be named")
         for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
             XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)
         }
         XCTAssertEqual(BundleMatcher.canonical(bundle.path + "/Contents/./MacOS//../MacOS/Gone"), real + "/Contents/MacOS/Gone")
     }
 
-    // Only an app whose own executable or bundle is the copy's is asked to quit: a pid that exited and was given to
-    // another app is skipped, and this app is never asked.
+    // Only an app that is a process found in the copy (the same pid, started at the same time) and whose own executable
+    // or bundle is the copy's is asked to quit: a pid given to another app since is skipped, and this app is never asked.
     func testOnlyAnAppStillRunningFromTheCopyIsAskedToQuit() throws {
         let bundle = URL(fileURLWithPath: "/Applications/Breaks.app")
         let apps: [(pid: pid_t, executable: URL?, bundle: URL?)] = [
@@ -868,9 +877,15 @@ final class AppInstallerTests: XCTestCase {
             (11, URL(fileURLWithPath: "/Applications/Other.app/Contents/MacOS/Other"), URL(fileURLWithPath: "/Applications/Other.app")),
             (12, nil, bundle),
             (13, bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
+            (14, bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
             (getpid(), bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
         ]
-        let targets = WorkspaceRunningApps.targets(apps, pids: [10, 11, 12, getpid()], matcher: BundleMatcher(bundle), own: getpid()) { ($0.pid, [$0.executable, $0.bundle]) }
+        // 14 was found, then exited, and its pid went to another copy of the app, started later.
+        let found: [pid_t: UInt64?] = [10: 100, 11: 100, 12: 100, 14: 100, getpid(): 100]
+        let now: [pid_t: UInt64] = [10: 100, 11: 100, 12: 100, 13: 100, 14: 900, getpid(): 100]
+        let targets = WorkspaceRunningApps.targets(apps, found: found, matcher: BundleMatcher(bundle), own: getpid(), startTime: { now[$0] }) {
+            ($0.pid, [$0.executable, $0.bundle])
+        }
         XCTAssertEqual(targets.map { $0.pid }, [10, 12])
     }
 

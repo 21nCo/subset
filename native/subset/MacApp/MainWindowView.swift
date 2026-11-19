@@ -125,9 +125,8 @@ private struct AppRowView: View {
 
     @ViewBuilder
     private var buttons: some View {
-        let busy = actions.isBusy(row.id)
         VStack(alignment: .trailing, spacing: 6) {
-            if busy {
+            if actions.canCancel(row.id) {
                 Button("Cancel") { actions.cancel(row.id) }
             } else {
                 if row.installed.isEmpty {
@@ -144,6 +143,8 @@ private struct AppRowView: View {
                 }
             }
         }
+        // After an operation, until its app has been looked for again.
+        .disabled(actions.isBusy(row.id) && !actions.canCancel(row.id))
         .controlSize(.small)
     }
 

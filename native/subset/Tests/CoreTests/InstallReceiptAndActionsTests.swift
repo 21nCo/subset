@@ -135,7 +135,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         actions.update("breaks")
         XCTAssertNil(actions.quitRequest)
         await actions.wait("breaks")
-        XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not updated to 0.1.0: whether the app is running cannot be read (fake), so nothing was changed."))
+        XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not updated to 0.1.0: whether the app is running cannot be read (fake)."))
         XCTAssertEqual(model.rows.first?.installed.map(\.versionLabel), ["0.0.9"])
     }
 
@@ -199,16 +199,23 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [], "the install cleaned up")
     }
 
-    func testARowIsEnabledAgainOnlyOnceItsNewStateIsListed() async throws {
-        let (actions, model) = await actions()
-        var seen: [String?] = []
-        let watch = actions.$activities.sink { activities in
-            if case .succeeded? = activities["breaks"] { seen.append(model.installed["breaks"]?.first?.versionLabel) }
-        }
+    // The result shows once the install has cleaned up, even while an earlier look for installed apps holds up the next
+    // one; the row's buttons (Cancel included, with nothing left to stop) wait until the app is listed.
+    func testAResultShowsAtOnceAndTheRowWaitsForItsNewState() async throws {
+        let gated = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2], readsAfterGate: true)
+        let (actions, model) = await actions(finder: gated)
         actions.install("breaks")
+        for _ in 0..<500 where !gated.isWaiting { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(gated.isWaiting)
+        for _ in 0..<500 where actions.canCancel("breaks") { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(actions.activities["breaks"], .succeeded("Installed 0.1.0 in \(system.path)."))
+        XCTAssertTrue(actions.isBusy("breaks"))
+        XCTAssertFalse(actions.canCancel("breaks"))
+        XCTAssertEqual(model.installed["breaks"] ?? [], [], "not listed yet")
+        gated.release()
         await actions.wait("breaks")
-        watch.cancel()
-        XCTAssertEqual(seen, ["0.1.0"], "the install's message and the enabled row come with the app listed")
+        XCTAssertFalse(actions.isBusy("breaks"))
+        XCTAssertEqual(model.installed["breaks"]?.first?.versionLabel, "0.1.0", "the row is enabled with the app listed")
     }
 
     func testOnceQuittingStartsNoOperationOrPendingQuitStarts() async throws {

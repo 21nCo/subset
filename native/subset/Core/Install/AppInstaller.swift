@@ -298,7 +298,7 @@ public struct AppInstaller: Sendable {
             let lock = try AppLock(app, in: setup.locks)
             defer { lock.release() }
             // Putting back or renaming what an interrupted operation left is a change, even if this one then fails.
-            for note in recover(app) { notes.add(note.line, changed: note.changed) }
+            for note in recover(app) { notes.add(note.line, recovered: note.changed) }
             let path = try await body(notes)
             return InstallOutcome(path: path, notes: notes.lines)
         } catch {
@@ -306,11 +306,13 @@ public struct AppInstaller: Sendable {
             switch error {
             case let known as InstallFailure: failure = known
             case is CancellationError:
-                failure = InstallFailure(.interrupted, notes.changed ? "it was cancelled after part of it was done" : "it was cancelled before anything was changed")
+                failure = InstallFailure(.interrupted, notes.changed ? "it was cancelled after part of it was done"
+                    : notes.recovered ? "it was cancelled before anything else was changed" : "it was cancelled before anything was changed")
             default: failure = InstallFailure(.install, error.localizedDescription)
             }
-            failure.partial = notes.changed
-            failure.notes = notes.changed ? notes.partialLines : notes.lines
+            failure.partial = notes.changed || notes.recovered
+            failure.onlyRecovered = !notes.changed && notes.recovered
+            failure.notes = failure.partial ? notes.partialLines : notes.lines
             throw failure
         }
     }
@@ -536,10 +538,12 @@ public struct AppInstaller: Sendable {
             throw InstallFailure(.install, errno == ENOENT ? changed : "\(target.path) cannot be moved aside (\(Self.errnoText()))")
         }
         guard Self.identity(backup) == identity else { throw InstallFailure(.install, changed + Self.putBack(backup, target)) }
+        // The verified copy, identified before its rename: what is at `target` afterwards is it only when it matches.
+        let verified = Self.identity(staged)
         guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
             throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target))")
         }
-        let placed = Self.identity(target)
+        let placed = Self.identity(target) == verified ? verified : nil
         var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
         if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         // A receipt is advisory: when it cannot be written, the one there (describing the old copy) is removed.
@@ -744,6 +748,8 @@ struct FileIdentity: Equatable, Sendable {
 final class Notes: @unchecked Sendable {
     private var entries: [(line: String, onlyWhenPartial: Bool)] = []
     private(set) var changed = false
+    /// Whether it put back or renamed what an interrupted operation had left (before doing anything itself).
+    private(set) var recovered = false
 
     /// The notes of an operation that finished.
     var lines: [String] { entries.filter { !$0.onlyWhenPartial }.map(\.line) }
@@ -752,9 +758,10 @@ final class Notes: @unchecked Sendable {
 
     /// Adds a note; `changed` when it reports a change, `onlyWhenPartial` when it is worth saying only if the operation
     /// then fails (a finished one says it in its own message).
-    func add(_ line: String, changed: Bool = false, onlyWhenPartial: Bool = false) {
+    func add(_ line: String, changed: Bool = false, recovered: Bool = false, onlyWhenPartial: Bool = false) {
         entries.append((line, onlyWhenPartial))
         if changed { self.changed = true }
+        if recovered { self.recovered = true }
     }
 }
 

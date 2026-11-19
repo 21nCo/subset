@@ -37,9 +37,9 @@ public final class AppActions: ObservableObject {
     private let installer: AppInstaller
     private let model: AppListModel
     /// Each app's operation until its row is enabled again (after the installed apps were looked for again).
-    private var tasks: [String: Task<Void, Never>] = [:]
+    @Published private var tasks: [String: Task<Void, Never>] = [:]
     /// Each app's install, update or move to the Trash itself, which ends with its message once it has cleaned up.
-    private var operations: [String: Task<AppActivity, Never>] = [:]
+    @Published private var operations: [String: Task<AppActivity, Never>] = [:]
     /// Set once Subset is quitting: no operation starts any more.
     private var closed = false
 
@@ -48,8 +48,11 @@ public final class AppActions: ObservableObject {
         self.model = model
     }
 
-    /// Whether an operation on the app is running.
+    /// Whether an operation on the app is running, or has ended and its app is being looked for again: its buttons wait.
     public func isBusy(_ appID: String) -> Bool { tasks[appID] != nil }
+
+    /// Whether the app's install, update or move to the Trash itself still runs, so Cancel can stop it.
+    public func canCancel(_ appID: String) -> Bool { operations[appID] != nil }
 
     public func install(_ appID: String) { start(appID, kind: nil, quitAllowed: false) }
     public func update(_ appID: String) { start(appID, kind: .update, quitAllowed: false) }
@@ -67,7 +70,7 @@ public final class AppActions: ObservableObject {
 
     /// Hides a finished operation's message.
     public func dismiss(_ appID: String) {
-        if tasks[appID] == nil { activities[appID] = nil }
+        if operations[appID] == nil { activities[appID] = nil }
     }
 
     /// Whether any install, update or move to the Trash is running.
@@ -129,12 +132,14 @@ public final class AppActions: ObservableObject {
                 }
             } catch {
                 let failure = error as? InstallFailure ?? InstallFailure(.install, error.localizedDescription)
-                // What was already changed is said, not reported as nothing done.
+                // What was already changed is said, not reported as nothing done; what an interrupted operation had
+                // left and was put back is said in the notes, and the update or move itself did not run.
+                let partly = failure.partial && !failure.onlyRecovered
                 let what: String
                 switch kind {
                 case nil: what = "\(app.name) was not installed"
-                case .update: what = "\(app.name) was \(failure.partial ? "only partly" : "not") updated to \(release!.label)"
-                case .moveToTrash: what = "\(app.name) was \(failure.partial ? "only partly" : "not") moved to the Trash"
+                case .update: what = "\(app.name) was \(partly ? "only partly" : "not") updated to \(release!.label)"
+                case .moveToTrash: what = "\(app.name) was \(partly ? "only partly" : "not") moved to the Trash"
                 }
                 message = .failed(Self.join("\(what): \(failure.explanation).", failure.notes))
             }
@@ -147,7 +152,7 @@ public final class AppActions: ObservableObject {
     }
 
     private func show(_ appID: String, _ step: InstallProgress, _ release: ChosenRelease?) {
-        guard tasks[appID] != nil else { return }
+        guard operations[appID] != nil else { return }
         switch step {
         case let .downloading(received, total):
             let fraction = total.map { Double(received) / Double(max($0, 1)) }
@@ -159,14 +164,15 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    /// The row is enabled again only once what is installed has been looked for again, so its next action sees it. Once
-    /// Subset is quitting, the row is not used again, so nothing waits for that look.
+    /// The message shows once the operation has cleaned up; the row's buttons come back only once what is installed has
+    /// been looked for again (which may wait for an earlier look), so its next action sees it. Once Subset is quitting,
+    /// the row is not used again, so nothing waits for that look.
     private func finish(_ appID: String, _ message: AppActivity) async {
         operations[appID] = nil
         guard tasks[appID] != nil else { return }
+        activities[appID] = message
         if !closed { await model.reloadInstalled() }
         tasks[appID] = nil
-        activities[appID] = message
     }
 
     private nonisolated static func join(_ first: String, _ notes: [String]) -> String {

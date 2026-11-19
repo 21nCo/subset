@@ -113,7 +113,7 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     var helperExitsOnQuit = false
 
     func processes(inside bundle: URL) throws -> [pid_t] {
-        if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake), so nothing was changed") }
+        if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake)") }
         return (running.get().contains(bundle.path) ? [4242] : []) + (helpers.get().contains(bundle.path) ? [4343] : [])
     }
 

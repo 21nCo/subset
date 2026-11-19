@@ -101,43 +101,37 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
     /// Paths are compared by BundleMatcher (real paths, case folded on a case-insensitive volume). A process is named by
     /// libproc's path of its executable, else by the path it was started with (KERN_PROCARGS2, which `ps` shows the
-    /// `subset` command, and which stays when the executable was deleted or replaced since). One that has exited or is
-    /// another user's (which `ps` cannot name either, and Subset cannot ask to quit) does not count. One of this user's
-    /// that runs and cannot be named either way refuses when its short name (p_comm, the first 16 bytes of the file it
-    /// runs) is that of a file in the bundle; one whose short name is not cannot be the bundle's and does not count.
+    /// `subset` command, and which stays when the executable was deleted or replaced since), as saved and as it resolves
+    /// now. One of this user's that still runs and cannot be named either way refuses; one that has exited or is another
+    /// user's (which `ps` cannot name either, and Subset cannot ask to quit) does not, told apart by the kernel's process
+    /// record, which `ps` reads too (PROC_PIDTBSDINFO refuses another user's process with EPERM).
     public func processes(inside bundle: URL) throws -> [pid_t] {
         try Self.processes(inside: bundle, among: Self.allPids(), look: Self.look)
     }
 
     /// What is known of a process: the path of its executable, or why there is none.
     enum ProcessLook: Equatable {
+        /// libproc's path of its executable.
         case path(String)
+        /// The path it was started with, as saved.
+        case started(String)
         case exited
         case otherUser
-        /// One of this user's that runs and cannot be named: its short name (p_comm) and why it cannot be named.
-        case unnamed(command: String, code: Int32)
-        /// Nothing about it can be read.
         case unknown(Int32)
     }
 
     /// Those of `pids` whose executable is inside `bundle`, as `look` names them.
     static func processes(inside bundle: URL, among pids: [pid_t], look: (pid_t) -> ProcessLook) throws -> [pid_t] {
         let matcher = BundleMatcher(bundle)
-        var commands: Set<String>?
-        let unreadable = { (pid: pid_t, code: Int32) in
-            InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code)))), so nothing was changed")
-        }
         return try pids.filter { pid in
             guard pid > 0 else { return false }
             switch look(pid) {
             case let .path(path): return matcher.contains(path)
+            // As saved (the file may have been replaced by a link elsewhere since) or as it resolves now.
+            case let .started(path): return matcher.contains(BundleMatcher.lexical(path)) || matcher.contains(BundleMatcher.canonical(path))
             case .exited, .otherUser: return false
-            case let .unnamed(command, code):
-                if commands == nil { commands = matcher.commandNames() }
-                guard let names = commands else { throw unreadable(pid, code) }
-                if names.contains(matcher.fold(command)) { throw unreadable(pid, code) }
-                return false
-            case let .unknown(code): throw unreadable(pid, code)
+            case let .unknown(code):
+                throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code))))")
             }
         }
     }
@@ -145,19 +139,31 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     static func look(_ pid: pid_t) -> ProcessLook {
         if let path = executable(of: pid) { return .path(path) }
         let code = errno
-        if let path = startPath(of: pid), path.hasPrefix("/") { return .path(BundleMatcher.canonical(path)) }
-        // The kernel's process record, which `ps` reads too: unlike PROC_PIDTBSDINFO it is given for another user's
-        // process (that refuses with EPERM), so such a process is never taken for an unreadable one of this user.
+        if let path = startPath(of: pid), path.hasPrefix("/") { return .started(path) }
+        let (record, failure) = record(of: pid)
+        guard failure == 0 else { return .unknown(failure) }
+        // No record: it has exited. SZOMB (5): exited, not yet reaped.
+        guard let record, record.kp_proc.p_stat != 5 else { return .exited }
+        let uid = getuid()
+        return record.kp_eproc.e_ucred.cr_uid == uid || record.kp_eproc.e_pcred.p_ruid == uid ? .unknown(code) : .otherUser
+    }
+
+    /// The kernel's record of process `pid` (kinfo_proc), given for every user's process: nil when there is none, and the
+    /// errno when it cannot be read.
+    static func record(of pid: pid_t) -> (record: kinfo_proc?, failure: Int32) {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return .unknown(errno) }
-        // No record: it has exited. SZOMB (5): exited, not yet reaped.
-        if size == 0 || info.kp_proc.p_stat == 5 { return .exited }
-        let uid = getuid()
-        guard info.kp_eproc.e_ucred.cr_uid == uid || info.kp_eproc.e_pcred.p_ruid == uid else { return .otherUser }
-        let command = withUnsafeBytes(of: info.kp_proc.p_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-        return .unnamed(command: command, code: code)
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return (nil, errno) }
+        return (size == 0 ? nil : info, 0)
+    }
+
+    /// When process `pid` started, in microseconds, or nil when there is no such process: a pid given to another process
+    /// since has another start time.
+    static func startTime(of pid: pid_t) -> UInt64? {
+        guard let record = record(of: pid).record else { return nil }
+        let started = record.kp_proc.p_un.__p_starttime
+        return UInt64(started.tv_sec) * 1_000_000 + UInt64(started.tv_usec)
     }
 
     /// The path process `pid` was started with (the exec path at the head of KERN_PROCARGS2), or nil when it cannot be read.
@@ -185,7 +191,7 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     /// Every pid, from a buffer sized by asking libproc first; a list that fills the buffer may be cut short, so it is
     /// read again in a larger one. Throws when libproc fails (as update.mjs refuses when ps fails).
     static func allPids(list: (UnsafeMutableRawPointer?, Int32) -> Int32 = { proc_listallpids($0, $1) }) throws -> [pid_t] {
-        let unreadable = { (why: String) in InstallFailure(.running, "whether the app is running cannot be read (\(why)), so nothing was changed") }
+        let unreadable = { (why: String) in InstallFailure(.running, "whether the app is running cannot be read (\(why))") }
         var capacity = Int(list(nil, 0))
         guard capacity > 0 else { throw unreadable(String(cString: strerror(errno))) }
         for _ in 0..<4 {
@@ -199,10 +205,16 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     public func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool) {
-        let mine = Set(try processes(inside: bundle))
+        // The copy the caller checked, and each of its processes by when it started too.
+        let copy = AppInstaller.identity(bundle)
+        let mine = try processes(inside: bundle)
+        let found = Dictionary(mine.map { ($0, Self.startTime(of: $0)) }, uniquingKeysWith: { first, _ in first })
         let matcher = BundleMatcher(bundle)
-        let asked = await MainActor.run {
-            let apps = Self.targets(NSWorkspace.shared.runningApplications, pids: mine, matcher: matcher, own: getpid()) {
+        let asked = try await MainActor.run { () throws -> [pid_t] in
+            guard AppInstaller.identity(bundle) == copy else {
+                throw InstallFailure(.running, "\(bundle.path) was replaced while it was being quit, so nothing was asked to quit")
+            }
+            let apps = Self.targets(NSWorkspace.shared.runningApplications, found: found, matcher: matcher, own: getpid(), startTime: Self.startTime) {
                 ($0.processIdentifier, [$0.executableURL, $0.bundleURL])
             }
             return Self.ask(apps) { !$0.isTerminated && $0.terminate() }.map(\.processIdentifier)
@@ -222,13 +234,18 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         }
     }
 
-    /// The running apps to ask to quit: each whose pid was found inside the bundle and whose executable or bundle, as the
-    /// system reports it now, is that bundle's too, so a pid that exited and was given to another app is never asked.
-    /// This app is never asked to quit itself (the installer refuses such a copy first); it stays in what is left.
-    static func targets<App>(_ apps: [App], pids: Set<pid_t>, matcher: BundleMatcher, own: pid_t, _ identity: (App) -> (pid_t, [URL?])) -> [App] {
+    /// The running apps to ask to quit: each that is a process `found` inside the bundle (the same pid, started at the
+    /// same time) and whose executable or bundle, as the system reports it now, is that bundle's too, so a pid given to
+    /// another process since is never asked. This app is never asked to quit itself (the installer refuses such a copy
+    /// first); it stays in what is left.
+    static func targets<App>(
+        _ apps: [App], found: [pid_t: UInt64?], matcher: BundleMatcher, own: pid_t, startTime: (pid_t) -> UInt64?,
+        _ identity: (App) -> (pid_t, [URL?])
+    ) -> [App] {
         apps.filter { app in
             let (pid, urls) = identity(app)
-            return pid != own && pids.contains(pid) && urls.contains { $0.map { matcher.contains($0.path + "/") } ?? false }
+            guard pid != own, case let started?? = found[pid], startTime(pid) == started else { return false }
+            return urls.contains { $0.map { matcher.contains($0.path + "/") } ?? false }
         }
     }
 
@@ -268,48 +285,32 @@ struct BundleMatcher: Sendable {
         roots = Set([bundle.path, bundle.resolvingSymlinksInPath().path, Self.canonical(bundle.path)]).map { (folds ? $0.lowercased() : $0) + "/" }
     }
 
-    func fold(_ text: String) -> String { foldsCase ? text.lowercased() : text }
-
     /// Whether `path` (a canonical one, as libproc and `look` give) is inside the bundle.
     func contains(_ path: String) -> Bool {
-        let path = fold(path)
+        let path = foldsCase ? path.lowercased() : path
         return roots.contains { path.hasPrefix($0) }
-    }
-
-    /// The short names (p_comm: the first 16 bytes of the file name) of the executables and links in the bundle, or nil
-    /// when it cannot be read whole.
-    func commandNames() -> Set<String>? {
-        var failed = false
-        guard let walker = FileManager.default.enumerator(at: bundle, includingPropertiesForKeys: nil, errorHandler: { _, _ in
-            failed = true
-            return false
-        }) else { return nil }
-        var names: Set<String> = []
-        for case let url as URL in walker {
-            var status = stat()
-            guard lstat(url.path, &status) == 0 else { continue }
-            let type = status.st_mode & S_IFMT
-            guard type == S_IFLNK || (type == S_IFREG && status.st_mode & 0o111 != 0) else { continue }
-            names.insert(fold(String(decoding: Array(url.lastPathComponent.utf8.prefix(Int(MAXCOMLEN))), as: UTF8.self)))
-        }
-        return failed ? nil : names
     }
 
     /// `path` (absolute) with every link resolved as far as it exists, and `.`, `..` and repeated slashes removed.
     static func canonical(_ path: String) -> String {
-        let parts = path.split(separator: "/").map(String.init)
+        let parts = path.split(separator: "/")
         for count in stride(from: parts.count, through: 0, by: -1) {
             guard let real = AppInstaller.realPath("/" + parts.prefix(count).joined(separator: "/")) else { continue }
-            var result = real.split(separator: "/").map(String.init)
-            for part in parts.dropFirst(count) {
-                switch part {
-                case ".": continue
-                case "..": _ = result.popLast()
-                default: result.append(part)
-                }
-            }
-            return "/" + result.joined(separator: "/")
+            return lexical(([Substring(real)] + parts.dropFirst(count)).joined(separator: "/"))
         }
-        return path
+        return lexical(path)
+    }
+
+    /// `path` (absolute) with `.`, `..` and repeated slashes removed, no link followed.
+    static func lexical(_ path: String) -> String {
+        var result: [Substring] = []
+        for part in path.split(separator: "/") {
+            switch part {
+            case ".": continue
+            case "..": _ = result.popLast()
+            default: result.append(part)
+            }
+        }
+        return "/" + result.joined(separator: "/")
     }
 }
