@@ -175,6 +175,7 @@ public struct AppInstaller: Sendable {
                         let (left, asked) = try await running.quit(target, timeout: quitTimeout)
                         // Only an app that was asked to quit is reopened.
                         quit = asked
+                        try Task.checkCancellation()
                         try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
                     }) { staged in
                         old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
@@ -232,6 +233,7 @@ public struct AppInstaller: Sendable {
                 let (left, asked) = try await running.quit(bundle, timeout: quitTimeout)
                 // Quitting changes something even when nothing is moved afterwards.
                 if asked { notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true) }
+                try Task.checkCancellation()
                 try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
             }
             progress(.movingToTrash)

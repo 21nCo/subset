@@ -55,7 +55,8 @@ private final class ToolRun: @unchecked Sendable {
     private var stderr = Data()
     /// The output pipes not yet at their end.
     private var open = 2
-    /// The wait status once the tool has exited and been reaped (on `queue`, so a signal never reaches a reused pid).
+    /// The wait status once the tool has exited. The tool is reaped only once the result is settled and nothing more is
+    /// signalled, so until then its pid and its group's ID stay its own and cannot be reused.
     private var waitStatus: Int32?
     /// Why the tool's exit status could not be read, when waiting for it failed.
     private var waitFailure: String?
@@ -123,13 +124,15 @@ private final class ToolRun: @unchecked Sendable {
             queue.asyncAfter(deadline: .now() + timeout) { [self] in stopOnQueue("it did not finish in \(String(format: "%g", timeout)) seconds") }
         }
         // Waits for the tool to exit on its own thread without reaping it (WNOWAIT): it stays a zombie holding its pid and
-        // group until `reap` runs on `queue`, where every signal is sent, so no signal reaches a pid reused meanwhile.
+        // its group's ID until the result is settled (`finishIfDone`), so no signal can reach a reused pid or group.
         Thread { [self, child] in
             var info = siginfo_t()
             var code: Int32 = 0
             repeat { code = waitid(P_PID, id_t(child), &info, WEXITED | WNOWAIT) } while code == -1 && errno == EINTR
             let failure = code == 0 ? nil : String(cString: strerror(errno))
-            queue.async { [self] in reap(failure) }
+            // As a wait status: the exit code in the second byte, or the signal that ended it.
+            let status = info.si_code == CLD_EXITED ? (info.si_status & 0xff) << 8 : info.si_status & 0x7f
+            queue.async { [self] in exited(status, failure) }
         }.start()
     }
 
@@ -165,17 +168,11 @@ private final class ToolRun: @unchecked Sendable {
         for source in sources where !source.isCancelled { source.cancel() }
     }
 
-    /// Reaps the exited tool (on `queue`); a failed wait leaves no status rather than one that looks like success.
-    private func reap(_ failure: String?) {
-        var status: Int32 = 0
-        var reaped: pid_t = -1
-        if failure == nil { repeat { reaped = waitpid(pid, &status, WNOHANG) } while reaped == -1 && errno == EINTR }
-        if reaped != pid { waitFailure = failure ?? (reaped == -1 ? String(cString: strerror(errno)) : "it was not reaped") }
-        exited(status)
-    }
-
-    private func exited(_ status: Int32) {
+    /// The tool has exited (still unreaped); a failed wait leaves no status rather than one that looks like success.
+    private func exited(_ status: Int32, _ failure: String?) {
         waitStatus = status
+        waitFailure = failure
+        guard finished == nil else { return reap() }
         finishIfDone()
         guard finished == nil, stopping == nil else { return }
         // A process the tool started still holds its output: it gets a moment to finish, then the group is stopped.
@@ -200,15 +197,28 @@ private final class ToolRun: @unchecked Sendable {
         }
     }
 
-    /// Signals the tool's group, even when the tool itself has exited; the tool alone (still unreaped, so its pid is
-    /// its own) when it left its group. Once the tool is reaped and its group is empty, nothing is signalled.
+    /// Signals the tool's group, even when the tool itself has exited; the tool alone when it left its group. Both stay
+    /// its own until it is reaped, which happens only once nothing more is signalled.
     private func signal(_ signal: Int32) {
-        if waitStatus != nil, groupGone { return }
         if killpg(pid, signal) != 0, waitStatus == nil { kill(pid, signal) }
     }
 
-    /// Whether no process is left in the tool's group (EPERM means one is, though it cannot be signalled).
-    private var groupGone: Bool { killpg(pid, 0) != 0 && errno == ESRCH }
+    /// Whether no process is left in the tool's group besides the exited, unreaped tool (EPERM from killpg means one is,
+    /// though it cannot be signalled, or only the unreaped tool is).
+    private var groupGone: Bool {
+        if killpg(pid, 0) != 0, errno == ESRCH { return true }
+        guard waitStatus != nil else { return false }
+        var members = [pid_t](repeating: 0, count: 64)
+        let count = proc_listpgrppids(pid, &members, Int32(members.count * MemoryLayout<pid_t>.size))
+        return count >= 0 && Int(count) < members.count && members.prefix(Int(count)).allSatisfy { $0 == pid }
+    }
+
+    /// Reaps the exited tool once its result is settled, releasing its pid and group ID.
+    private func reap() {
+        guard waitStatus != nil else { return }
+        var status: Int32 = 0
+        while waitpid(pid, &status, WNOHANG) == -1, errno == EINTR {}
+    }
 
     private func poll() {
         finishIfDone()
@@ -231,6 +241,7 @@ private final class ToolRun: @unchecked Sendable {
         if givenUp, !(open == 0 && groupGone) { text += "\nstopped: a process it started did not exit" }
         let result = ToolResult(status: status, stdout: stdout, stderr: text)
         finished = result
+        reap()
         for source in sources where !source.isCancelled { source.cancel() }
         continuation?.resume(returning: result)
         continuation = nil

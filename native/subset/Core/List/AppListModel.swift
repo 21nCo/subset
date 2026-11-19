@@ -58,10 +58,12 @@ public final class AppListModel: ObservableObject {
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
-    /// Looks for installed apps are numbered as they start; one that ends after a later one has published does not
-    /// publish, so what is shown never goes back to an older state.
+    /// Looks for installed apps are numbered as they start; one that ends after a later one has published for the same
+    /// apps does not publish, so what is shown never goes back to an older state, and `installed` always comes from the
+    /// apps of the catalog shown (`publishedApps`).
     private var scans = 0
     private var publishedScan = 0
+    private var publishedApps: [CatalogApp]?
 
     public init(
         loader: any CatalogLoading, finder: any InstalledAppDetecting, defaults: UserDefaults = .standard,
@@ -150,34 +152,47 @@ public final class AppListModel: ObservableObject {
                 nextFetchedAt = nil
             }
         }
-        var found: [String: [InstalledCopy]] = [:]
-        scans += 1
-        let scan = scans
+        var found: (number: Int, installed: [String: [InstalledCopy]]) = (0, [:])
         if let apps = nextCatalog?.apps {
-            let finder = finder
-            found = await Task.detached { finder.detect(apps) }.value
+            found = await scan(apps)
             if Task.isCancelled { return }
+            // A later look published meanwhile for another catalog's apps: look again, with these, after it.
+            if found.number < publishedScan, publishedApps != apps {
+                found = await scan(apps)
+                if Task.isCancelled { return }
+            }
         }
         catalog = nextCatalog
         fetchedAt = nextFetchedAt
         status = nextStatus
-        if scan > publishedScan {
-            publishedScan = scan
-            installed = found
+        if nextCatalog == nil || found.number > publishedScan || publishedApps != nextCatalog?.apps {
+            publishedScan = max(publishedScan, found.number)
+            publishedApps = nextCatalog?.apps
+            installed = found.installed
         }
     }
 
     /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog.
     public func reloadInstalled() async {
-        guard let apps = catalog?.apps else { return }
-        scans += 1
-        let scan = scans
-        let finder = finder
-        let found = await Task.detached { finder.detect(apps) }.value
-        if scan > publishedScan {
-            publishedScan = scan
-            installed = found
+        guard var apps = catalog?.apps else { return }
+        var found = await scan(apps)
+        // The catalog changed meanwhile: look again with its apps.
+        while let current = catalog?.apps, current != apps {
+            apps = current
+            found = await scan(apps)
         }
+        guard catalog != nil, found.number > publishedScan else { return }
+        publishedScan = found.number
+        publishedApps = apps
+        installed = found.installed
+    }
+
+    /// Looks for `apps` installed, numbered in the order the looks start.
+    private func scan(_ apps: [CatalogApp]) async -> (number: Int, installed: [String: [InstalledCopy]]) {
+        scans += 1
+        let number = scans
+        let finder = finder
+        return (number, await Task.detached { finder.detect(apps) }.value)
     }
 
     /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel

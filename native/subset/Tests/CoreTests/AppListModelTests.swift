@@ -497,4 +497,28 @@ final class AppListModelTests: XCTestCase {
         await older.value
         XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the older, empty scan is not published")
     }
+
+    // A refresh whose new feed adds an installed app finishes after a reload over the old feed has published: the list
+    // shows the new feed with what is installed for it.
+    func testARefreshWithANewFeedThatEndsLastListsItsInstalledApps() async throws {
+        try install("Breaks", "dev.subset.breaks", version: "0.0.9")
+        try install("Other", "dev.subset.other", version: "1.0.0")
+        let breaks = AppInstallerTests.breaks
+        var other = breaks
+        (other.id, other.name, other.appName, other.bundleID) = ("other", "Other", "Other", "dev.subset.other")
+        let url = CatalogLocation.defaultURL
+        let old = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [breaks], tools: []), url: url, fetchedAt: clock.now, cached: false)
+        let new = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-13T00:00:00Z", apps: [breaks, other], tools: []), url: url, fetchedAt: clock.now, cached: false)
+        let gated = GatedFinder(finder, gatedCall: 2)
+        let model = AppListModel(loader: RecordedLoader([.success(old), .success(new)]), finder: gated, defaults: defaults)
+        await model.refresh()
+        let refresh = Task { await model.refresh(force: true) }
+        try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
+        await model.reloadInstalled()
+        gated.release()
+        await refresh.value
+        XCTAssertEqual(model.catalog?.apps.map(\.id), ["breaks", "other"])
+        XCTAssertEqual(model.installed["other"]?.map(\.versionLabel), ["1.0.0"])
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.0.9"])
+    }
 }

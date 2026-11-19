@@ -81,7 +81,8 @@ public protocol RunningAppControlling: Sendable {
     func processes(inside bundle: URL) throws -> [pid_t]
     /// Asks each running app at `bundle` to quit (NSRunningApplication.terminate(), never a force quit), then waits up
     /// to `timeout` seconds for every process inside it to exit. Returns the pids still running and whether an app was
-    /// asked to quit; when none was (only helpers run), it returns at once. Throws only before any app is asked.
+    /// asked to quit; when none was (only helpers run), it returns at once with the processes running then. A cancel
+    /// asks no further app and waits only for those asked. Throws only when no app was asked.
     func quit(_ bundle: URL, timeout: TimeInterval) async throws -> (left: [pid_t], asked: Bool)
     /// Opens the app at `bundle` again after it was quit for an update; returns why it could not, or nil.
     func reopen(_ bundle: URL) async -> String?
@@ -146,17 +147,32 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         let asked = await MainActor.run {
             // This app is never asked to quit itself (the installer refuses such a copy first); it stays in what is left.
             let apps = NSWorkspace.shared.runningApplications.filter { mine.contains($0.processIdentifier) && $0.processIdentifier != getpid() }
-            for app in apps { app.terminate() }
-            return !apps.isEmpty
+            return Self.ask(apps) { $0.terminate() }.map(\.processIdentifier)
         }
-        guard asked else { return (Array(mine), false) }
+        guard !asked.isEmpty else {
+            try Task.checkCancellation()
+            // No app to ask: what runs now (the app may have exited meanwhile) is left, read again.
+            return (try processes(inside: bundle), false)
+        }
         let until = Date().addingTimeInterval(timeout)
         while true {
             // Once apps were asked, an unreadable list counts as still running, so this no longer throws.
             let left = (try? processes(inside: bundle)) ?? Array(mine)
-            if left.isEmpty || Date() >= until { return (left, true) }
+            // After a cancel only the apps already asked are waited for.
+            if left.isEmpty || Date() >= until || (Task.isCancelled && Set(left).isDisjoint(with: asked)) { return (left, true) }
             await ToolRunner.pause(nanoseconds: 200_000_000)
         }
+    }
+
+    /// Asks each of `apps` to quit with `terminate` until the task is cancelled; returns those asked.
+    static func ask<App>(_ apps: [App], _ terminate: (App) -> Void) -> [App] {
+        var asked: [App] = []
+        for app in apps {
+            if Task.isCancelled { break }
+            terminate(app)
+            asked.append(app)
+        }
+        return asked
     }
 
     public func reopen(_ bundle: URL) async -> String? {

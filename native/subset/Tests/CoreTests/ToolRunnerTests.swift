@@ -68,20 +68,57 @@ final class ToolRunnerTests: XCTestCase {
     }
 
     func testACancelOrTimeoutStopsWhatTheToolStartedWhetherItKeepsOrClosesTheOutput() async throws {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-tool-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         for (n, redirect) in ["", " >/dev/null 2>&1"].enumerated() {
             for cancel in [true, false] {
                 let file = folder.appendingPathComponent("\(n)-\(cancel)").path
-                let task = Task { try await ToolRunner.run("/bin/sh", ["-c", "sleep 600\(redirect) & echo $! > \(file).new && mv \(file).new \(file); sleep 600"], timeout: cancel ? 60 : 0.5) }
-                while !FileManager.default.fileExists(atPath: file) { try await Task.sleep(nanoseconds: 20_000_000) }
+                let task = Task { try await ToolRunner.run("/bin/sh", ["-c", "sleep 600\(redirect) & echo $! > \(file).new && mv \(file).new \(file); sleep 600"], timeout: cancel ? 60 : 3) }
+                guard try await waitForFile(file, of: task) else { return }
                 if cancel { task.cancel() }
                 let result = try? await task.value
                 XCTAssertEqual(result == nil, cancel, "a cancel throws, a timeout returns")
                 try assertGone(ToolResult(status: nil, stdout: try Data(contentsOf: URL(fileURLWithPath: file)), stderr: ""))
             }
         }
+    }
+
+    // The exited tool stays unreaped while a process it started still holds the output, so its pid and its group's ID
+    // cannot be reused by another process before the group is stopped; it is reaped once the result is settled.
+    func testAnExitedToolKeepsItsPidUntilItsResultIsSettled() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("leader").path
+        let task = Task { try await ToolRunner.run("/bin/sh", ["-c", "sleep 600 & echo $$ > \(file).new && mv \(file).new \(file); exit 0"]) }
+        guard try await waitForFile(file, of: task) else { return }
+        let leader = try XCTUnwrap(pid_t(String(decoding: try Data(contentsOf: URL(fileURLWithPath: file)), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)))
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(kill(leader, 0), 0, "the exited tool still holds its pid while its helper holds the output")
+        let result = try await task.value
+        XCTAssertNil(result.status)
+        XCTAssertNotEqual(kill(leader, 0), 0, "reaped once settled")
+    }
+
+    private func temporaryFolder() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-tool-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    /// Waits up to 10 seconds for the tool to write `file`; when it does not (it failed or was stopped early), the test
+    /// fails, and the tool is cancelled and waited for so nothing is left running.
+    private func waitForFile(_ file: String, of task: Task<ToolResult, Error>, line: UInt = #line) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: file) {
+            guard Date() < deadline else {
+                task.cancel()
+                let result = try? await task.value
+                XCTFail("the tool did not write \(file): \(result?.stderr ?? "cancelled")", line: line)
+                return false
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return true
     }
 
     /// The background sleep whose pid the tool printed no longer runs.

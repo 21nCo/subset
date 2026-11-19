@@ -864,6 +864,22 @@ final class AppInstallerTests: XCTestCase {
         assertNoLeftovers()
     }
 
+    func testACancelAsksNoFurtherAppToQuit() async throws {
+        let asked = await Task { () -> [Int] in
+            WorkspaceRunningApps.ask([1, 2, 3]) { app in if app == 1 { cancelCurrentTask() } }
+        }.value
+        XCTAssertEqual(asked, [1], "the request made is kept; no further one is made")
+    }
+
+    func testAHelperThatExitedBeforeTheQuitIsNotAReasonToRefuse() async throws {
+        try installOld()
+        running.helpers.update { $0.insert(self.target.path) }
+        running.helperExitsOnQuit = true
+        _ = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
+        XCTAssertEqual(version(target), "0.1.0")
+        XCTAssertEqual(running.reopened.get(), [], "nothing was quit, so nothing is reopened")
+    }
+
     func testACopyLeftUnderItsHiddenNameInTheTrashIsReportedWithWhy() async throws {
         try installOld()
         trash = HiddenTrash(folder: trashFolder)

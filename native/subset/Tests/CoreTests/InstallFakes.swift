@@ -109,6 +109,8 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     var cancelDuringQuit = false
     /// Bundles where only a helper (no app to ask to quit) runs.
     let helpers = Recorder<Set<String>>([])
+    /// The helper exits between the first look and the quit (so a fresh look finds nothing).
+    var helperExitsOnQuit = false
 
     func processes(inside bundle: URL) throws -> [pid_t] {
         if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake), so nothing was changed") }
@@ -117,6 +119,7 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
 
     func quit(_ bundle: URL, timeout _: TimeInterval) async throws -> (left: [pid_t], asked: Bool) {
         let asked = running.get().contains(bundle.path)
+        if helperExitsOnQuit { helpers.update { $0.remove(bundle.path) } }
         guard asked else { return (try processes(inside: bundle), false) }
         onQuit?()
         if cancelDuringQuit { cancelCurrentTask() }
