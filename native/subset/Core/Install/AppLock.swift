@@ -37,7 +37,7 @@ struct AppLock {
         for name in names where name != mine {
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
             // lock.mjs's grammar, `<key>.<digits>.<12 lowercase hex>.lock`; any other name is left alone.
-            guard parts.count == 4, parts[0] == key, parts[3] == "lock", Self.isRandom(parts[2]), parts[1].allSatisfy({ ("0"..."9").contains($0) }),
+            guard parts.count == 4, parts[0] == key, parts[3] == "lock", Self.isRandom(parts[2]), !parts[1].isEmpty, parts[1].utf8.allSatisfy({ (0x30...0x39).contains($0) }),
                   let pid = pid_t(parts[1]), pid > 0 else { continue }
             if pid == getpid() || running(pid) {
                 release()
@@ -62,8 +62,9 @@ struct AppLock {
         kill(pid, 0) == 0 || errno == EPERM
     }
 
+    /// Exactly 12 lowercase ASCII hex bytes, as lock.mjs reads them (Characters would let a combining mark through).
     static func isRandom(_ text: Substring) -> Bool {
-        text.count == 12 && text.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+        text.utf8.count == 12 && text.utf8.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
     }
 
     /// 12 lowercase hex digits.

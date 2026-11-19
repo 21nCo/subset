@@ -58,10 +58,12 @@ public final class AppListModel: ObservableObject {
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
-    /// Looks for installed apps are numbered as they start; one that ends after a later one has published for the same
-    /// apps does not publish, so what is shown never goes back to an older state, and `installed` always comes from the
-    /// apps of the catalog shown (`publishedApps`).
+    /// Looks for installed apps run one after another, each once the one before it has ended, and are numbered in that
+    /// order, so a higher number is a later look at every app. One that ends after a later one has published does not
+    /// publish, so what is shown never goes back to an older state, and `installed` always comes from the apps of the
+    /// catalog shown (`publishedApps`).
     private var scans = 0
+    private var lastScan: Task<[String: [InstalledCopy]], Never>?
     private var publishedScan = 0
     private var publishedApps: [CatalogApp]?
 
@@ -187,12 +189,18 @@ public final class AppListModel: ObservableObject {
         installed = found.installed
     }
 
-    /// Looks for `apps` installed, numbered in the order the looks start.
+    /// Looks for `apps` installed once the previous look has ended, numbered in that order.
     private func scan(_ apps: [CatalogApp]) async -> (number: Int, installed: [String: [InstalledCopy]]) {
         scans += 1
         let number = scans
         let finder = finder
-        return (number, await Task.detached { finder.detect(apps) }.value)
+        let previous = lastScan
+        let look = Task.detached { () -> [String: [InstalledCopy]] in
+            _ = await previous?.value
+            return finder.detect(apps)
+        }
+        lastScan = look
+        return (number, await look.value)
     }
 
     /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel

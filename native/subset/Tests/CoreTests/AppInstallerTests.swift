@@ -365,6 +365,60 @@ final class AppInstallerTests: XCTestCase {
         assertNoLeftovers()
     }
 
+    // An app quit for an update is reopened only from the copy that was quit (after a failure) or the verified one put
+    // in place (after the update): something put at its path meanwhile is not opened, and that is said.
+    func testOnlyTheCopyThatWasQuitOrTheVerifiedOneIsReopened() async throws {
+        try installOld()
+        let quitPath = target.path
+        running.running.update { $0.insert(quitPath) }
+        running.onQuit = {
+            try? FileManager.default.removeItem(atPath: quitPath)
+            try? makeBundle(URL(fileURLWithPath: quitPath), bundleID: "dev.subset.breaks", version: "0.3.0")
+        }
+        let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+        XCTAssertEqual(failed?.step, .install)
+        XCTAssertEqual(failed?.partial, true)
+        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened: \(quitPath) is no longer the copy that was quit."])
+        XCTAssertEqual(running.reopened.get(), [])
+        XCTAssertEqual(version(target), "0.3.0", "what was put there stays")
+        assertNoLeftovers()
+
+        try tearDownWithError()
+        try setUpWithError()
+        try installOld()
+        let updatedPath = target.path
+        running.running.update { $0.insert(updatedPath) }
+        trash = ReplacingTrash(inner: trash, path: updatedPath)
+        let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
+        XCTAssertEqual(outcome.notes.last, "Breaks was not reopened: \(updatedPath) was changed after it was updated.")
+        XCTAssertEqual(running.reopened.get(), [])
+    }
+
+    // Putting back what an interrupted update left is a change: an update or a move to the Trash that then fails or is
+    // refused says so, and the copy put back stays with its receipt.
+    func testACopyPutBackBeforeAFailureIsReportedAsAChange() async throws {
+        var dead: pid_t = 99_999
+        while kill(dead, 0) == 0 || errno == EPERM { dead -= 1 }
+        for operation in ["update", "moveToTrash"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let copy = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            let aside = system.appendingPathComponent(".Breaks.app.subset-update-\(dead)-0123456789ab")
+            try FileManager.default.moveItem(at: target, to: aside)
+            running.running.update { $0.insert(self.target.path) }
+            let refused = await failure { installer in
+                operation == "update" ? try await installer.update(Self.breaks, Self.live, quitAllowed: false)
+                    : try await installer.moveToTrash(Self.breaks, quitAllowed: false)
+            }
+            XCTAssertEqual(refused?.step, .running, operation)
+            XCTAssertEqual(refused?.partial, true, operation)
+            XCTAssertEqual(refused?.notes, ["Breaks was put back at \(target.path): an interrupted update had left it at \(aside.path)."], operation)
+            XCTAssertEqual(AppInstaller.identity(target), copy, operation)
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, operation)
+        }
+    }
+
     func testACopyReplacedDuringTheUpdateIsNotSwapped() async throws {
         try installOld()
         let target = target
@@ -687,8 +741,20 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         XCTAssertTrue(try WorkspaceRunningApps.allPids().contains(getpid()), "the real list holds this process")
         // This process counts as running from the bundle that holds it, so its copy is never taken for a stopped one.
-        let own = try XCTUnwrap(WorkspaceRunningApps.ownExecutable())
-        XCTAssertTrue(try WorkspaceRunningApps().processes(inside: URL(fileURLWithPath: own).deletingLastPathComponent()).contains(getpid()))
+        let own = URL(fileURLWithPath: try XCTUnwrap(WorkspaceRunningApps.ownExecutable())).deletingLastPathComponent()
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: own, among: [getpid()], look: WorkspaceRunningApps.look), [getpid()])
+    }
+
+    // Every process on this Mac, other users' included (PROC_PIDTBSDINFO refuses those with EPERM), is classified, so
+    // one that is not the bundle's never refuses an update or a move to the Trash of an app nothing runs from.
+    func testEveryRealProcessIsClassifiedAndNoneBlocksAnAppThatIsNotRunning() throws {
+        for pid in try WorkspaceRunningApps.allPids() where pid > 0 {
+            if case .unknown(let code) = WorkspaceRunningApps.look(pid) { XCTFail("pid \(pid): \(String(cString: strerror(code)))") }
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-idle-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try makeBundle(folder.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.1.0")
+        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: folder.appendingPathComponent("Breaks.app")), [])
     }
 
     func testAnUpdateThatFailsAfterUpdatingOneCopySaysWhatItChanged() async throws {
@@ -770,6 +836,8 @@ final class AppInstallerTests: XCTestCase {
         let bundle = folder.appendingPathComponent("Breaks.app")
         try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
         defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: bundle.appendingPathComponent("Contents/MacOS/Breaks").path, contents: Data(), attributes: [.posixPermissions: 0o755])
         let real = try XCTUnwrap(AppInstaller.realPath(bundle.path))
         let look: (pid_t) -> WorkspaceRunningApps.ProcessLook = { pid in
             switch pid {
@@ -777,11 +845,33 @@ final class AppInstallerTests: XCTestCase {
             case 11: return .exited
             case 12: return .path("/Applications/Other.app/Contents/MacOS/Other")
             case 13: return .otherUser
+            case 14: return .unnamed(command: "Breaks", code: EPERM)
+            case 15: return .unnamed(command: "Other", code: EPERM)
             default: return .unknown(EPERM)
             }
         }
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13], look: look), [10])
-        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 14], look: look), "a live process of this user that cannot be named")
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 15], look: look), [10], "an unnamed process that is not the bundle's")
+        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 14], look: look), "a live process of this user that may be the bundle's")
+        XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [16], look: look), "a process nothing can be read of")
+        for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
+            XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)
+        }
+        XCTAssertEqual(BundleMatcher.canonical(bundle.path + "/Contents/./MacOS//../MacOS/Gone"), real + "/Contents/MacOS/Gone")
+    }
+
+    // Only an app whose own executable or bundle is the copy's is asked to quit: a pid that exited and was given to
+    // another app is skipped, and this app is never asked.
+    func testOnlyAnAppStillRunningFromTheCopyIsAskedToQuit() throws {
+        let bundle = URL(fileURLWithPath: "/Applications/Breaks.app")
+        let apps: [(pid: pid_t, executable: URL?, bundle: URL?)] = [
+            (10, bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
+            (11, URL(fileURLWithPath: "/Applications/Other.app/Contents/MacOS/Other"), URL(fileURLWithPath: "/Applications/Other.app")),
+            (12, nil, bundle),
+            (13, bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
+            (getpid(), bundle.appendingPathComponent("Contents/MacOS/Breaks"), bundle),
+        ]
+        let targets = WorkspaceRunningApps.targets(apps, pids: [10, 11, 12, getpid()], matcher: BundleMatcher(bundle), own: getpid()) { ($0.pid, [$0.executable, $0.bundle]) }
+        XCTAssertEqual(targets.map { $0.pid }, [10, 12])
     }
 
     // A real process in a /var/folders bundle is found by the bundle's real path. Once its executable is deleted libproc
@@ -796,17 +886,25 @@ final class AppInstallerTests: XCTestCase {
         try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
         let signed = try await ToolRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", executable.path], timeout: 60)
         XCTAssertEqual(signed.status, 0, signed.stderr)
+        // Started by a path that is not canonical, with the bundle's name in another case where the volume ignores case.
+        let name = BundleMatcher(bundle).foldsCase ? "BREAKS.app" : "Breaks.app"
         let process = Process()
-        process.executableURL = executable
+        process.executableURL = URL(fileURLWithPath: folder.path + "/\(name)/Contents/./MacOS/../MacOS/Breaks")
         process.arguments = ["30"]
         try process.run()
         defer { process.terminate() }
+        let pid = process.processIdentifier
+        let found = { (bundle: URL) in try WorkspaceRunningApps.processes(inside: bundle, among: [pid], look: WorkspaceRunningApps.look) }
         // Running: libproc names it under /private/var, the bundle's real path, for this /var/folders bundle.
-        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [process.processIdentifier])
+        XCTAssertEqual(try found(bundle), [pid])
+        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [pid], "and among every process")
+        // Deleted while it still loads, its executable's pages could not be checked and the system would kill it.
+        try await Task.sleep(for: .milliseconds(500))
         try FileManager.default.removeItem(at: executable)
-        XCTAssertNil(WorkspaceRunningApps.executable(of: process.processIdentifier), "libproc no longer names it")
-        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [process.processIdentifier])
-        XCTAssertEqual(try WorkspaceRunningApps().processes(inside: folder.appendingPathComponent("Other.app")), [])
+        XCTAssertNil(WorkspaceRunningApps.executable(of: pid), "libproc no longer names it")
+        XCTAssertEqual(try found(bundle), [pid])
+        XCTAssertEqual(try found(folder.appendingPathComponent("Other.app")), [])
+        XCTAssertTrue(process.isRunning)
     }
 
     func testHashingStopsWhenCancelled() async throws {
@@ -923,7 +1021,8 @@ final class AppInstallerTests: XCTestCase {
             try makeBundle(saved, bundleID: "dev.subset.breaks", version: "0.0.9")
             if kind == "file" { try Data("x".utf8).write(to: target) } else { try FileManager.default.createSymbolicLink(at: target, withDestinationURL: user) }
             let notes = installer().recover(Self.breaks)
-            XCTAssertEqual(notes, ["\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of Breaks beside it at \(saved.path)."], kind)
+            XCTAssertEqual(notes.map(\.line), ["\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of Breaks beside it at \(saved.path)."], kind)
+            XCTAssertEqual(notes.map(\.changed), [false], "only named, nothing renamed")
             XCTAssertEqual(names(system), [saved.lastPathComponent, "Breaks.app"], kind)
             XCTAssertEqual(version(saved), "0.0.9", kind)
         }
@@ -933,7 +1032,11 @@ final class AppInstallerTests: XCTestCase {
         try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: true)
         let key = Self.hex(Data("dev.subset.breaks".utf8))
         let live = getppid()
-        let malformed = ["\(key).\(live).ABCDEF012345.lock", "\(key).+\(live).abcdef012345.lock", "\(key).99999.abcdef01234z.lock"].sorted()
+        // A combining mark makes a 12-character nonce that is not 12 hex bytes, for a live and a stale pid.
+        let malformed = [
+            "\(key).\(live).ABCDEF012345.lock", "\(key).+\(live).abcdef012345.lock", "\(key).99999.abcdef01234z.lock",
+            "\(key).\(live).abcdef01234a\u{20DD}.lock", "\(key).99999.abcdef01234a\u{20DD}.lock",
+        ].sorted()
         for name in malformed { FileManager.default.createFile(atPath: locks.appendingPathComponent(name).path, contents: Data()) }
         _ = try await installer().install(Self.breaks, Self.live)
         XCTAssertEqual(names(locks), malformed, "neither refused by nor removed")
@@ -957,6 +1060,19 @@ struct CheckingTrash: Trashing {
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         versionsInPlace.update { $0.append(InstalledAppFinder.infoPlist(target.path)?["CFBundleShortVersionString"] as? String) }
         return try inner.trash(bundle, appName: appName, at: date)
+    }
+}
+
+/// Moves a copy to the Trash, then puts another app at `path`, as another manager might just after an update.
+struct ReplacingTrash: Trashing {
+    var inner: any Trashing
+    var path: String
+
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
+        let trashed = try inner.trash(bundle, appName: appName, at: date)
+        try FileManager.default.removeItem(atPath: path)
+        try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.breaks", version: "0.3.0")
+        return trashed
     }
 }
 

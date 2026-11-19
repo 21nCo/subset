@@ -36,7 +36,10 @@ public final class AppActions: ObservableObject {
 
     private let installer: AppInstaller
     private let model: AppListModel
+    /// Each app's operation until its row is enabled again (after the installed apps were looked for again).
     private var tasks: [String: Task<Void, Never>] = [:]
+    /// Each app's install, update or move to the Trash itself, which ends with its message once it has cleaned up.
+    private var operations: [String: Task<AppActivity, Never>] = [:]
     /// Set once Subset is quitting: no operation starts any more.
     private var closed = false
 
@@ -60,23 +63,30 @@ public final class AppActions: ObservableObject {
     }
 
     /// Stops a running operation; its message then says what it had already changed, if anything.
-    public func cancel(_ appID: String) { tasks[appID]?.cancel() }
+    public func cancel(_ appID: String) { operations[appID]?.cancel() }
 
     /// Hides a finished operation's message.
     public func dismiss(_ appID: String) {
         if tasks[appID] == nil { activities[appID] = nil }
     }
 
-    /// Whether any operation is running.
-    public var isWorking: Bool { !tasks.isEmpty }
+    /// Whether any install, update or move to the Trash is running.
+    public var isWorking: Bool { !operations.isEmpty }
 
     /// Stops new operations (and drops a pending quit question), cancels every running one and waits until each has
-    /// cleaned up (when Subset quits): before its last step nothing is changed, and after it the app is in place.
+    /// cleaned up (when Subset quits): before its last step nothing is changed, and after it the app is in place. It does
+    /// not wait for the installed apps to be looked for again, which a stalled folder could hold up.
     public func cancelAll() async {
         closed = true
         quitRequest = nil
-        for task in tasks.values { task.cancel() }
-        while let task = tasks.values.first { await task.value }
+        let running = operations
+        for operation in running.values { operation.cancel() }
+        for (appID, operation) in running {
+            let message = await operation.value
+            operations[appID] = nil
+            tasks[appID] = nil
+            activities[appID] = message
+        }
     }
 
     /// Waits for the app's running operation, if any (tests).
@@ -102,7 +112,7 @@ public final class AppActions: ObservableObject {
         let progress: @Sendable (InstallProgress) -> Void = { [weak self] step in
             Task { @MainActor in self?.show(appID, step, release) }
         }
-        tasks[appID] = Task { [weak self] in
+        let operation = Task { () -> AppActivity in
             let message: AppActivity
             do {
                 switch kind {
@@ -128,7 +138,11 @@ public final class AppActions: ObservableObject {
                 }
                 message = .failed(Self.join("\(what): \(failure.explanation).", failure.notes))
             }
-            await self?.finish(appID, message)
+            return message
+        }
+        operations[appID] = operation
+        tasks[appID] = Task { [weak self] in
+            await self?.finish(appID, await operation.value)
         }
     }
 
@@ -145,9 +159,12 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    /// The row is enabled again only once what is installed has been looked for again, so its next action sees it.
+    /// The row is enabled again only once what is installed has been looked for again, so its next action sees it. Once
+    /// Subset is quitting, the row is not used again, so nothing waits for that look.
     private func finish(_ appID: String, _ message: AppActivity) async {
-        await model.reloadInstalled()
+        operations[appID] = nil
+        guard tasks[appID] != nil else { return }
+        if !closed { await model.reloadInstalled() }
         tasks[appID] = nil
         activities[appID] = message
     }

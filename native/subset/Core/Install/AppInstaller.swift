@@ -161,6 +161,7 @@ public struct AppInstaller: Sendable {
                 let receipt = folder.flatMap { ReceiptDocument(app, release, folder: $0, receipts: setup.receipts) }
                 var quit = false
                 var old: URL?
+                var placed: FileIdentity?
                 do {
                     try await stage(app, release, in: target.deletingLastPathComponent(), notes: notes, progress: progress, ready: {
                         let pids = try running.processes(inside: target)
@@ -178,12 +179,15 @@ public struct AppInstaller: Sendable {
                         try Task.checkCancellation()
                         try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
                     }) { staged in
-                        old = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
+                        (old, placed) = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
                 } catch {
                     if quit {
-                        // Quitting changed something even when the update then failed or was cancelled.
-                        if let why = await running.reopen(target) {
+                        // Quitting changed something even when the update then failed or was cancelled. Only the copy
+                        // that was quit is opened again, never something put at its path since.
+                        if Self.identity(target) != identity {
+                            notes.add("\(app.name) was quit for the update and was not reopened: \(copy.path) is no longer the copy that was quit.", changed: true)
+                        } else if let why = await running.reopen(target) {
                             notes.add("\(app.name) was quit and could not be reopened (\(why)).", changed: true)
                         } else {
                             notes.add("\(app.name) was asked to quit for the update and was reopened.", changed: true)
@@ -202,7 +206,14 @@ public struct AppInstaller: Sendable {
                         notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
                     }
                 }
-                if quit, let why = await running.reopen(target) { notes.add("\(app.name) could not be reopened (\(why)).") }
+                if quit {
+                    // Only the verified copy put in place is opened, never something put at its path since.
+                    if placed == nil || Self.identity(target) != placed {
+                        notes.add("\(app.name) was not reopened: \(copy.path) was changed after it was updated.")
+                    } else if let why = await running.reopen(target) {
+                        notes.add("\(app.name) could not be reopened (\(why)).")
+                    }
+                }
             }
             return updates.last.map(\.path)
         }
@@ -286,7 +297,8 @@ public struct AppInstaller: Sendable {
             try Task.checkCancellation()
             let lock = try AppLock(app, in: setup.locks)
             defer { lock.release() }
-            for note in recover(app) { notes.add(note) }
+            // Putting back or renaming what an interrupted operation left is a change, even if this one then fails.
+            for note in recover(app) { notes.add(note.line, changed: note.changed) }
             let path = try await body(notes)
             return InstallOutcome(path: path, notes: notes.lines)
         } catch {
@@ -512,8 +524,11 @@ public struct AppInstaller: Sendable {
 
     /// Step 5 of an update (swapApp in update.mjs): `target`, still `identity`, is renamed aside, the verified copy renamed
     /// into place and the old one renamed to a hidden `old` name that is never put back; then the receipt is written.
-    /// Returns the old copy. Throws leaving `target` as it was and `staged` where it was.
-    private func swap(_ staged: URL, target: URL, identity: FileIdentity, appName: String, receipt: ReceiptDocument?, notes: Notes) throws -> URL {
+    /// Returns the old copy and the identity of the new one in place. Throws leaving `target` as it was and `staged` where
+    /// it was.
+    private func swap(
+        _ staged: URL, target: URL, identity: FileIdentity, appName: String, receipt: ReceiptDocument?, notes: Notes
+    ) throws -> (old: URL, placed: FileIdentity?) {
         let dir = target.deletingLastPathComponent()
         let backup = AppLock.hiddenName(in: dir, appName: appName, kind: "update")
         let changed = "\(target.path) was changed or removed while it was being updated (by the subset command?)"
@@ -541,17 +556,18 @@ public struct AppInstaller: Sendable {
                 notes.add("\(failure.message); the app is updated without one.")
             }
         }
-        return old
+        return (old, placed)
     }
 
     /// What an interrupted update or move to the Trash (here or by `subset`) left beside `<appName>.app` under a hidden
     /// name, handled as recoverApps in update.mjs does: when `<appName>.app` is missing and exactly one `update` or `trash`
     /// copy of a process that no longer runs is there, it is renamed back; when `<appName>.app` is there, such copies are
     /// renamed to `old` names. `old` copies are never put back, only named. Staged copies are never touched.
-    func recover(_ app: CatalogApp) -> [String] {
+    /// Each note says whether it reports a rename made here (`changed`).
+    func recover(_ app: CatalogApp) -> [(line: String, changed: Bool)] {
         let escaped = NSRegularExpression.escapedPattern(for: app.appName)
         guard let pattern = try? NSRegularExpression(pattern: #"^\.\#(escaped)\.app\.subset-(update|trash|old)-([0-9]+)-[0-9a-f]{12}$"#) else { return [] }
-        var notes: [String] = []
+        var notes: [(line: String, changed: Bool)] = []
         for folder in setup.folders {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.directory.path)) ?? []
             let found = names.compactMap { name -> (file: URL, kind: String, pid: pid_t)? in
@@ -565,7 +581,7 @@ public struct AppInstaller: Sendable {
             var present = Self.identity(target) != nil
             if present, !BoundedFile.isDirectory(target.path) {
                 // Not an app folder (a link or a file): nothing is put back over it or renamed beside it, only named.
-                notes.append("\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of \(app.name) beside it at \(found.map(\.file.path).joined(separator: ", ")).")
+                notes.append(("\(target.path) is not an app folder, and an interrupted update or move to the Trash left copies of \(app.name) beside it at \(found.map(\.file.path).joined(separator: ", ")).", false))
                 continue
             }
             let busy = found.first { $0.pid != getpid() && AppLock.processRuns($0.pid) }
@@ -573,21 +589,24 @@ public struct AppInstaller: Sendable {
             if !present, !unfinished.isEmpty {
                 if busy == nil, unfinished.count == 1, BoundedFile.isDirectory(unfinished[0].file.path),
                    renamex_np(unfinished[0].file.path, target.path, UInt32(RENAME_EXCL)) == 0 {
-                    notes.append("\(app.name) was put back at \(target.path): an interrupted update had left it at \(unfinished[0].file.path).")
+                    notes.append(("\(app.name) was put back at \(target.path): an interrupted update had left it at \(unfinished[0].file.path).", true))
                     present = true
                 } else {
-                    notes.append("\(app.name) is missing from \(folder.label), and an interrupted update left it at \(unfinished.map(\.file.path).joined(separator: ", ")); rename the copy to keep to \(target.path).")
+                    notes.append(("\(app.name) is missing from \(folder.label), and an interrupted update left it at \(unfinished.map(\.file.path).joined(separator: ", ")); rename the copy to keep to \(target.path).", false))
                     continue
                 }
             }
             if busy != nil { continue }
+            var renamed = false
             let left = found.filter { Self.identity($0.file) != nil }.map { entry -> String in
                 guard entry.kind != "old" else { return entry.file.path }
                 let old = AppLock.hiddenName(in: folder.directory, appName: app.appName, kind: "old")
-                return renamex_np(entry.file.path, old.path, UInt32(RENAME_EXCL)) == 0 ? old.path : entry.file.path
+                guard renamex_np(entry.file.path, old.path, UInt32(RENAME_EXCL)) == 0 else { return entry.file.path }
+                renamed = true
+                return old.path
             }
             if !left.isEmpty {
-                notes.append("A previous copy of \(app.name) that was not moved to the Trash is at \(left.joined(separator: ", ")); it is not used any more and can be moved to the Trash.")
+                notes.append(("A previous copy of \(app.name) that was not moved to the Trash is at \(left.joined(separator: ", ")); it is not used any more and can be moved to the Trash.", renamed))
             }
         }
         return notes

@@ -57,10 +57,13 @@ final class InstallReceiptAndActionsTests: XCTestCase {
 
     // MARK: - Actions
 
-    private func actions(running: FakeRunning = FakeRunning(), images: FakeImages = FakeImages(), verifier: FakeVerifier = FakeVerifier()) async -> (AppActions, AppListModel) {
+    private func actions(
+        running: FakeRunning = FakeRunning(), images: FakeImages = FakeImages(), verifier: FakeVerifier = FakeVerifier(),
+        finder: (any InstalledAppDetecting)? = nil
+    ) async -> (AppActions, AppListModel) {
         let catalog = Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [AppInstallerTests.breaks], tools: [])
         let loader = RecordedLoader([.success(LoadedCatalog(catalog: catalog, url: URL(string: "https://subset.21n.dev/catalog/v1.json")!, fetchedAt: Date(), cached: false))])
-        let finder = InstalledAppFinder(folders: folders, receipts: receipts)
+        let finder = finder ?? InstalledAppFinder(folders: folders, receipts: receipts)
         let model = AppListModel(loader: loader, finder: finder, defaults: UserDefaults(suiteName: "subset-actions-\(UUID().uuidString)")!)
         await model.refresh()
         images.volumes = [AppInstallerTests.liveImage: ["Breaks": { try AppInstallerTests.imageVolume($0, version: "0.1.0", build: "12") }]]
@@ -171,6 +174,29 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         guard case .failed? = actions.activities["breaks"] else { return XCTFail("\(String(describing: actions.activities["breaks"]))") }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: system.path), [])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [])
+    }
+
+    // An install has ended and its row waits for the installed apps to be looked for again, which a stalled folder holds
+    // up: quitting Subset does not wait for that look.
+    func testQuittingDoesNotWaitForTheInstalledAppsToBeLookedForAgain() async throws {
+        let gated = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2])
+        let (actions, _) = await actions(finder: gated)
+        actions.install("breaks")
+        for _ in 0..<500 where !gated.isWaiting { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(gated.isWaiting)
+        XCTAssertTrue(actions.isBusy("breaks"), "the row stays disabled until its app is looked for again")
+        XCTAssertFalse(actions.isWorking, "the install itself has ended")
+        // Should quitting wait for the look, the look is let go after 3 seconds and the elapsed time says so.
+        let fallback = Task.detached {
+            try? await Task.sleep(for: .seconds(3))
+            gated.release()
+        }
+        let started = Date()
+        await actions.cancelAll()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "quitting did not wait for the look")
+        gated.release()
+        fallback.cancel()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("tmp").path), [], "the install cleaned up")
     }
 
     func testARowIsEnabledAgainOnlyOnceItsNewStateIsListed() async throws {

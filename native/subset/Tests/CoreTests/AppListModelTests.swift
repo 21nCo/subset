@@ -72,6 +72,9 @@ final class GatedLoader: CatalogLoading, @unchecked Sendable {
 final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
     private let finder: InstalledAppFinder
     private let gatedCalls: Set<Int>
+    /// A held call then reads the folders (a look held before it reads); otherwise it finds nothing (one that read
+    /// before it was held).
+    private let readsAfterGate: Bool
     private let lock = NSLock()
     private let gate = DispatchSemaphore(value: 0)
     private var calls = 0
@@ -82,9 +85,10 @@ final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
         self.init(finder, gatedCalls: [gatedCall])
     }
 
-    init(_ finder: InstalledAppFinder, gatedCalls: Set<Int>) {
+    init(_ finder: InstalledAppFinder, gatedCalls: Set<Int>, readsAfterGate: Bool = false) {
         self.finder = finder
         self.gatedCalls = gatedCalls
+        self.readsAfterGate = readsAfterGate
     }
 
     var isWaiting: Bool { lock.withLock { waiting } }
@@ -104,7 +108,7 @@ final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
         guard gatedCalls.contains(call) else { return finder.detect(apps) }
         gate.wait()
         lock.withLock { held -= 1 }
-        return [:]
+        return readsAfterGate ? finder.detect(apps) : [:]
     }
 
     func release() { gate.signal() }
@@ -494,25 +498,30 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(loader.loads, 1)
     }
 
-    // A look for installed apps that ends after a later one has published does not take the list back.
-    func testAnOlderScanThatEndsLastDoesNotRevertWhatIsInstalled() async throws {
-        try install("Breaks", "dev.subset.breaks", version: "0.0.9")
-        let gated = GatedFinder(finder, gatedCall: 2)
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
-        await model.refresh()
-        let older = Task { await model.reloadInstalled() }
-        try await waitUntil({ gated.isWaiting }, stopping: older, release: { gated.release() })
-        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        await model.reloadInstalled()
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
-        gated.release()
-        await older.value
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the older, empty scan is not published")
+    // Looks for installed apps run one after another, so the last to publish is the latest look at every app, whether
+    // the earlier look was held before it read the folders or after it had read them: an app the subset command
+    // installs meanwhile is listed either way.
+    func testAnAppInstalledWhileAnEarlierLookIsHeldIsListed() async throws {
+        for readsAfterGate in [true, false] {
+            let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: readsAfterGate)
+            let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+            await model.refresh()
+            let earlier = Task { await model.reloadInstalled() }
+            try await waitUntil({ gated.isWaiting }, stopping: earlier, release: { gated.release() })
+            let later = Task { await model.reloadInstalled() }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(gated.callCount, 2, "the later look waits for the earlier one")
+            try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+            gated.release()
+            await earlier.value
+            await later.value
+            XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "held \(readsAfterGate ? "before" : "after") reading")
+            try FileManager.default.removeItem(at: root.appendingPathComponent("apps/Breaks.app"))
+        }
     }
 
-    // A refresh whose new feed adds an installed app finishes after a reload over the old feed has published: the list
-    // shows the new feed with what is installed for it.
-    func testARefreshWithANewFeedThatEndsLastListsItsInstalledApps() async throws {
+    // A refresh with a new feed and a reload over the old feed: the list shows the new feed with what is installed for it.
+    func testARefreshWithANewFeedAndAReloadOverTheOldOneListTheNewFeedsApps() async throws {
         try install("Breaks", "dev.subset.breaks", version: "0.0.9")
         try install("Other", "dev.subset.other", version: "1.0.0")
         let breaks = AppInstallerTests.breaks
@@ -521,24 +530,19 @@ final class AppListModelTests: XCTestCase {
         let url = CatalogLocation.defaultURL
         let old = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [breaks], tools: []), url: url, fetchedAt: clock.now, cached: false)
         let new = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-13T00:00:00Z", apps: [breaks, other], tools: []), url: url, fetchedAt: clock.now, cached: false)
-        // Calls 2 and 4 (the refresh's look and its first look again) are held; 3 and 5 are reloads over the old feed.
-        let gated = GatedFinder(finder, gatedCalls: [2, 4])
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
         let model = AppListModel(loader: RecordedLoader([.success(old), .success(new)]), finder: gated, defaults: defaults)
         await model.refresh()
         let refresh = Task { await model.refresh(force: true) }
-        let release = { gated.release(); gated.release() }
-        try await waitUntil({ gated.callCount == 2 && gated.holding == 1 }, stopping: refresh, release: release)
-        await model.reloadInstalled()
-        gated.release()
-        try await waitUntil({ gated.callCount == 4 && gated.holding == 1 }, stopping: refresh, release: release)
-        // An operation updates Breaks while the refresh looks again; its reload publishes first.
+        try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
+        let reload = Task { await model.reloadInstalled() }
+        // An operation updates Breaks while the refresh's look is held.
         try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        await model.reloadInstalled()
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
         gated.release()
         await refresh.value
+        await reload.value
         XCTAssertEqual(model.catalog?.apps.map(\.id), ["breaks", "other"])
         XCTAssertEqual(model.installed["other"]?.map(\.versionLabel), ["1.0.0"])
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the older look does not undo the update")
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
     }
 }
