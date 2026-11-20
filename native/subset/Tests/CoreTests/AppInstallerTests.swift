@@ -948,6 +948,128 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(targets.map { $0.pid }, [10, 12])
     }
 
+    // A process found in the copy whose pid went to another process of the copy, started later, between the look that
+    // found it and the reading of when it started, is never asked to quit: the start time is bound to that look. Update
+    // and Move to Trash then refuse, as something still runs, leaving the copy, its receipt and the Trash as they were.
+    func testAPidReusedBetweenItsLookAndItsStartTimeIsNotAskedToQuit() async throws {
+        let bundle = URL(fileURLWithPath: "/Applications/Breaks.app")
+        let inside = WorkspaceRunningApps.ProcessLook.path(bundle.path + "/Contents/MacOS/Breaks")
+        // Read before the look: the process looked at (100); after it: a later one (900). 31 stays the same.
+        let looked = Recorder<Set<pid_t>>([])
+        let found = try WorkspaceRunningApps.observed(inside: bundle, among: [30, 31], look: { pid in
+            looked.update { $0.insert(pid) }
+            return inside
+        }, startTime: { pid in pid == 30 && looked.get().contains(pid) ? 900 : 100 })
+        XCTAssertEqual(found.keys.sorted(), [30, 31], "both count as running")
+        XCTAssertEqual(found[30], .some(nil))
+        XCTAssertEqual(found[31], .some(100))
+        let apps: [(pid: pid_t, url: URL?)] = [(30, bundle), (31, bundle)]
+        let targets = WorkspaceRunningApps.targets(apps, found: found, matcher: BundleMatcher(bundle), own: getpid(), startTime: { $0 == 30 ? 900 : 100 }) {
+            ($0.pid, [$0.url])
+        }
+        XCTAssertEqual(targets.map { $0.pid }, [31])
+
+        for operation in ["update", "moveToTrash"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            let path = target.path
+            // The first look is the check before the quit; pid 30 goes to a later process of the copy as the quit's own
+            // look of the copy ends, before its start time is read.
+            let looks = Recorder(0)
+            let terminated = Recorder<[pid_t]>([])
+            var system = WorkspaceRunningApps.System()
+            system.pids = { [30] }
+            system.look = { _ in
+                looks.update { $0 += 1 }
+                return .path(path + "/Contents/MacOS/Breaks")
+            }
+            system.startTime = { _ in looks.get() >= 2 ? 900 : 100 }
+            system.apps = {
+                [WorkspaceRunningApps.ListedApp(pid: 30, urls: [URL(fileURLWithPath: path)]) {
+                    terminated.update { $0.append(30) }
+                    return true
+                }]
+            }
+            let running = WorkspaceRunningApps(system: system)
+            let refused = await failure { installer in
+                var installer = installer
+                installer.running = running
+                return operation == "update" ? try await installer.update(Self.breaks, Self.live, quitAllowed: true)
+                    : try await installer.moveToTrash(Self.breaks, quitAllowed: true)
+            }
+            XCTAssertEqual(refused?.step, .running, "\(operation): \(refused?.message ?? "")")
+            XCTAssertEqual(terminated.get(), [], operation)
+            XCTAssertEqual(AppInstaller.identity(target), old, operation)
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, operation)
+            XCTAssertEqual(names(trashFolder), [], operation)
+            assertNoLeftovers()
+        }
+    }
+
+    // A process libproc no longer finds because its exit has begun (the kernel's record then has P_WEXIT, or it is a
+    // zombie, or there is none) has exited and never refuses; one of this user's that runs and cannot be named still
+    // refuses, and another user's does not.
+    func testAnExitingProcessHasExitedAndALiveOneThatCannotBeNamedStillRefuses() {
+        let uid = getuid()
+        func record(stat: Int32, flags: Int32 = 0, owner: uid_t = getuid()) -> kinfo_proc {
+            var record = kinfo_proc()
+            record.kp_proc.p_stat = CChar(stat)
+            record.kp_proc.p_flag = flags
+            record.kp_eproc.e_ucred.cr_uid = owner
+            record.kp_eproc.e_pcred.p_ruid = owner
+            return record
+        }
+        let classify = { (record: kinfo_proc?, failure: Int32) in
+            WorkspaceRunningApps.classify(record, failure: failure, code: ESRCH, uid: uid)
+        }
+        XCTAssertEqual(classify(record(stat: 2, flags: P_WEXIT), 0), .exited, "running, its exit begun")
+        XCTAssertEqual(classify(record(stat: 2, flags: P_WEXIT, owner: uid + 1), 0), .exited)
+        XCTAssertEqual(classify(record(stat: 5), 0), .exited, "a zombie")
+        XCTAssertEqual(classify(nil, 0), .exited, "no record")
+        XCTAssertEqual(classify(record(stat: 2), 0), .unknown(ESRCH), "one of this user's that runs")
+        XCTAssertEqual(classify(record(stat: 3, flags: P_TRACED), 0), .unknown(ESRCH), "stopped, not exiting")
+        XCTAssertEqual(classify(record(stat: 2, owner: uid + 1), 0), .otherUser)
+        XCTAssertEqual(classify(nil, EPERM), .unknown(EPERM), "a record that cannot be read")
+    }
+
+    // Short-lived processes of this user start and exit throughout every scan; none of them refuses, and a real helper
+    // running from the copy is found by each scan.
+    func testProcessesExitingDuringAScanNeverRefuseAndTheHelperIsStillFound() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-churn-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let bundle = folder.appendingPathComponent("Breaks.app")
+        try makeBundle(bundle, bundleID: "dev.subset.breaks", version: "0.1.0")
+        let executable = bundle.appendingPathComponent("Contents/MacOS/Breaks")
+        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
+        let signed = try await ToolRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", executable.path], timeout: 60)
+        XCTAssertEqual(signed.status, 0, signed.stderr)
+        let helper = Process()
+        helper.executableURL = executable
+        helper.arguments = ["60"]
+        try helper.run()
+        defer { helper.terminate() }
+        let churn = try (0..<4).map { _ in
+            let loop = Process()
+            loop.executableURL = URL(fileURLWithPath: "/bin/sh")
+            loop.arguments = ["-c", "while :; do /bin/sh -c :; done"]
+            try loop.run()
+            return loop
+        }
+        defer { churn.forEach { $0.terminate() } }
+        let other = folder.appendingPathComponent("Other.app")
+        try makeBundle(other, bundleID: "dev.subset.other", version: "1.0")
+        let until = Date().addingTimeInterval(6)
+        var scans = 0
+        while Date() < until || scans < 20 {
+            XCTAssertEqual(try WorkspaceRunningApps().processes(inside: bundle), [helper.processIdentifier])
+            XCTAssertEqual(try WorkspaceRunningApps().processes(inside: other), [])
+            scans += 1
+        }
+        XCTAssertTrue(churn.allSatisfy(\.isRunning), "processes kept starting and exiting throughout")
+    }
+
     // A real process in a /var/folders bundle is found by the bundle's real path. Once its executable is deleted libproc
     // cannot name it (ESRCH, as for one that exited); the path it was started with still does, so it is still found
     // inside its bundle and blocks nothing else.

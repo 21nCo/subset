@@ -96,7 +96,36 @@ public protocol RunningAppControlling: Sendable {
 
 /// The processes from libproc (each pid's executable path), quit with NSRunningApplication.terminate().
 public struct WorkspaceRunningApps: RunningAppControlling {
-    public init() {}
+    /// A running app as the system lists it: its pid, its executable and bundle, and how to ask it to quit (false when it
+    /// had already exited).
+    struct ListedApp {
+        var pid: pid_t
+        var urls: [URL?]
+        var terminate: @MainActor () -> Bool
+    }
+
+    /// What is read from the system (tests replace it): every pid, what is known of one, when one started, and the
+    /// running apps.
+    struct System: Sendable {
+        var pids: @Sendable () throws -> [pid_t] = { try WorkspaceRunningApps.allPids() }
+        var look: @Sendable (pid_t) -> ProcessLook = { WorkspaceRunningApps.look($0) }
+        var startTime: @Sendable (pid_t) -> UInt64? = { WorkspaceRunningApps.startTime(of: $0) }
+        var apps: @MainActor @Sendable () -> [ListedApp] = {
+            NSWorkspace.shared.runningApplications.map { app in
+                ListedApp(pid: app.processIdentifier, urls: [app.executableURL, app.bundleURL]) { !app.isTerminated && app.terminate() }
+            }
+        }
+    }
+
+    let system: System
+
+    public init() {
+        system = System()
+    }
+
+    init(system: System) {
+        self.system = system
+    }
 
     /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
     /// Paths are compared by BundleMatcher (real paths, case folded on a case-insensitive volume). A process is the
@@ -104,11 +133,11 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     /// the `subset` command), is inside it. The start path stays when the executable, or a folder above it, was deleted,
     /// moved or replaced by a link since (libproc then names where the file is now, or nothing), so it is judged as saved
     /// and with each of its leading folders resolved now (BundleMatcher.startedInside). One of this user's that still
-    /// runs and cannot be named either way refuses; one that has exited or is another user's (which `ps` cannot name
-    /// either, and Subset cannot ask to quit) does not, told apart by the kernel's process record, which `ps` reads too
-    /// (PROC_PIDTBSDINFO refuses another user's process with EPERM).
+    /// runs and cannot be named either way refuses; one that has exited or is exiting, or is another user's (which `ps`
+    /// cannot name either, and Subset cannot ask to quit) does not, told apart by the kernel's process record, which `ps`
+    /// reads too (PROC_PIDTBSDINFO refuses another user's process with EPERM).
     public func processes(inside bundle: URL) throws -> [pid_t] {
-        try Self.processes(inside: bundle, among: Self.allPids(), look: Self.look)
+        try Self.processes(inside: bundle, among: system.pids(), look: system.look)
     }
 
     /// What is known of a process: the path of its executable, or why there is none.
@@ -120,6 +149,24 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         case exited
         case otherUser
         case unknown(Int32)
+    }
+
+    /// Those of `pids` whose executable is inside `bundle`, as `look` names them, each with when it started, read just
+    /// before and just after its look: nil when the two differ or cannot be read (the pid may have gone to another process
+    /// between them, so what was looked at may not be the process now), and then it counts as running but is never
+    /// asked to quit.
+    static func observed(
+        inside bundle: URL, among pids: [pid_t], look: (pid_t) -> ProcessLook, startTime: (pid_t) -> UInt64?
+    ) throws -> [pid_t: UInt64?] {
+        var started: [pid_t: UInt64?] = [:]
+        let found = try processes(inside: bundle, among: pids) { pid in
+            let before = startTime(pid)
+            let seen = look(pid)
+            let after = startTime(pid)
+            started.updateValue(before == after ? before : nil, forKey: pid)
+            return seen
+        }
+        return Dictionary(found.map { ($0, started[$0] ?? nil) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// Those of `pids` whose executable is inside `bundle`, as `look` names them.
@@ -148,10 +195,16 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         let code = errno
         if let path = startPath(of: pid), path.hasPrefix("/") { return .started(path) }
         let (record, failure) = record(of: pid)
+        return classify(record, failure: failure, code: code, uid: getuid())
+    }
+
+    /// What the kernel's record says of a process libproc cannot name (`code`, its errno) and whose start path cannot be
+    /// read: exited when there is no record, it is a zombie (SZOMB, 5), or it is exiting (P_WEXIT: libproc no longer
+    /// finds a process once its exit has begun, while the record stays until it is reaped); another user's; else, one of
+    /// this user's that runs and cannot be read.
+    static func classify(_ record: kinfo_proc?, failure: Int32, code: Int32, uid: uid_t) -> ProcessLook {
         guard failure == 0 else { return .unknown(failure) }
-        // No record: it has exited. SZOMB (5): exited, not yet reaped.
-        guard let record, record.kp_proc.p_stat != 5 else { return .exited }
-        let uid = getuid()
+        guard let record, record.kp_proc.p_stat != 5, record.kp_proc.p_flag & P_WEXIT == 0 else { return .exited }
         return record.kp_eproc.e_ucred.cr_uid == uid || record.kp_eproc.e_pcred.p_ruid == uid ? .unknown(code) : .otherUser
     }
 
@@ -212,18 +265,17 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     public func quit(_ bundle: URL, timeout: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool) {
-        // Each process of the copy, by when it started too.
-        let mine = try processes(inside: bundle)
-        let found = Dictionary(mine.map { ($0, Self.startTime(of: $0)) }, uniquingKeysWith: { first, _ in first })
+        // Each process of the copy, with when it started as read around the look that found it in the copy.
+        let found = try Self.observed(inside: bundle, among: system.pids(), look: system.look, startTime: system.startTime)
+        let mine = Array(found.keys)
         let matcher = BundleMatcher(bundle)
+        let system = system
         let asked = try await MainActor.run { () throws -> [pid_t] in
             guard isChecked() else {
                 throw InstallFailure(.running, "\(bundle.path) was replaced while it was being quit, so nothing was asked to quit")
             }
-            let apps = Self.targets(NSWorkspace.shared.runningApplications, found: found, matcher: matcher, own: getpid(), startTime: Self.startTime) {
-                ($0.processIdentifier, [$0.executableURL, $0.bundleURL])
-            }
-            return Self.ask(apps) { !$0.isTerminated && $0.terminate() }.map(\.processIdentifier)
+            let apps = Self.targets(system.apps(), found: found, matcher: matcher, own: getpid(), startTime: system.startTime) { ($0.pid, $0.urls) }
+            return Self.ask(apps) { $0.terminate() }.map(\.pid)
         }
         guard !asked.isEmpty else {
             try Task.checkCancellation()
@@ -241,9 +293,10 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     /// The running apps to ask to quit: each that is a process `found` inside the bundle (the same pid, started at the
-    /// same time) and whose executable or bundle, as the system reports it now, is that bundle's too, so a pid given to
-    /// another process since is never asked. This app is never asked to quit itself (the installer refuses such a copy
-    /// first); it stays in what is left.
+    /// time read around the look that found it, which a pid given to another process meanwhile leaves nil) and whose
+    /// executable or bundle, as the system reports it now, is that bundle's too, so a pid given to another process since
+    /// is never asked. This app is never asked to quit itself (the installer refuses such a copy first); it stays in what
+    /// is left.
     static func targets<App>(
         _ apps: [App], found: [pid_t: UInt64?], matcher: BundleMatcher, own: pid_t, startTime: (pid_t) -> UInt64?,
         _ identity: (App) -> (pid_t, [URL?])
