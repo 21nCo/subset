@@ -825,6 +825,45 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         }
     }
 
+    // The retry waiting for a cancelled attempt's read is cancelled just as that read answers (before the retry has
+    // gone on): it ends without another read, question or change.
+    func testARetryCancelledAsTheReadItJoinedAnswersReadsNoMore() async throws {
+        for kind in [QuitRequest.Kind.update, .moveToTrash] {
+            try tearDownWithError()
+            try setUpWithError()
+            let path = system.appendingPathComponent("Breaks.app").path
+            try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.breaks", version: "0.0.9")
+            let running = FakeRunning()
+            running.running.update { $0.insert(path) }
+            let (actions, _) = await actions(running: running)
+            let gate = DispatchSemaphore(value: 0)
+            let reads = Recorder(0)
+            running.hold = {
+                reads.update { $0 += 1 }
+                if reads.get() == 1 { gate.wait() }
+            }
+            let start = { kind == .update ? actions.update("breaks") : actions.moveToTrash("breaks") }
+            start()
+            try await waitFor { reads.get() == 1 }
+            actions.cancel("breaks")
+            await actions.wait("breaks")
+            start()
+            try await Task.sleep(for: .milliseconds(100))
+            // The read answers while the main actor is held, so the retry is cancelled before it goes on.
+            gate.signal()
+            usleep(300_000)
+            actions.cancel("breaks")
+            await actions.wait("breaks")
+            try await Task.sleep(for: .milliseconds(200))
+            let what = kind == .update ? "updated to 0.1.0" : "moved to the Trash"
+            XCTAssertEqual(reads.get(), 1, "\(kind): no other read")
+            XCTAssertNil(actions.quitRequest, "\(kind)")
+            XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not \(what): it was cancelled before anything was changed."), "\(kind)")
+            XCTAssertEqual(running.quits.get(), [], "\(kind)")
+            XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleShortVersionString"] as? String, "0.0.9", "\(kind)")
+        }
+    }
+
     private static func catalog(_ apps: [CatalogApp]) -> Catalog {
         Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: apps, tools: [])
     }

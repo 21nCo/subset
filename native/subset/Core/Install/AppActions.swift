@@ -291,6 +291,8 @@ public final class AppActions: ObservableObject {
                     // A read begun for an earlier, cancelled attempt may predate an app started or quit since: once it
                     // has ended, this attempt reads afresh.
                     if held.joined {
+                        // Cancel pressed once the held-up read had answered ends the attempt before another read.
+                        if Task.isCancelled { throw Self.cancelledCheck }
                         guard let fresh = self?.runningRead(app), !fresh.joined else { return Self.readsHeldUp(kind, app, release) }
                         running = try await fresh.read.value(cancelled: Self.cancelledCheck)
                     }
