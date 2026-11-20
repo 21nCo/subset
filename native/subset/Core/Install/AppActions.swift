@@ -10,14 +10,27 @@ public enum AppActivity: Equatable, Sendable {
 }
 
 /// An operation waiting for the user to agree that the running app may be quit. The answer holds only for the app it
-/// names (`appName`, `bundleID`): when the row then lists another app, nothing is quit.
+/// names (`appName`, `bundleID`, and `bundleName`, the `<bundleName>.app` it is installed as): when the row then lists
+/// another app, or the same one under another bundle name, nothing is quit.
 public struct QuitRequest: Identifiable, Equatable, Sendable {
     public enum Kind: Sendable { case update, moveToTrash }
     public var id: String { appID }
     public var appID: String
     public var appName: String
     public var bundleID: String
+    public var bundleName: String
     public var kind: Kind
+
+    init(appID: String, _ app: CatalogApp, kind: Kind) {
+        self.appID = appID
+        appName = app.name
+        bundleID = app.bundleID
+        bundleName = app.appName
+        self.kind = kind
+    }
+
+    /// Whether `app` is the app this request named.
+    func names(_ app: CatalogApp) -> Bool { app.name == appName && app.bundleID == bundleID && app.appName == bundleName }
 
     public var title: String { "Quit \(appName)?" }
     public var message: String {
@@ -33,8 +46,13 @@ public struct QuitRequest: Identifiable, Equatable, Sendable {
 @MainActor
 public final class AppActions: ObservableObject {
     @Published public private(set) var activities: [String: AppActivity] = [:]
-    /// Set when an update or move to the Trash needs the user to agree to quit the app.
-    @Published public var quitRequest: QuitRequest?
+    /// Set when an update or move to the Trash needs the user to agree to quit the app. Once it is cleared (answered or
+    /// dismissed), the next waiting request is presented.
+    @Published public var quitRequest: QuitRequest? {
+        didSet { if quitRequest == nil, !waitingRequests.isEmpty { quitRequest = waitingRequests.removeFirst() } }
+    }
+    /// Requests of other rows that came while one was presented, in the order they came.
+    private var waitingRequests: [QuitRequest] = []
 
     private let installer: AppInstaller
     private let model: AppListModel
@@ -92,6 +110,7 @@ public final class AppActions: ObservableObject {
     /// not wait for the installed apps to be looked for again, which a stalled folder could hold up.
     public func cancelAll() async {
         closed = true
+        waitingRequests = []
         quitRequest = nil
         let running = operations
         for operation in running.values { operation.cancel() }
@@ -111,7 +130,7 @@ public final class AppActions: ObservableObject {
     private func start(_ appID: String, kind: QuitRequest.Kind?, consent: QuitRequest? = nil) {
         guard !closed, !isBusy(appID), let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
         // The answer was given for the app the alert named; a row that now lists another app quits nothing.
-        if let consent, app.bundleID != consent.bundleID || app.name != consent.appName {
+        if let consent, !consent.names(app) {
             activities[appID] = .failed("Nothing was quit or changed: the list changed while Subset asked to quit \(consent.appName), so that answer no longer applies. Try again.")
             return
         }
@@ -180,7 +199,17 @@ public final class AppActions: ObservableObject {
         guard tasks[appID] != nil else { return }
         tasks[appID] = nil
         activities[appID] = nil
-        if !closed { quitRequest = QuitRequest(appID: appID, appName: app.name, bundleID: app.bundleID, kind: kind) }
+        guard !closed else { return }
+        let request = QuitRequest(appID: appID, app, kind: kind)
+        // One question at a time: another row's waits its turn, and a row asked again replaces its own waiting one.
+        if quitRequest == nil {
+            quitRequest = request
+        } else if quitRequest?.appID != appID {
+            waitingRequests.removeAll { $0.appID == appID }
+            waitingRequests.append(request)
+        } else {
+            quitRequest = request
+        }
     }
 
     /// Whether some installed copy of `app` runs, read on a thread of its own so a stalled folder or process list never

@@ -1776,4 +1776,22 @@ extension AppInstallerTests {
             XCTAssertTrue(failure?.notes.contains("The receipt \(receiptFile.path) was changed or removed after this update wrote it, so it was left as it is; it may not describe what is at \(path).") == true, "\(change): \(failure?.notes ?? [])")
         }
     }
+
+    // What an update left at the receipt's path is recognised without reading it (a receipt this process cannot read
+    // back, such as one written under a restrictive umask, is still its own), and a rewrite in place is not taken for it.
+    func testTheReceiptLeftIsRecognisedWithoutReadingIt() throws {
+        try Data("{}".utf8).write(to: receiptFile)
+        chmod(receiptFile.path, 0o200)
+        defer { chmod(receiptFile.path, 0o644) }
+        XCTAssertThrowsError(try AppInstaller.snapshotReceipt(receiptFile), "it cannot be read back")
+        let left = try XCTUnwrap(ReceiptState.of(receiptFile))
+        XCTAssertTrue(left.isCurrent(receiptFile))
+        let handle = try FileHandle(forWritingTo: receiptFile)
+        try handle.write(contentsOf: Data("[]".utf8))
+        try handle.close()
+        XCTAssertFalse(left.isCurrent(receiptFile), "rewritten in place")
+        try FileManager.default.removeItem(at: receiptFile)
+        XCTAssertFalse(left.isCurrent(receiptFile), "removed")
+        XCTAssertTrue(try XCTUnwrap(ReceiptState.of(receiptFile)).isCurrent(receiptFile), "absent, and still absent")
+    }
 }

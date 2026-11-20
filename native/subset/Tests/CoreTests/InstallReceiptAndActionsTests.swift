@@ -107,7 +107,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
 
         actions.update("breaks")
         await actions.wait("breaks")
-        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", appName: "Breaks", bundleID: "dev.subset.breaks", kind: .update))
+        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: .update))
         XCTAssertEqual(actions.quitRequest?.message, "Breaks is running. Subset asks it to quit before the new version is put in place; open it again once the update ends.")
         XCTAssertFalse(actions.isBusy("breaks"), "nothing starts before the user answers")
         actions.quitRequest = nil
@@ -330,7 +330,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
             running.running.update { $0.insert(path) }
             running.cancelDuringQuit = true
             let (actions, _) = await actions(running: running)
-            actions.confirmQuit(QuitRequest(appID: "breaks", appName: "Breaks", bundleID: "dev.subset.breaks", kind: kind))
+            actions.confirmQuit(QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: kind))
             await actions.wait("breaks")
             switch kind {
             case .update:
@@ -343,39 +343,71 @@ final class InstallReceiptAndActionsTests: XCTestCase {
     }
 
     // The answer to the quit question holds only for the app the alert named: a refresh that gives its row to another
-    // app (another bundle ID under the same ID) while the alert is open makes the answer quit, update and move nothing,
-    // and says so plainly. The same answer for the app still listed works (see testARunningAppIsQuitOnlyAfterTheUserAgrees).
+    // app (another bundle ID and name under the same ID), or to the same app installed under another bundle name, while
+    // the alert is open makes the answer quit, update and move nothing, and says so plainly. The same answer for the app
+    // still listed works (see testARunningAppIsQuitOnlyAfterTheUserAgrees).
     func testAnAnswerToQuitHoldsOnlyForTheAppTheAlertNamed() async throws {
         for kind in [QuitRequest.Kind.update, .moveToTrash] {
-            try tearDownWithError()
-            try setUpWithError()
-            let breaksPath = system.appendingPathComponent("Breaks.app").path
-            let otherPath = system.appendingPathComponent("Other.app").path
-            try makeBundle(URL(fileURLWithPath: breaksPath), bundleID: "dev.subset.breaks", version: "0.0.9")
-            try makeBundle(URL(fileURLWithPath: otherPath), bundleID: "dev.subset.other", version: "0.0.9")
-            let running = FakeRunning()
-            running.running.update { $0.formUnion([breaksPath, otherPath]) }
-            let other = CatalogApp(id: "breaks", name: "Other", summary: "s", appName: "Other", bundleID: "dev.subset.other", live: AppInstallerTests.breaks.live, beta: nil)
-            let images = FakeImages()
-            let (actions, model) = await actions(running: running, images: images, catalogs: [Self.catalog([AppInstallerTests.breaks]), Self.catalog([other])])
-            images.volumes = [AppInstallerTests.liveImage: ["Other": { try AppInstallerTests.imageVolume($0, version: "0.1.0", build: "12", name: "Other.app", bundleID: "dev.subset.other") }]]
-            if kind == .update { actions.update("breaks") } else { actions.moveToTrash("breaks") }
-            await actions.wait("breaks")
-            let request = try XCTUnwrap(actions.quitRequest, "\(kind)")
-            XCTAssertEqual(request.bundleID, "dev.subset.breaks")
-            await model.refresh()
-            actions.quitRequest = nil
-            actions.confirmQuit(request)
-            await actions.wait("breaks")
-            XCTAssertEqual(running.quits.get(), [], "\(kind): nothing is quit")
-            XCTAssertEqual(actions.activities["breaks"], .failed("Nothing was quit or changed: the list changed while Subset asked to quit Breaks, so that answer no longer applies. Try again."))
-            for (path, bundleID) in [(breaksPath, "dev.subset.breaks"), (otherPath, "dev.subset.other")] {
-                let info = InstalledAppFinder.infoPlist(path)
-                XCTAssertEqual(info?["CFBundleIdentifier"] as? String, bundleID, "\(kind): \(path) stays")
-                XCTAssertEqual(info?["CFBundleShortVersionString"] as? String, "0.0.9", "\(kind): \(path) is not updated")
+            for sameBundleID in [false, true] {
+                try tearDownWithError()
+                try setUpWithError()
+                let label = "\(kind) sameBundleID=\(sameBundleID)"
+                let otherName = sameBundleID ? "BreaksCopy" : "Other"
+                let otherID = sameBundleID ? "dev.subset.breaks" : "dev.subset.other"
+                let breaksPath = system.appendingPathComponent("Breaks.app").path
+                let otherPath = system.appendingPathComponent("\(otherName).app").path
+                try makeBundle(URL(fileURLWithPath: breaksPath), bundleID: "dev.subset.breaks", version: "0.0.9")
+                try makeBundle(URL(fileURLWithPath: otherPath), bundleID: otherID, version: "0.0.9")
+                let running = FakeRunning()
+                running.running.update { $0.formUnion([breaksPath, otherPath]) }
+                let other = CatalogApp(
+                    id: "breaks", name: sameBundleID ? "Breaks" : "Other", summary: "s", appName: otherName, bundleID: otherID,
+                    live: AppInstallerTests.breaks.live, beta: nil
+                )
+                let images = FakeImages()
+                let (actions, model) = await actions(running: running, images: images, catalogs: [Self.catalog([AppInstallerTests.breaks]), Self.catalog([other])])
+                images.volumes = [AppInstallerTests.liveImage: [otherName: { try AppInstallerTests.imageVolume($0, version: "0.1.0", build: "12", name: "\(otherName).app", bundleID: otherID) }]]
+                if kind == .update { actions.update("breaks") } else { actions.moveToTrash("breaks") }
+                await actions.wait("breaks")
+                let request = try XCTUnwrap(actions.quitRequest, label)
+                XCTAssertEqual([request.bundleID, request.bundleName], ["dev.subset.breaks", "Breaks"], label)
+                await model.refresh()
+                actions.quitRequest = nil
+                actions.confirmQuit(request)
+                await actions.wait("breaks")
+                XCTAssertEqual(running.quits.get(), [], "\(label): nothing is quit")
+                XCTAssertEqual(actions.activities["breaks"], .failed("Nothing was quit or changed: the list changed while Subset asked to quit Breaks, so that answer no longer applies. Try again."), label)
+                for (path, bundleID) in [(breaksPath, "dev.subset.breaks"), (otherPath, otherID)] {
+                    let info = InstalledAppFinder.infoPlist(path)
+                    XCTAssertEqual(info?["CFBundleIdentifier"] as? String, bundleID, "\(label): \(path) stays")
+                    XCTAssertEqual(info?["CFBundleShortVersionString"] as? String, "0.0.9", "\(label): \(path) is not updated")
+                }
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Trash").path), [], label)
             }
-            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Trash").path), [], "\(kind)")
         }
+    }
+
+    // Two rows whose running apps are found running one after the other each get their question, one at a time and in
+    // the order they came: dismissing the first presents the second, and none is lost.
+    func testQuitQuestionsOfTwoRowsAreAskedInTurn() async throws {
+        let breaksPath = system.appendingPathComponent("Breaks.app").path
+        let otherPath = system.appendingPathComponent("Other.app").path
+        try makeBundle(URL(fileURLWithPath: breaksPath), bundleID: "dev.subset.breaks", version: "0.0.9")
+        try makeBundle(URL(fileURLWithPath: otherPath), bundleID: "dev.subset.other", version: "0.0.9")
+        let running = FakeRunning()
+        running.running.update { $0.formUnion([breaksPath, otherPath]) }
+        let other = CatalogApp(id: "other", name: "Other", summary: "s", appName: "Other", bundleID: "dev.subset.other", live: AppInstallerTests.breaks.live, beta: nil)
+        let (actions, _) = await actions(running: running, catalogs: [Self.catalog([AppInstallerTests.breaks, other])])
+        actions.moveToTrash("breaks")
+        await actions.wait("breaks")
+        actions.moveToTrash("other")
+        await actions.wait("other")
+        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: .moveToTrash))
+        actions.quitRequest = nil
+        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "other", other, kind: .moveToTrash), "the second question comes next")
+        actions.quitRequest = nil
+        XCTAssertNil(actions.quitRequest)
+        XCTAssertEqual(running.quits.get(), [])
     }
 
     // Whether the app runs is read off the main actor: Update and Move to Trash return at once while that read is held
@@ -416,7 +448,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
                 } else {
                     gate.signal()
                     await actions.wait("breaks")
-                    XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", appName: "Breaks", bundleID: "dev.subset.breaks", kind: kind), label)
+                    XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: kind), label)
                     XCTAssertNil(actions.activities["breaks"], label)
                     XCTAssertFalse(actions.isBusy("breaks"), label)
                 }

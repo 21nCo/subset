@@ -197,9 +197,7 @@ public struct AppInstaller: Sendable {
                         (old, placed, receiptLeft) = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
                     if let old, let placed {
-                        let receiptRecord = previousReceipt.flatMap { record in
-                            receiptLeft.map { (file: record.file, previous: record.previous, written: $0) }
-                        }
+                        let receiptRecord = previousReceipt.map { (file: $0.file, previous: $0.previous, written: receiptLeft) }
                         try handOff(old, placed: placed, previous: identity, target: target, copy: copy, app: app, release: release,
                                     receipt: receiptRecord, notes: notes, progress: progress)
                     }
@@ -572,7 +570,8 @@ public struct AppInstaller: Sendable {
 
     /// Step 5 of an update (swapApp in update.mjs): `target`, still `identity`, is renamed aside, the verified copy renamed
     /// into place and the old one renamed to a hidden `old` name that is never put back; then the receipt is written.
-    /// Returns the old copy, the identity of the new one in place and what it left at the receipt's path. Throws leaving `target` as it was and `staged` where
+    /// Returns the old copy, the identity of the new one in place and what it left at the receipt's path (nil when there is
+    /// no receipt or that cannot be looked at). Throws leaving `target` as it was and `staged` where
     /// it was, or, when what is at `target` right after the rename is not the verified copy, leaving that as it is, the
     /// receipt unchanged and the previous copy put back (when nothing is there) or kept under its hidden name.
     private func swap(
@@ -625,7 +624,7 @@ public struct AppInstaller: Sendable {
             }
         }
         // What is at the receipt's path now, which a later undo may put back as it was only while it is still this.
-        let receiptLeft = receipt.map { ReceiptState.of($0.file) }
+        let receiptLeft = receipt.flatMap { ReceiptState.of($0.file) }
         var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
         if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         return (old, verified, receiptLeft)
@@ -644,7 +643,7 @@ public struct AppInstaller: Sendable {
         let why = "\(target.path) was changed or removed after the new copy was put there (by the subset command?)"
         var receiptBack = false
         if let receipt {
-            if !receipt.written.isCurrent(receipt.file) {
+            if receipt.written?.isCurrent(receipt.file) != true {
                 notes.add("The receipt \(receipt.file.path) was changed or removed after this update wrote it, so it was left as it is; it may not describe what is at \(target.path).")
             } else if let failure = Self.restoreReceipt(receipt.previous, to: receipt.file) {
                 notes.add("The receipt \(receipt.file.path), written for the new copy, could not be put back as it was (\(failure)).", changed: true)
@@ -951,22 +950,35 @@ enum ReceiptSnapshot: Equatable, Sendable {
     case contents(Data)
 }
 
-/// What an update left at the receipt's path: its entry (device and inode, nil when none) and what it holds.
+/// What an update left at the receipt's path, as lstat sees it (nothing is read, so a receipt this process cannot read
+/// back is still recognised): none, or its entry (device and inode), type and permissions, size, and the times it was
+/// last written and changed, which any rewrite, replacement or removal changes.
 struct ReceiptState: Equatable, Sendable {
+    var present: Bool
     var identity: FileIdentity?
-    /// Nil when it could not be read (then it is never taken for what was left).
-    var snapshot: ReceiptSnapshot?
+    var mode: mode_t = 0
+    var size: off_t = 0
+    var written: [Int] = []
+    var changed: [Int] = []
 
-    static func of(_ file: URL) -> ReceiptState {
-        ReceiptState(identity: AppInstaller.identity(file), snapshot: try? AppInstaller.snapshotReceipt(file))
+    /// Nil when the path cannot be looked at (then nothing there is taken for what was left).
+    static func of(_ file: URL) -> ReceiptState? {
+        var status = stat()
+        guard lstat(file.path, &status) == 0 else { return errno == ENOENT ? ReceiptState(present: false) : nil }
+        return ReceiptState(
+            present: true, identity: FileIdentity(device: status.st_dev, inode: status.st_ino), mode: status.st_mode, size: status.st_size,
+            written: [Int(status.st_mtimespec.tv_sec), status.st_mtimespec.tv_nsec],
+            changed: [Int(status.st_ctimespec.tv_sec), status.st_ctimespec.tv_nsec]
+        )
     }
 
     /// Whether the receipt's path still holds exactly this.
-    func isCurrent(_ file: URL) -> Bool { snapshot != nil && Self.of(file) == self }
+    func isCurrent(_ file: URL) -> Bool { Self.of(file) == self }
 }
 
-/// An update's receipt: its file, what it held before the update (put back on an undo) and what the update left there.
-typealias ReceiptRecord = (file: URL, previous: ReceiptSnapshot, written: ReceiptState)
+/// An update's receipt: its file, what it held before the update (put back on an undo) and what the update left there
+/// (nil when that could not be looked at: then it is never put back).
+typealias ReceiptRecord = (file: URL, previous: ReceiptSnapshot, written: ReceiptState?)
 
 /// A file's device and inode: the copy checked is the copy changed.
 struct FileIdentity: Equatable, Sendable {
