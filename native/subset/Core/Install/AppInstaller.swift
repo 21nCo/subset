@@ -56,6 +56,8 @@ public struct AppInstaller: Sendable {
     public static let downloadPrefix = "https://github.com/21nCo/subset/releases/download/"
     /// The copying tool (tests give a wrapper that can be held mid-copy).
     var ditto = "/usr/bin/ditto"
+    /// Runs right after an update renames the verified copy into place (tests change what is there then).
+    var afterPlacing: @Sendable (URL) -> Void = { _ in }
 
     public var setup: InstallSetup
     public var downloader: any ImageDownloading
@@ -183,12 +185,12 @@ public struct AppInstaller: Sendable {
                     }
                 } catch {
                     if quit {
-                        // Quitting changed something even when the update then failed or was cancelled. Only the copy
-                        // that was quit is opened again, never something put at its path since.
+                        // Quitting is said even when the update then failed or was cancelled (it changed no copy). Only
+                        // the copy that was quit is opened again, never something put at its path since.
                         if let why = await running.reopen(target, isExpected: { Self.identity(target) == identity }) {
-                            notes.add("\(app.name) was quit for the update and was not reopened (\(why)).", changed: true)
+                            notes.add("\(app.name) was quit for the update and was not reopened (\(why)).", quit: true)
                         } else {
-                            notes.add("\(app.name) was asked to quit for the update and was reopened.", changed: true)
+                            notes.add("\(app.name) was asked to quit for the update and was reopened.", quit: true)
                         }
                     }
                     throw error
@@ -237,8 +239,8 @@ public struct AppInstaller: Sendable {
                 progress(.quitting)
                 let checked = identities[copy.path]
                 let (left, asked) = try await running.quit(bundle, timeout: quitTimeout) { Self.identity(bundle) == checked }
-                // Quitting changes something even when nothing is moved afterwards.
-                if asked { notes.add("\(app.name) at \(copy.path) was asked to quit.", changed: true, onlyWhenPartial: true) }
+                // Quitting is said even when nothing is moved afterwards; it changes no copy.
+                if asked { notes.add("\(app.name) at \(copy.path) was asked to quit.", quit: true, onlyWhenPartial: true) }
                 try Task.checkCancellation()
                 try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
             }
@@ -302,12 +304,14 @@ public struct AppInstaller: Sendable {
             case let known as InstallFailure: failure = known
             case is CancellationError:
                 failure = InstallFailure(.interrupted, notes.changed ? "it was cancelled after part of it was done"
-                    : notes.recovered ? "it was cancelled before anything else was changed" : "it was cancelled before anything was changed")
+                    : notes.recovered ? "it was cancelled before anything else was changed"
+                    : notes.quit ? "it was cancelled after the app was asked to quit, before any copy was changed"
+                    : "it was cancelled before anything was changed")
             default: failure = InstallFailure(.install, error.localizedDescription)
             }
             failure.partial = notes.changed || notes.recovered
             failure.onlyRecovered = !notes.changed && notes.recovered
-            failure.notes = failure.partial ? notes.partialLines : notes.lines
+            failure.notes = failure.partial || notes.quit ? notes.partialLines : notes.lines
             throw failure
         }
     }
@@ -522,10 +526,11 @@ public struct AppInstaller: Sendable {
     /// Step 5 of an update (swapApp in update.mjs): `target`, still `identity`, is renamed aside, the verified copy renamed
     /// into place and the old one renamed to a hidden `old` name that is never put back; then the receipt is written.
     /// Returns the old copy and the identity of the new one in place. Throws leaving `target` as it was and `staged` where
-    /// it was.
+    /// it was, or, when what is at `target` right after the rename is not the verified copy, leaving that as it is, the
+    /// receipt unchanged and the previous copy put back (when nothing is there) or kept under its hidden name.
     private func swap(
         _ staged: URL, target: URL, identity: FileIdentity, appName: String, receipt: ReceiptDocument?, notes: Notes
-    ) throws -> (old: URL, placed: FileIdentity?) {
+    ) throws -> (old: URL, placed: FileIdentity) {
         let dir = target.deletingLastPathComponent()
         let backup = AppLock.hiddenName(in: dir, appName: appName, kind: "update")
         let changed = "\(target.path) was changed or removed while it was being updated (by the subset command?)"
@@ -538,14 +543,24 @@ public struct AppInstaller: Sendable {
         guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
             throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target))")
         }
-        let placed = Self.identity(target) == verified ? verified : nil
+        afterPlacing(target)
+        // Only the verified copy at `target` makes this an update: anything else there (or nothing) is left as it is, the
+        // receipt is not touched and the previous copy is not disposed of.
+        guard let verified, Self.identity(target) == verified else {
+            let why = "\(target.path) was changed or removed right after the new copy was put there (by the subset command?)"
+            if Self.identity(target) == nil, renamex_np(backup.path, target.path, UInt32(RENAME_EXCL)) == 0 {
+                throw InstallFailure(.install, "\(why), so the previous copy was put back")
+            }
+            notes.add("The previous copy of \(appName) is kept at \(backup.path); rename it to \(target.path) to use it again.", changed: true)
+            throw InstallFailure(.install, "\(why), so it was left as it is and the receipt was not changed")
+        }
         var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
         if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         // A receipt is advisory: when it cannot be written, the one there (describing the old copy) is removed.
         if let receipt {
             do {
                 let temporary = try receipt.writeTemporary(installedAt: clock())
-                if Self.identity(target) != placed || rename(temporary.path, receipt.file.path) != 0 {
+                if Self.identity(target) != verified || rename(temporary.path, receipt.file.path) != 0 {
                     unlink(temporary.path)
                     unlink(receipt.file.path)
                     notes.add("The receipt \(receipt.file.path) was not written; the app is updated without one.")
@@ -555,7 +570,7 @@ public struct AppInstaller: Sendable {
                 notes.add("\(failure.message); the app is updated without one.")
             }
         }
-        return (old, placed)
+        return (old, verified)
     }
 
     /// What an interrupted update or move to the Trash (here or by `subset`) left beside `<appName>.app` under a hidden
@@ -742,21 +757,26 @@ struct FileIdentity: Equatable, Sendable {
 /// Notes an operation collects while it runs (on one task at a time), and whether it has changed something yet.
 final class Notes: @unchecked Sendable {
     private var entries: [(line: String, onlyWhenPartial: Bool)] = []
+    /// Whether it changed an installed copy (updated, moved aside or moved to the Trash).
     private(set) var changed = false
     /// Whether it put back or renamed what an interrupted operation had left (before doing anything itself).
     private(set) var recovered = false
+    /// Whether it asked an app to quit; that changes no copy, so it is said without making the result partial.
+    private(set) var quit = false
 
     /// The notes of an operation that finished.
     var lines: [String] { entries.filter { !$0.onlyWhenPartial }.map(\.line) }
     /// The notes of one that failed or was cancelled after changing something: what it changed, too.
     var partialLines: [String] { entries.map(\.line) }
 
-    /// Adds a note; `changed` when it reports a change, `onlyWhenPartial` when it is worth saying only if the operation
-    /// then fails (a finished one says it in its own message).
-    func add(_ line: String, changed: Bool = false, recovered: Bool = false, onlyWhenPartial: Bool = false) {
+    /// Adds a note; `changed` when it reports a change to a copy, `quit` when it reports an app asked to quit,
+    /// `onlyWhenPartial` when it is worth saying only if the operation then fails (a finished one says it in its own
+    /// message).
+    func add(_ line: String, changed: Bool = false, recovered: Bool = false, quit: Bool = false, onlyWhenPartial: Bool = false) {
         entries.append((line, onlyWhenPartial))
         if changed { self.changed = true }
         if recovered { self.recovered = true }
+        if quit { self.quit = true }
     }
 }
 

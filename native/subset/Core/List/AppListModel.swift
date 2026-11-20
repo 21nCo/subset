@@ -59,16 +59,26 @@ public final class AppListModel: ObservableObject {
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
-    /// Looks for installed apps run one after another, each once the one before it has ended, and are numbered in that
-    /// order, so a higher number is a later look at every app. One that ends after a later one has published does not
-    /// publish, so what is shown never goes back to an older state, and `installed` always comes from the apps of the
-    /// catalog shown (`publishedApps`). A look held up (a stalled folder) holds the next one up for `scanWait` at most;
-    /// the next then looks for itself, and the held one, numbered before it, never publishes over it.
-    private var scans = 0
-    private var lastScan: Task<[String: [InstalledCopy]], Never>?
+    /// Looks for installed apps run one after another, each once the one before it has ended; a look held up (a stalled
+    /// folder) holds the next one up for `scanWait` at most, and the next then looks for itself. Each look is ordered by
+    /// when it ran (`Observation`), not by when it was asked for: one that began after the shown one ended is newer and
+    /// is shown; one that ended before the shown one began is older and is not; two that overlapped and disagree are
+    /// settled by a look begun after both. So what is shown never goes back to an older state, a later install seen by a
+    /// held look is not lost, and `installed` always comes from the apps of the catalog shown (`publishedApps`).
+    private var lastScan: Task<Observation, Never>?
     var scanWait: Duration = .seconds(10)
-    private var publishedScan = 0
+    private var shown: Observation?
     private var publishedApps: [CatalogApp]?
+    /// Callers of `reloadInstalled` waiting for a look begun after they asked to be shown.
+    private var waiters: [Int: (since: ContinuousClock.Instant, continuation: CheckedContinuation<Bool, Never>)] = [:]
+    private var nextWaiter = 0
+
+    /// One look for installed apps: when it began and ended, and what it found.
+    struct Observation: Sendable {
+        var began: ContinuousClock.Instant
+        var ended: ContinuousClock.Instant
+        var installed: [String: [InstalledCopy]]
+    }
 
     public init(
         loader: any CatalogLoading, finder: any InstalledAppDetecting, defaults: UserDefaults = .standard,
@@ -157,58 +167,114 @@ public final class AppListModel: ObservableObject {
                 nextFetchedAt = nil
             }
         }
-        var found: (number: Int, installed: [String: [InstalledCopy]]) = (0, [:])
+        var found: Observation?
         if let apps = nextCatalog?.apps {
-            found = await scan(apps)
+            var observation = await scan(apps)
             if Task.isCancelled { return }
-            // A later look published meanwhile for another catalog's apps: look again, with these, until none did.
-            while found.number < publishedScan, publishedApps != apps {
-                found = await scan(apps)
+            // It overlapped the shown look and disagrees with it: look again, begun after both.
+            while judge(observation, apps) == .conflicting {
+                observation = await scan(apps)
                 if Task.isCancelled { return }
             }
+            found = observation
         }
         catalog = nextCatalog
         fetchedAt = nextFetchedAt
         status = nextStatus
-        if nextCatalog == nil || found.number > publishedScan || publishedApps != nextCatalog?.apps {
-            publishedScan = max(publishedScan, found.number)
-            publishedApps = nextCatalog?.apps
-            installed = found.installed
+        if let found, let apps = nextCatalog?.apps {
+            if judge(found, apps) == .newer { publish(found, apps) }
+        } else {
+            shown = nil
+            publishedApps = nil
+            installed = [:]
+            releaseWaiters { _, _ in true }
         }
     }
 
-    /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog.
-    public func reloadInstalled() async {
-        guard var apps = catalog?.apps else { return }
-        var found = await scan(apps)
-        // The catalog changed meanwhile: look again with its apps.
-        while let current = catalog?.apps, current != apps {
-            apps = current
-            found = await scan(apps)
+    /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog, and
+    /// returns true once a look begun after this call is shown, whoever asked for it (this call's own look, or a
+    /// refresh), or once this call's own look is settled (shown, or what is shown already); true at once when no catalog
+    /// is shown. With `limit`, it returns false when neither has happened by then; its look goes on and is shown when it
+    /// ends, if it is still the latest.
+    @discardableResult
+    public func reloadInstalled(within limit: Duration? = nil) async -> Bool {
+        guard catalog != nil else { return true }
+        let since = ContinuousClock.now
+        let id = nextWaiter
+        nextWaiter += 1
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            waiters[id] = (since, continuation)
+            Task { @MainActor [weak self] in
+                await self?.lookAgain()
+                self?.releaseWaiters { waiter, _ in waiter == id }
+            }
+            if let limit {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: limit)
+                    self?.releaseWaiters(shown: false) { waiter, _ in waiter == id }
+                }
+            }
         }
-        guard catalog != nil, found.number > publishedScan else { return }
-        publishedScan = found.number
+    }
+
+    /// Looks with the catalog's apps until what it saw is shown, or is older than or the same as what is shown.
+    private func lookAgain() async {
+        while let apps = catalog?.apps {
+            let observation = await scan(apps)
+            // The catalog changed meanwhile: look again with its apps.
+            guard catalog?.apps == apps else { continue }
+            switch judge(observation, apps) {
+            case .newer: publish(observation, apps); return
+            case .older, .same: return
+            case .conflicting: continue
+            }
+        }
+    }
+
+    private enum Verdict { case newer, older, same, conflicting }
+
+    /// How `observation` of `apps` compares with what is shown, by when each look ran. A look at another catalog's apps
+    /// that did not begin after the shown one ended may have missed what that one saw: it is settled by looking again.
+    private func judge(_ observation: Observation, _ apps: [CatalogApp]) -> Verdict {
+        guard let shown else { return .newer }
+        if observation.began > shown.ended { return .newer }
+        guard publishedApps == apps else { return .conflicting }
+        if observation.ended < shown.began { return .older }
+        return observation.installed == installed ? .same : .conflicting
+    }
+
+    private func publish(_ observation: Observation, _ apps: [CatalogApp]) {
+        shown = observation
         publishedApps = apps
-        installed = found.installed
+        installed = observation.installed
+        releaseWaiters { _, since in since < observation.began }
     }
 
-    /// Looks for `apps` installed once the previous look has ended, numbered in that order.
-    private func scan(_ apps: [CatalogApp]) async -> (number: Int, installed: [String: [InstalledCopy]]) {
-        scans += 1
-        let number = scans
+    /// Resumes the waiters `release` picks (by id and when each asked), with whether a look of theirs is shown.
+    private func releaseWaiters(shown: Bool = true, where release: (Int, ContinuousClock.Instant) -> Bool) {
+        for (id, waiter) in waiters where release(id, waiter.since) {
+            waiters[id] = nil
+            waiter.continuation.resume(returning: shown)
+        }
+    }
+
+    /// Looks for `apps` installed once the previous look has ended (or `scanWait` has passed), timed as it runs.
+    private func scan(_ apps: [CatalogApp]) async -> Observation {
         let finder = finder
         let previous = lastScan
         let wait = scanWait
-        let look = Task.detached { () -> [String: [InstalledCopy]] in
+        let look = Task.detached { () -> Observation in
             if let previous { await Self.end(of: previous, orAfter: wait) }
-            return finder.detect(apps)
+            let began = ContinuousClock.now
+            let installed = finder.detect(apps)
+            return Observation(began: began, ended: ContinuousClock.now, installed: installed)
         }
         lastScan = look
-        return (number, await look.value)
+        return await look.value
     }
 
     /// Returns once `task` has ended or `wait` has passed, whichever is first.
-    private nonisolated static func end(of task: Task<[String: [InstalledCopy]], Never>, orAfter wait: Duration) async {
+    private nonisolated static func end(of task: Task<Observation, Never>, orAfter wait: Duration) async {
         let resumed = OSAllocatedUnfairLock(initialState: false)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let resume: @Sendable () -> Void = { if resumed.withLock({ (done: inout Bool) in defer { done = true }; return !done }) { continuation.resume() } }

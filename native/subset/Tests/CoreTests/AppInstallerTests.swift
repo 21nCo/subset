@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Darwin
 import Foundation
@@ -377,7 +378,7 @@ final class AppInstallerTests: XCTestCase {
         }
         let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(failed?.step, .install)
-        XCTAssertEqual(failed?.partial, true)
+        XCTAssertEqual(failed?.partial, false, "asking the app to quit changed no copy")
         XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened (\(quitPath) is not the copy expected there)."])
         XCTAssertEqual(running.reopened.get(), [])
         XCTAssertEqual(version(target), "0.3.0", "what was put there stays")
@@ -566,7 +567,7 @@ final class AppInstallerTests: XCTestCase {
         let update = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(update?.step, .interrupted)
         XCTAssertEqual(update?.message, "it was cancelled before it was installed")
-        XCTAssertEqual(update?.partial, true, "the app was quit")
+        XCTAssertEqual(update?.partial, false, "the app was quit, and no copy was changed")
         XCTAssertEqual(update?.notes, ["Breaks was asked to quit for the update and was reopened."])
         XCTAssertEqual(running.quits.get(), [target.path])
         XCTAssertEqual(running.reopened.get(), [target.path])
@@ -585,8 +586,8 @@ final class AppInstallerTests: XCTestCase {
         running.cancelDuringQuit = true
         let move = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
         XCTAssertEqual(move?.step, .interrupted)
-        XCTAssertEqual(move?.message, "it was cancelled after part of it was done")
-        XCTAssertEqual(move?.partial, true)
+        XCTAssertEqual(move?.message, "it was cancelled after the app was asked to quit, before any copy was changed")
+        XCTAssertEqual(move?.partial, false, "the app was quit, and no copy was moved")
         XCTAssertEqual(move?.notes, ["Breaks at \(target.path) was asked to quit."])
         XCTAssertEqual(names(system), ["Breaks.app"])
         XCTAssertEqual(AppInstaller.identity(target), copy, "nothing was moved")
@@ -910,6 +911,11 @@ final class AppInstallerTests: XCTestCase {
             case 15: return .started(bundle.path + "/Contents/MacOS/../../../Other.app/Contents/MacOS/Other")
             // Started through a link to another folder and `..`: it runs from that folder's Breaks.app, not this one.
             case 17: return .started(folder.path + "/Route/../Breaks.app/Contents/MacOS/Helper")
+            // Started in the bundle's Contents/Helpers, which has since been moved out and replaced by a link to where it
+            // went: libproc names where the file is now, the saved path still places it in the bundle.
+            case 18: return .started(bundle.path + "/Contents/Helpers/Helper")
+            case 19: return .path(folder.path + "/Moved/Helper", started: bundle.path + "/Contents/Helpers/Helper")
+            case 20: return .path(folder.path + "/Moved/Helper", started: nil)
             default: return .unknown(EPERM)
             }
         }
@@ -917,7 +923,9 @@ final class AppInstallerTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("Tools/Child"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("Tools/Breaks.app/Contents/MacOS"), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("Route").path, withDestinationPath: folder.appendingPathComponent("Tools/Child").path)
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17], look: look), [10, 14])
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("Moved"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: bundle.appendingPathComponent("Contents/Helpers").path, withDestinationPath: folder.appendingPathComponent("Moved").path)
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20], look: look), [10, 14, 18, 19])
         XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 16], look: look), "a live process of this user that cannot be named")
         for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
             XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)
@@ -1166,5 +1174,139 @@ struct HiddenTrash: Trashing {
         let moved = folder.appendingPathComponent(bundle.lastPathComponent)
         try FileManager.default.moveItem(at: bundle, to: moved)
         return Trashed(url: moved, renameFailure: "name taken")
+    }
+}
+
+// MARK: - The shared detector, the update's commit and the reopen, end to end
+
+extension AppInstallerTests {
+    /// The installer as the app makes it, with the system's process list in place of the fake.
+    private func installerWithSystemProcesses() -> AppInstaller {
+        var installer = installer()
+        installer.running = WorkspaceRunningApps()
+        return installer
+    }
+
+    // A live helper started from the installed copy, whose folder was then moved out of the bundle and replaced by a
+    // link to where it went: libproc names it outside the bundle, but it was started inside, so the user is asked, and
+    // Update and Move to Trash refuse, leaving the copy and its receipt as they were.
+    func testALiveHelperUnderAReplacedFolderIsFoundAndBlocksUpdateAndMoveToTrash() async throws {
+        let old = try installOld()
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        let helpers = target.appendingPathComponent("Contents/Helpers")
+        try FileManager.default.createDirectory(at: helpers, withIntermediateDirectories: true)
+        let helper = helpers.appendingPathComponent("Helper")
+        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: helper.path)
+        let signed = try await ToolRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", helper.path], timeout: 60)
+        XCTAssertEqual(signed.status, 0, signed.stderr)
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = ["30"]
+        try process.run()
+        defer { process.terminate() }
+        // Let it load before its folder moves (pages of a moved file still load; this only keeps the test steady).
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(try installerWithSystemProcesses().isRunning(Self.breaks))
+        let moved = root.appendingPathComponent("Moved")
+        try FileManager.default.moveItem(at: helpers, to: moved)
+        try FileManager.default.createSymbolicLink(at: helpers, withDestinationURL: moved)
+        let named = try XCTUnwrap(WorkspaceRunningApps.executable(of: process.processIdentifier))
+        XCTAssertFalse(BundleMatcher(target).contains(named), "libproc names it outside the bundle: \(named)")
+
+        XCTAssertTrue(try installerWithSystemProcesses().isRunning(Self.breaks), "the user is asked before it is quit")
+        for (operation, quitAllowed) in [("update", false), ("moveToTrash", false), ("moveToTrash", true)] {
+            let refused = await failure { installer in
+                var installer = installer
+                installer.running = WorkspaceRunningApps()
+                return operation == "update" ? try await installer.update(Self.breaks, Self.live, quitAllowed: quitAllowed)
+                    : try await installer.moveToTrash(Self.breaks, quitAllowed: quitAllowed)
+            }
+            XCTAssertEqual(refused?.step, .running, "\(operation) quitAllowed \(quitAllowed): \(refused?.message ?? "")")
+            XCTAssertEqual(refused?.partial, false, operation)
+            XCTAssertEqual(AppInstaller.identity(target), old, operation)
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, operation)
+            XCTAssertEqual(names(trashFolder), [], operation)
+        }
+        XCTAssertEqual(downloader.calls.get(), 0, "refused before the download")
+        XCTAssertTrue(process.isRunning, "a helper is never stopped")
+        assertNoLeftovers()
+    }
+
+    // Right after the verified copy is renamed into place, something else replaces it, or it disappears: the update
+    // stops without touching the receipt or the Trash, leaves a replacement as it is and keeps the previous copy (put
+    // back when nothing is there, otherwise kept under its hidden name, which the failure names).
+    func testAnUpdateWhoseNewCopyIsReplacedOrRemovedRightAfterItsRenameStops() async throws {
+        for disappears in [false, true] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            let path = target.path
+            running.running.update { $0.insert(path) }
+            var installer = installer()
+            installer.afterPlacing = { _ in
+                try? FileManager.default.removeItem(atPath: path)
+                if !disappears { try? makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.other", version: "9.0") }
+            }
+            var failure: InstallFailure?
+            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: true) } catch { failure = error as? InstallFailure }
+            let label = disappears ? "disappears" : "replaced"
+            XCTAssertEqual(failure?.step, .install, label)
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, "\(label): the receipt is unchanged")
+            XCTAssertEqual(names(trashFolder), [], "\(label): the previous copy is not moved to the Trash")
+            // Only the copy that was quit is opened again: put back, it is; a replacement is not.
+            XCTAssertEqual(running.reopened.get(), disappears ? [path] : [], label)
+            let hidden = names(system).filter { $0.hasPrefix(".Breaks.app.subset-update-") }
+            if disappears {
+                XCTAssertEqual(failure?.message, "\(path) was changed or removed right after the new copy was put there (by the subset command?), so the previous copy was put back")
+                XCTAssertEqual(failure?.partial, false)
+                XCTAssertEqual(AppInstaller.identity(target), old, "the previous copy is back in place")
+                XCTAssertEqual(hidden, [])
+            } else {
+                XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the replacement stays")
+                XCTAssertEqual(hidden.count, 1)
+                let kept = system.appendingPathComponent(hidden.first ?? "")
+                XCTAssertEqual(AppInstaller.identity(kept), old, "the previous copy is kept")
+                XCTAssertEqual(failure?.partial, true)
+                XCTAssertEqual(failure?.message, "\(path) was changed or removed right after the new copy was put there (by the subset command?), so it was left as it is and the receipt was not changed")
+                XCTAssertTrue(failure?.notes.contains("The previous copy of Breaks is kept at \(kept.path); rename it to \(path) to use it again.") == true, "\(failure?.notes ?? [])")
+            }
+            XCTAssertEqual(names(temporary), [], label)
+            XCTAssertEqual(images.attached.get(), [], label)
+        }
+    }
+
+    // The reopen never hands the request to a copy already running elsewhere (substitution off) and keeps the copy it
+    // checked through the launch: an app opened at another path, or a copy replaced while it opened, is said and asked
+    // to quit; the checked copy opens with nothing to say.
+    func testReopenOpensOnlyTheCheckedCopyWithoutSubstitution() async {
+        let bundle = URL(fileURLWithPath: "/Applications/Breaks.app")
+        let substitution = Recorder<[Bool]>([])
+        let quits = Recorder<Int>(0)
+        let opening = { (opened: URL?) -> @Sendable (URL, NSWorkspace.OpenConfiguration) async throws -> WorkspaceRunningApps.Opened in
+            { _, configuration in
+                substitution.update { $0.append(configuration.allowsRunningApplicationSubstitution) }
+                return WorkspaceRunningApps.Opened(bundle: opened) { quits.update { $0 += 1 } }
+            }
+        }
+        let opened = await WorkspaceRunningApps.reopen(bundle, isExpected: { true }, open: opening(bundle))
+        XCTAssertNil(opened)
+        XCTAssertEqual(quits.get(), 0)
+
+        // A second copy of the app runs from ~/Applications and Launch Services answers with it.
+        let elsewhere = await WorkspaceRunningApps.reopen(bundle, isExpected: { true }, open: opening(URL(fileURLWithPath: "/Users/alex/Applications/Breaks.app")))
+        XCTAssertEqual(elsewhere, "/Users/alex/Applications/Breaks.app opened instead of the copy expected at /Applications/Breaks.app, so it was asked to quit")
+        XCTAssertEqual(quits.get(), 1)
+
+        // Replaced after the check, while it opened.
+        let checks = Recorder<Int>(0)
+        let replaced = await WorkspaceRunningApps.reopen(bundle, isExpected: { checks.update { $0 += 1 }; return checks.get() == 1 }, open: opening(bundle))
+        XCTAssertEqual(replaced, "/Applications/Breaks.app opened instead of the copy expected at /Applications/Breaks.app, so it was asked to quit")
+        XCTAssertEqual(quits.get(), 2)
+
+        // Replaced before the check: nothing is opened.
+        let before = await WorkspaceRunningApps.reopen(bundle, isExpected: { false }, open: opening(bundle))
+        XCTAssertEqual(before, "/Applications/Breaks.app is not the copy expected there")
+        XCTAssertEqual(substitution.get(), [false, false, false], "every launch refuses substitution, and none is made unchecked")
     }
 }

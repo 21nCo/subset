@@ -42,6 +42,8 @@ public final class AppActions: ObservableObject {
     @Published private var operations: [String: Task<AppActivity, Never>] = [:]
     /// Set once Subset is quitting: no operation starts any more.
     private var closed = false
+    /// How long a row waits, after its operation, for what is installed to be looked for again and shown.
+    var listWait: Duration = .seconds(30)
 
     public init(installer: AppInstaller, model: AppListModel) {
         self.installer = installer
@@ -164,15 +166,28 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    /// The message shows once the operation has cleaned up; the row's buttons come back only once what is installed has
-    /// been looked for again (which may wait for an earlier look), so its next action sees it. Once Subset is quitting,
-    /// the row is not used again, so nothing waits for that look.
+    /// The message shows once the operation has cleaned up; the row's buttons come back once a look for what is
+    /// installed, begun after the operation ended, is shown (its own, or a refresh's), so its next action sees it, or
+    /// after `listWait` at most, saying the list may not show it yet (each action checks the folders again anyway). Once
+    /// Subset is quitting, the row is not used again, so nothing waits for that look.
     private func finish(_ appID: String, _ message: AppActivity) async {
         operations[appID] = nil
         guard tasks[appID] != nil else { return }
         activities[appID] = message
-        if !closed { await model.reloadInstalled() }
+        if !closed, !(await model.reloadInstalled(within: listWait)), activities[appID] == message {
+            activities[appID] = Self.adding(Self.listPending, to: message)
+        }
         tasks[appID] = nil
+    }
+
+    static let listPending = "The list of installed apps is still being read and may not show this yet."
+
+    private nonisolated static func adding(_ note: String, to message: AppActivity) -> AppActivity {
+        switch message {
+        case let .succeeded(text): return .succeeded(join(text, [note]))
+        case let .failed(text): return .failed(join(text, [note]))
+        case .working: return message
+        }
     }
 
     private nonisolated static func join(_ first: String, _ notes: [String]) -> String {

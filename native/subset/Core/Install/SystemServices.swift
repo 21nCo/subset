@@ -91,8 +91,8 @@ public protocol RunningAppControlling: Sendable {
     /// asks no further app and waits only for those asked. `isChecked` says whether `bundle` is still the copy the caller
     /// checked; asked just before any app is, it refuses when it is not. Throws only when no app was asked.
     func quit(_ bundle: URL, timeout: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool)
-    /// Opens the app at `bundle` again after it was quit for an update, when `isExpected` (asked just before it is
-    /// opened) says it is the copy expected there; returns why it was not opened, or nil.
+    /// Opens the app at `bundle` again after it was quit for an update, when `isExpected` says it is the copy expected
+    /// there, asked just before it is opened and again once it has opened; returns why it was not opened, or nil.
     func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String?
 }
 
@@ -101,21 +101,23 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     public init() {}
 
     /// Every process whose executable is inside `bundle`, this one included: a copy holding this app is running too.
-    /// Paths are compared by BundleMatcher (real paths, case folded on a case-insensitive volume). A process is named by
-    /// libproc's path of its executable, else by the path it was started with (KERN_PROCARGS2, which `ps` shows the
-    /// `subset` command, and which stays when the executable was deleted or replaced since), as saved and as it resolves
-    /// now. One of this user's that still runs and cannot be named either way refuses; one that has exited or is another
-    /// user's (which `ps` cannot name either, and Subset cannot ask to quit) does not, told apart by the kernel's process
-    /// record, which `ps` reads too (PROC_PIDTBSDINFO refuses another user's process with EPERM).
+    /// Paths are compared by BundleMatcher (real paths, case folded on a case-insensitive volume). A process is the
+    /// copy's when libproc's path of its executable, or the path it was started with (KERN_PROCARGS2, which `ps` shows
+    /// the `subset` command), is inside it. The start path stays when the executable, or a folder above it, was deleted,
+    /// moved or replaced by a link since (libproc then names where the file is now, or nothing), so it is judged as saved
+    /// and with each of its leading folders resolved now (BundleMatcher.startedInside). One of this user's that still
+    /// runs and cannot be named either way refuses; one that has exited or is another user's (which `ps` cannot name
+    /// either, and Subset cannot ask to quit) does not, told apart by the kernel's process record, which `ps` reads too
+    /// (PROC_PIDTBSDINFO refuses another user's process with EPERM).
     public func processes(inside bundle: URL) throws -> [pid_t] {
         try Self.processes(inside: bundle, among: Self.allPids(), look: Self.look)
     }
 
     /// What is known of a process: the path of its executable, or why there is none.
     enum ProcessLook: Equatable {
-        /// libproc's path of its executable.
-        case path(String)
-        /// The path it was started with, as saved.
+        /// libproc's path of its executable now, and the path it was started with when that can be read.
+        case path(String, started: String? = nil)
+        /// The path it was started with, as saved (libproc cannot name it).
         case started(String)
         case exited
         case otherUser
@@ -125,16 +127,13 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     /// Those of `pids` whose executable is inside `bundle`, as `look` names them.
     static func processes(inside bundle: URL, among pids: [pid_t], look: (pid_t) -> ProcessLook) throws -> [pid_t] {
         let matcher = BundleMatcher(bundle)
+        var resolved: [String: String?] = [:]
         return try pids.filter { pid in
             guard pid > 0 else { return false }
             switch look(pid) {
-            case let .path(path): return matcher.contains(path)
-            // As saved (the file may have been replaced by a link elsewhere since) or as it resolves now.
-            // As it resolves now, and with only its folder resolved (its file may have been replaced by a link since).
-            case let .started(path):
-                let folder = (path as NSString).deletingLastPathComponent
-                return matcher.contains(BundleMatcher.canonical(path))
-                    || matcher.contains(BundleMatcher.canonical(folder) + "/" + (path as NSString).lastPathComponent)
+            case let .path(path, started):
+                return matcher.contains(path) || started.map { matcher.startedInside($0, resolved: &resolved) } ?? false
+            case let .started(path): return matcher.startedInside(path, resolved: &resolved)
             case .exited, .otherUser: return false
             case let .unknown(code):
                 throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code))))")
@@ -143,7 +142,7 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     static func look(_ pid: pid_t) -> ProcessLook {
-        if let path = executable(of: pid) { return .path(path) }
+        if let path = executable(of: pid) { return .path(path, started: startPath(of: pid).flatMap { $0.hasPrefix("/") ? $0 : nil }) }
         let code = errno
         if let path = startPath(of: pid), path.hasPrefix("/") { return .started(path) }
         let (record, failure) = record(of: pid)
@@ -266,13 +265,42 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     public func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String? {
+        await Self.reopen(bundle, isExpected: isExpected) { url, configuration in
+            let app = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+            return Opened(bundle: app.bundleURL) { _ = app.terminate() }
+        }
+    }
+
+    /// An app Launch Services opened: where its bundle is, and how to ask it to quit (terminate(), never a force quit).
+    struct Opened: Sendable {
+        var bundle: URL?
+        var quit: @Sendable @MainActor () -> Void
+    }
+
+    /// Opens `bundle` with `open`, never handing the request to a copy of the app already running elsewhere
+    /// (allowsRunningApplicationSubstitution off), and only while `isExpected`: asked before, and again once it has
+    /// opened, with the opened app's bundle, which must be `bundle`. An app opened in its place (the copy was replaced
+    /// meanwhile) is asked to quit, and that is said.
+    static func reopen(
+        _ bundle: URL, isExpected: @escaping @Sendable () -> Bool,
+        open: @escaping @Sendable (URL, NSWorkspace.OpenConfiguration) async throws -> Opened
+    ) async -> String? {
         guard isExpected() else { return "\(bundle.path) is not the copy expected there" }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.allowsRunningApplicationSubstitution = false
+        let opened: Opened
         do {
-            _ = try await NSWorkspace.shared.openApplication(at: bundle, configuration: NSWorkspace.OpenConfiguration())
-            return nil
+            opened = try await open(bundle, configuration)
         } catch {
             return error.localizedDescription
         }
+        let matcher = BundleMatcher(bundle)
+        let same = opened.bundle.map { matcher.contains($0.path + "/") && BundleMatcher($0).contains(bundle.path + "/") } ?? false
+        guard same, isExpected() else {
+            await opened.quit()
+            return "\(opened.bundle?.path ?? "an app") opened instead of the copy expected at \(bundle.path), so it was asked to quit"
+        }
+        return nil
     }
 }
 
@@ -295,6 +323,27 @@ struct BundleMatcher: Sendable {
     func contains(_ path: String) -> Bool {
         let path = foldsCase ? path.lowercased() : path
         return roots.contains { path.hasPrefix($0) }
+    }
+
+    /// Whether a process started with `path` (absolute, as saved) may run from inside the bundle: the path as saved, and
+    /// with its first 1, 2, ... folders resolved as they are now and the rest as saved, so a folder of the bundle that
+    /// became a link elsewhere since (or was moved) does not hide it, and fully resolved. A form whose unresolved rest
+    /// holds `..` is skipped: the kernel resolved `..` after any link before it, so only a resolved prefix places it.
+    /// `resolved` keeps the real paths already read (nil when a path does not exist).
+    func startedInside(_ path: String, resolved: inout [String: String?]) -> Bool {
+        if contains(Self.canonical(path)) { return true }
+        let parts = path.split(separator: "/")
+        for count in 0..<parts.count where !parts[count...].contains("..") {
+            var head = ""
+            if count > 0 {
+                let prefix = "/" + parts.prefix(count).joined(separator: "/")
+                if resolved[prefix] == nil { resolved[prefix] = .some(AppInstaller.realPath(prefix)) }
+                guard let real = resolved[prefix] ?? nil else { continue }
+                head = real
+            }
+            if contains(Self.lexical(head + "/" + parts[count...].joined(separator: "/"))) { return true }
+        }
+        return false
     }
 
     /// `path` (absolute) with every link resolved as far as it exists, and `.`, `..` and repeated slashes removed.

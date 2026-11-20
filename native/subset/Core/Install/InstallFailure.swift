@@ -16,8 +16,8 @@ public struct InstallFailure: Error, Equatable, Sendable {
 
     public var step: Step
     public var message: String
-    /// Whether the operation had already changed something (updated or moved a copy, quit the app, or put back what an
-    /// interrupted one had left) when it stopped.
+    /// Whether the operation had already changed a copy (updated, moved aside or moved one, or put back what an
+    /// interrupted one had left) when it stopped. Asking an app to quit changes no copy; the notes say it.
     public var partial = false
     /// Whether putting back or renaming what an interrupted operation had left was all it changed: the update or move
     /// itself did not run.

@@ -506,9 +506,9 @@ final class AppListModelTests: XCTestCase {
             let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: readsAfterGate)
             let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
             await model.refresh()
-            let earlier = Task { await model.reloadInstalled() }
+            let earlier = Task { _ = await model.reloadInstalled() }
             try await waitUntil({ gated.isWaiting }, stopping: earlier, release: { gated.release() })
-            let later = Task { await model.reloadInstalled() }
+            let later = Task { _ = await model.reloadInstalled() }
             try await Task.sleep(for: .milliseconds(100))
             XCTAssertEqual(gated.callCount, 2, "the later look waits for the earlier one")
             try install("Breaks", "dev.subset.breaks", version: "0.1.0")
@@ -527,7 +527,7 @@ final class AppListModelTests: XCTestCase {
         let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
         model.scanWait = .milliseconds(200)
         await model.refresh()
-        let held = Task { await model.reloadInstalled() }
+        let held = Task { _ = await model.reloadInstalled() }
         try await waitUntil({ gated.isWaiting }, stopping: held, release: { gated.release() })
         try install("Breaks", "dev.subset.breaks", version: "0.1.0")
         await model.reloadInstalled()
@@ -552,7 +552,7 @@ final class AppListModelTests: XCTestCase {
         await model.refresh()
         let refresh = Task { await model.refresh(force: true) }
         try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
-        let reload = Task { await model.reloadInstalled() }
+        let reload = Task { _ = await model.reloadInstalled() }
         // An operation updates Breaks while the refresh's look is held.
         try install("Breaks", "dev.subset.breaks", version: "0.1.0")
         gated.release()
@@ -561,5 +561,63 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(model.catalog?.apps.map(\.id), ["breaks", "other"])
         XCTAssertEqual(model.installed["other"]?.map(\.versionLabel), ["1.0.0"])
         XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
+    }
+
+    // Looks overlap when one is held past `scanWait`: what each saw is ordered by when it ran, not by when it was asked
+    // for. Held, then reading after a later look published (and after the subset command installed the app): what it saw
+    // is not lost, the disagreement is settled by a look begun after both. Held after reading, before the install: it
+    // does not publish over the later look (testALookHeldUpForGoodDoesNotHoldUpTheNextForever).
+    func testAHeldLookThatSawALaterInstallIsNotLost() async throws {
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        let held = Task { _ = await model.reloadInstalled() }
+        try await waitUntil({ gated.isWaiting }, stopping: held, release: { gated.release() })
+        await model.reloadInstalled()
+        XCTAssertNil(model.installed["breaks"]?.first, "the later look saw nothing installed")
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        gated.release()
+        // The held reload ended once the later look, begun after it was asked, was shown; its own look goes on.
+        await held.value
+        let deadline = Date().addingTimeInterval(5)
+        while model.installed["breaks"]?.isEmpty != false, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the held look's later observation is shown")
+        XCTAssertEqual(gated.callCount, 4, "one more look settled the disagreement")
+    }
+
+    // A refresh whose look is held past `scanWait` while a reload publishes: the same holds for a refresh.
+    func testAHeldRefreshThatSawALaterInstallIsNotLost() async throws {
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        let refresh = Task { await model.refresh(force: true) }
+        try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
+        await model.reloadInstalled()
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        gated.release()
+        await refresh.value
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
+    }
+
+    // A reload returns once a look begun after it was asked is shown, even when its own look is still held; with a limit
+    // and no such look shown, it returns false then, and its own look is shown when it ends.
+    func testAReloadEndsWithAnyNewerLookAndIsBounded() async throws {
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        let bounded = await model.reloadInstalled(within: .milliseconds(300))
+        XCTAssertFalse(bounded, "nothing begun after it was shown within the limit")
+        XCTAssertNil(model.installed["breaks"]?.first)
+        let reload = Task { await model.reloadInstalled() }
+        try await Task.sleep(for: .milliseconds(50))
+        await model.refresh(force: true)
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
+        let shown = await reload.value
+        XCTAssertTrue(shown, "ended by the refresh's look, begun after it was asked")
+        gated.release()
     }
 }

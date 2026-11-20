@@ -234,4 +234,62 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         XCTAssertNil(actions.activities["breaks"])
         XCTAssertEqual(running.quits.get(), [])
     }
+
+    // The row comes back once a look begun after its operation is shown, whoever made it: its own look is held, and a
+    // refresh shows the install. With no look shown at all, it comes back after `listWait`, saying the list may lag.
+    func testARowComesBackWithANewerLookOrAfterABoundedWait() async throws {
+        let gated = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2], readsAfterGate: true)
+        let (row, model) = await actions(finder: gated)
+        model.scanWait = .milliseconds(200)
+        row.install("breaks")
+        try await waitFor { gated.isWaiting }
+        XCTAssertTrue(row.isBusy("breaks"))
+        await model.refresh(force: true)
+        XCTAssertEqual(model.rows.first?.installed.map(\.versionLabel), ["0.1.0"])
+        try await waitFor { !row.isBusy("breaks") }
+        XCTAssertEqual(row.activities["breaks"], .succeeded("Installed 0.1.0 in \(system.path)."))
+        gated.release()
+
+        let stalled = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2], readsAfterGate: true)
+        let (later, laterModel) = await actions(finder: stalled)
+        later.listWait = .milliseconds(300)
+        later.moveToTrash("breaks")
+        try await waitFor { stalled.isWaiting }
+        try await waitFor { !later.isBusy("breaks") }
+        guard case .succeeded(let text)? = later.activities["breaks"] else { return XCTFail("\(String(describing: later.activities["breaks"]))") }
+        XCTAssertTrue(text.hasPrefix("Moved to the Trash. ") && text.hasSuffix(" \(AppActions.listPending)"), text)
+        XCTAssertEqual(laterModel.rows.first?.installed.map(\.versionLabel), ["0.1.0"], "not looked at again yet")
+        stalled.release()
+        try await waitFor { laterModel.rows.first?.installed == [] }
+    }
+
+    // Cancelled while the app quits, through either row action: no copy changed, so the row says it was not updated or
+    // moved (not "only partly"), and that the app was asked to quit.
+    func testAQuitOnlyCancelSaysNothingWasChanged() async throws {
+        try makeBundle(system.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.9")
+        let path = system.appendingPathComponent("Breaks.app").path
+        for kind in [QuitRequest.Kind.update, .moveToTrash] {
+            let running = FakeRunning()
+            running.running.update { $0.insert(path) }
+            running.cancelDuringQuit = true
+            let (actions, _) = await actions(running: running)
+            actions.confirmQuit(QuitRequest(appID: "breaks", appName: "Breaks", kind: kind))
+            await actions.wait("breaks")
+            switch kind {
+            case .update:
+                XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not updated to 0.1.0: it was cancelled before it was installed. Breaks was asked to quit for the update and was reopened."))
+            case .moveToTrash:
+                XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not moved to the Trash: it was cancelled after the app was asked to quit, before any copy was changed. Breaks at \(path) was asked to quit."))
+            }
+            XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleShortVersionString"] as? String, "0.0.9")
+        }
+    }
+
+    private func waitFor(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("timed out") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }
