@@ -132,9 +132,13 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         return try pids.filter { pid in
             guard pid > 0 else { return false }
             switch look(pid) {
+            // libproc names where the file is now: its start path adds something only when it differs, and then only as
+            // saved (a link resolved now into the bundle does not make a process outside it the copy's).
             case let .path(path, started):
-                return matcher.contains(path) || started.map { matcher.startedInside($0, resolved: &resolved) } ?? false
-            case let .started(path): return matcher.startedInside(path, resolved: &resolved)
+                if matcher.contains(path) { return true }
+                guard let started, started != path else { return false }
+                return matcher.startedInside(started, resolved: &resolved, linksIntoBundle: false)
+            case let .started(path): return matcher.startedInside(path, resolved: &resolved, linksIntoBundle: true)
             case .exited, .otherUser: return false
             case let .unknown(code):
                 throw InstallFailure(.running, "whether the app is running cannot be read (the executable of pid \(pid): \(String(cString: strerror(code))))")
@@ -340,22 +344,22 @@ struct BundleMatcher: Sendable {
         return roots.contains { path.hasPrefix($0) }
     }
 
-    /// Whether a process started with `path` (absolute, as saved) may run from inside the bundle: fully resolved, and
-    /// with its first 0, 1, 2, ... folders resolved as they are now and the rest as saved, so a folder of the bundle that
-    /// became a link elsewhere since (or was moved) does not hide it, even on a path that leaves the bundle and enters it
-    /// again. A `..` after a link outside the bundle is not judged as saved (the kernel resolved it after the link), only
-    /// in a resolved prefix. `resolved` keeps the real paths already read (nil when a path does not exist).
-    func startedInside(_ path: String, resolved: inout [String: String?]) -> Bool {
-        if contains(Self.canonical(path)) { return true }
+    /// Whether a process started with `path` (absolute, as saved) may run from inside the bundle: as saved, and with its
+    /// first 1, 2, ... folders resolved as they are now and the rest as saved, so a folder of the bundle that became a
+    /// link elsewhere since (or was moved) does not hide it, even on a path that leaves the bundle and enters it again.
+    /// A `..` after a link outside the bundle is not judged as saved (the kernel resolved it after the link), only in a
+    /// resolved prefix. With `linksIntoBundle` false (libproc names the file outside the bundle), a prefix whose link
+    /// resolves now into the bundle does not count, nor does the path fully resolved; with it (nothing names the file
+    /// now) both do. `resolved` keeps the real paths already read (nil when a path does not exist).
+    func startedInside(_ path: String, resolved: inout [String: String?], linksIntoBundle: Bool) -> Bool {
         let parts = path.split(separator: "/")
-        for count in 0..<parts.count {
-            var head: [Substring] = []
-            if count > 0 {
-                let prefix = "/" + parts.prefix(count).joined(separator: "/")
-                if resolved[prefix] == nil { resolved[prefix] = .some(AppInstaller.realPath(prefix)) }
-                guard let real = resolved[prefix] ?? nil else { continue }
-                head = real.split(separator: "/")
-            }
+        if let saved = confined([], parts[...]), contains(saved) { return true }
+        if linksIntoBundle, contains(Self.canonical(path)) { return true }
+        for count in 1..<max(parts.count, 1) {
+            let prefix = "/" + parts.prefix(count).joined(separator: "/")
+            if resolved[prefix] == nil { resolved[prefix] = .some(AppInstaller.realPath(prefix)) }
+            guard let real = resolved[prefix] ?? nil, linksIntoBundle || !contains(real + "/") else { continue }
+            let head = real.split(separator: "/")
             if let saved = confined(head, parts[count...]), contains(saved) { return true }
         }
         return false

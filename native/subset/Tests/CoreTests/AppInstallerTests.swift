@@ -921,6 +921,10 @@ final class AppInstallerTests: XCTestCase {
             case 22: return .path(folder.path + "/Moved/Helper", started: bundle.path + "/Contents/Helpers/Child/../Helper")
             // Leaving the bundle and entering it again through folders that are not links.
             case 23: return .started(bundle.path + "/Contents/Helpers/../../../Breaks.app/Contents/Helpers/Helper")
+            // Started through a link outside the bundle that now leads into it: libproc names the file outside, so the
+            // link resolved now does not make it the copy's; with nothing naming the file now, it does.
+            case 24: return .path("/usr/bin/true", started: folder.path + "/Alias/Tool")
+            case 25: return .started(folder.path + "/Alias/Tool")
             default: return .unknown(EPERM)
             }
         }
@@ -930,7 +934,8 @@ final class AppInstallerTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("Route").path, withDestinationPath: folder.appendingPathComponent("Tools/Child").path)
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("Moved"), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: bundle.appendingPathComponent("Contents/Helpers").path, withDestinationPath: folder.appendingPathComponent("Moved").path)
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23], look: look), [10, 14, 18, 19, 21, 22, 23])
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("Alias").path, withDestinationPath: bundle.appendingPathComponent("Contents/MacOS").path)
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25], look: look), [10, 14, 18, 19, 21, 22, 23, 25])
         XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 16], look: look), "a live process of this user that cannot be named")
         for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
             XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)
@@ -1293,35 +1298,39 @@ extension AppInstallerTests {
         }
     }
 
-    // The image is detached after the swap; if the verified copy is changed or removed meanwhile, the previous copy does
-    // not go to the Trash and the update is not reported as done: the receipt written for the new copy is removed, the
-    // previous copy is put back when nothing is there (and reopened, as the copy quit), otherwise kept and named.
+    // The image is detached after the swap, and progress is reported, before the previous copy goes to the Trash; if the
+    // verified copy is changed or removed meanwhile, the previous copy does not go and the update is not reported as
+    // done: the receipt is put back as it was, the previous copy is put back when nothing is there (then nothing has
+    // changed, and the copy quit is reopened), otherwise kept and named.
     func testAnUpdateWhoseNewCopyChangesDuringCleanupKeepsThePreviousCopy() async throws {
-        for disappears in [true, false] {
+        for (disappears, atProgress) in [(true, false), (false, false), (true, true), (false, true)] {
             try tearDownWithError()
             try setUpWithError()
             let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
             let path = target.path
             running.running.update { $0.insert(path) }
             let armed = Recorder(false)
-            images.onDetach = {
+            let change: @Sendable () -> Void = {
                 guard armed.get() else { return }
                 armed.update { $0 = false }
                 try? FileManager.default.removeItem(atPath: path)
                 if !disappears { try? makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.other", version: "9.0") }
             }
+            if !atProgress { images.onDetach = change }
             var installer = installer()
             installer.afterPlacing = { _ in armed.update { $0 = true } }
+            let progress: @Sendable (InstallProgress) -> Void = { step in if atProgress, step == .movingToTrash { change() } }
             var failure: InstallFailure?
-            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: true) } catch { failure = error as? InstallFailure }
-            let label = disappears ? "disappears" : "replaced"
+            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: true, progress: progress) } catch { failure = error as? InstallFailure }
+            let label = (disappears ? "disappears" : "replaced") + (atProgress ? " as the move to the Trash starts" : " during cleanup")
             XCTAssertEqual(failure?.step, .install, label)
-            XCTAssertEqual(failure?.partial, true, label)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: receiptFile.path), "\(label): no receipt describes a copy that is not there")
+            XCTAssertEqual(failure?.partial, !disappears, "\(label): a change only while the previous copy stays aside")
+            XCTAssertEqual(try? Data(contentsOf: receiptFile), receiptBefore, "\(label): the receipt is as it was")
             XCTAssertEqual(names(trashFolder), [], "\(label): the previous copy is not moved to the Trash")
             let hidden = names(system).filter { $0.hasPrefix(".Breaks.app.subset-") }
             if disappears {
-                XCTAssertEqual(failure?.message, "\(path) was changed or removed after the new copy was put there (by the subset command?), so the previous copy was put back")
+                XCTAssertEqual(failure?.message, "\(path) was changed or removed after the new copy was put there (by the subset command?), so the previous copy and its receipt were put back")
                 XCTAssertEqual(AppInstaller.identity(target), old)
                 XCTAssertEqual(hidden, [])
                 XCTAssertEqual(running.reopened.get(), [path], "the copy quit is reopened")
@@ -1331,6 +1340,7 @@ extension AppInstallerTests {
                 XCTAssertEqual(AppInstaller.identity(system.appendingPathComponent(hidden.first ?? "")), old, "the previous copy is kept")
                 XCTAssertEqual(running.reopened.get(), [])
             }
+            XCTAssertEqual(names(receipts), ["dev.subset.breaks.json"], label)
         }
     }
 

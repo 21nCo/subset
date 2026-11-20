@@ -162,9 +162,12 @@ public struct AppInstaller: Sendable {
                 }
                 let folder = setup.folders.first { $0.label == copy.folder }
                 let receipt = folder.flatMap { ReceiptDocument(app, release, folder: $0, receipts: setup.receipts) }
+                // The receipt as it is before this copy is updated (nil when there is none), put back if the update is undone.
+                let previousReceipt = receipt.flatMap { try? Data(contentsOf: $0.file) }
                 var quit = false
                 var old: URL?
                 var placed: FileIdentity?
+                var trashedAt: Date?
                 do {
                     try await stage(app, release, in: target.deletingLastPathComponent(), notes: notes, progress: progress, ready: {
                         let pids = try running.processes(inside: target)
@@ -184,9 +187,14 @@ public struct AppInstaller: Sendable {
                     }) { staged in
                         (old, placed) = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
-                    // Cleanup ran after the swap: the verified copy must still be in place before the previous one goes.
-                    if let old, let placed, Self.identity(target) != placed {
-                        try keepPrevious(old, target: target, appName: app.appName, receipt: receipt, notes: notes)
+                    // Cleanup ran after the swap: the verified copy must still be in place before the previous one goes,
+                    // checked once everything before the move to the Trash has run.
+                    if let old, let placed {
+                        progress(.movingToTrash)
+                        trashedAt = clock()
+                        if Self.identity(target) != placed {
+                            try keepPrevious(old, target: target, appName: app.appName, receipt: receipt, previousReceipt: previousReceipt, notes: notes)
+                        }
                     }
                 } catch {
                     if quit {
@@ -202,9 +210,8 @@ public struct AppInstaller: Sendable {
                 }
                 notes.add("Updated the copy in \(copy.folder) from \(copy.versionLabel) to \(release.label).", changed: true, onlyWhenPartial: true)
                 if let old {
-                    progress(.movingToTrash)
                     do {
-                        let trashed = try trash.trash(old, appName: app.appName, at: clock())
+                        let trashed = try trash.trash(old, appName: app.appName, at: trashedAt ?? clock())
                         notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)")
                         if let hidden = trashed.hiddenNote { notes.add(hidden) }
                     } catch let failure as InstallFailure {
@@ -587,16 +594,22 @@ public struct AppInstaller: Sendable {
     }
 
     /// After an update's swap, `target` no longer holds the verified copy (changed or removed while the image was
-    /// cleaned up): the receipt written for that copy is removed, and the previous copy, `old`, is put back when nothing
-    /// is at `target`, otherwise kept where it is and named. Always throws, saying what happened.
-    private func keepPrevious(_ old: URL, target: URL, appName: String, receipt: ReceiptDocument?, notes: Notes) throws {
+    /// cleaned up): the receipt is put back as it was before (`previousReceipt`, or none), and the previous copy, `old`,
+    /// is put back when nothing is at `target`, otherwise kept where it is and named. Always throws, saying what
+    /// happened; it is a change only when the previous copy stays aside or the receipt cannot be put back.
+    private func keepPrevious(
+        _ old: URL, target: URL, appName: String, receipt: ReceiptDocument?, previousReceipt: Data?, notes: Notes
+    ) throws {
         let why = "\(target.path) was changed or removed after the new copy was put there (by the subset command?)"
-        if let receipt, unlink(receipt.file.path) == 0 {
-            notes.add("The receipt \(receipt.file.path), written for the new copy, was removed.", changed: true)
+        if let receipt {
+            let restored = previousReceipt.map { (try? $0.write(to: receipt.file, options: .atomic)) != nil }
+                ?? (unlink(receipt.file.path) == 0 || errno == ENOENT)
+            if !restored {
+                notes.add("The receipt \(receipt.file.path), written for the new copy, could not be put back as it was (\(Self.errnoText())).", changed: true)
+            }
         }
         if Self.identity(target) == nil, renamex_np(old.path, target.path, UInt32(RENAME_EXCL)) == 0 {
-            notes.add("The previous copy of \(appName) was put back at \(target.path).", changed: true)
-            throw InstallFailure(.install, "\(why), so the previous copy was put back")
+            throw InstallFailure(.install, "\(why), so the previous copy and its receipt were put back")
         }
         notes.add("The previous copy of \(appName) is kept at \(old.path); rename it to \(target.path) to use it again.", changed: true)
         throw InstallFailure(.install, "\(why), so it was left as it is and the previous copy was kept")
