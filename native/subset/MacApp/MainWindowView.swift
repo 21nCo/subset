@@ -11,11 +11,11 @@ struct MainWindowView: View {
     var body: some View {
         VStack(spacing: 0) {
             StatusBanner(status: model.status)
-            if let notice = actions.notice {
+            if !actions.notices.isEmpty {
                 HStack {
-                    Label(notice, systemImage: "exclamationmark.triangle").font(.callout).textSelection(.enabled)
+                    Label(actions.notices.joined(separator: "\n"), systemImage: "exclamationmark.triangle").font(.callout).textSelection(.enabled)
                     Spacer()
-                    Button("Dismiss") { actions.dismissNotice() }.controlSize(.small)
+                    Button("Dismiss") { actions.dismissNotices() }.controlSize(.small)
                 }
                 .padding(10)
                 .background(.yellow.opacity(0.15))

@@ -64,8 +64,9 @@ public final class AppActions: ObservableObject {
     /// `quitRequest` first): not once it is confirmed or withdrawn, nor once the row has been asked again or started
     /// another operation.
     private var answerable: [String: UUID] = [:]
-    /// What the window says about a row the list no longer shows (whose question was withdrawn or no longer applies).
-    @Published public private(set) var notice: String?
+    /// What the window says about rows the list no longer shows (whose question was withdrawn or no longer applies), one
+    /// line for each, in the order they came.
+    @Published public private(set) var notices: [String] = []
     /// Requests of other rows that came while one was presented, in the order they came; the next one the list still
     /// offers is presented on a later turn of the main actor once the presented one is answered, after its alert has gone.
     private var waitingRequests: [QuitRequest] = []
@@ -191,12 +192,13 @@ public final class AppActions: ObservableObject {
         if model.catalog?.apps.contains(where: { $0.id == request.appID }) == true {
             activities[request.appID] = .failed(text)
         } else {
-            notice = "\(text) (\(request.appName) is no longer listed.)"
+            let line = "\(text) (\(request.appName) is no longer listed.)"
+            if notices.last != line { notices.append(line) }
         }
     }
 
-    /// Hides the window's notice.
-    public func dismissNotice() { notice = nil }
+    /// Hides the window's notices.
+    public func dismissNotices() { notices = [] }
 
     /// Once the model has changed (on a later turn of the main actor, as its change is announced before it is made),
     /// withdraws the requests waiting or presented that the list no longer offers.
@@ -263,9 +265,9 @@ public final class AppActions: ObservableObject {
         if kind != .moveToTrash, release == nil { return }
         let installer = installer
         let check = kind != nil && !quitAllowed
-        let read = check ? runningRead(app) : nil
-        if check, read == nil {
-            activities[appID] = .failed("\(Self.notDone(kind, app, release, partly: false)): Subset is still waiting for an earlier check of which apps are running, which is held up. Nothing was quit or changed; try again in a moment.")
+        let held = check ? runningRead(app) : nil
+        if check, held == nil {
+            activities[appID] = Self.readsHeldUp(kind, app, release)
             return
         }
         // A question this row still had waiting or presented is for an attempt this one replaces.
@@ -279,15 +281,24 @@ public final class AppActions: ObservableObject {
         let progress: @Sendable (InstallProgress) -> Void = { [weak self] step in
             Task { @MainActor in self?.show(appID, step, release) }
         }
-        let operation = Task { () -> AppActivity? in
+        let operation = Task { [weak self] () -> AppActivity? in
             let message: AppActivity
             do {
                 // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that
                 // reason.
-                if let read, try await read.value(cancelled: Self.cancelledCheck) {
-                    // Cancel pressed once the answer was in still ends the attempt: nothing is asked.
-                    if Task.isCancelled { throw Self.cancelledCheck }
-                    return nil
+                if let held {
+                    var running = try await held.read.value(cancelled: Self.cancelledCheck)
+                    // A read begun for an earlier, cancelled attempt may predate an app started or quit since: once it
+                    // has ended, this attempt reads afresh.
+                    if held.joined {
+                        guard let fresh = self?.runningRead(app), !fresh.joined else { return Self.readsHeldUp(kind, app, release) }
+                        running = try await fresh.read.value(cancelled: Self.cancelledCheck)
+                    }
+                    if running {
+                        // Cancel pressed once the answer was in still ends the attempt: nothing is asked.
+                        if Task.isCancelled { throw Self.cancelledCheck }
+                        return nil
+                    }
                 }
                 switch kind {
                 case nil:
@@ -325,6 +336,11 @@ public final class AppActions: ObservableObject {
 
     fileprivate nonisolated static let cancelledCheck = InstallFailure(.interrupted, "it was cancelled before anything was changed")
 
+    /// What a row says when its attempt cannot read whether the app runs, as earlier reads are held up.
+    private nonisolated static func readsHeldUp(_ kind: QuitRequest.Kind?, _ app: CatalogApp, _ release: ChosenRelease?) -> AppActivity {
+        .failed("\(notDone(kind, app, release, partly: false)): Subset is still waiting for an earlier check of which apps are running, which is held up. Nothing was quit or changed; try again in a moment.")
+    }
+
     /// What a row says an operation did not do (or did only partly).
     private nonisolated static func notDone(_ kind: QuitRequest.Kind?, _ app: CatalogApp, _ release: ChosenRelease?, partly: Bool) -> String {
         switch kind {
@@ -356,13 +372,13 @@ public final class AppActions: ObservableObject {
     /// The read of whether some installed copy of `app` runs, on a thread of its own so a stalled folder or process list
     /// never holds up the window: at most one at a time per row and `maxRunningReads` across rows, as a read cannot be
     /// stopped and ends on its own. An attempt made while an earlier one's read of the same app is held up waits for that
-    /// read (a cancel ends the wait at once, and the read answers only attempts still waiting); nil when the row's read is
-    /// of another app (the list changed since) or too many are held up, so the attempt is refused. An answer that cannot
-    /// be read is false: the operation then starts without leave to quit and refuses with that reason.
-    private func runningRead(_ app: CatalogApp) -> RunningRead? {
+    /// read (`joined`; a cancel ends the wait at once, and the read answers only attempts still waiting); nil when the
+    /// row's read is of another app (the list changed since) or too many are held up, so the attempt is refused. An
+    /// answer that cannot be read is false: the operation then starts without leave to quit and refuses with that reason.
+    private func runningRead(_ app: CatalogApp) -> (read: RunningRead, joined: Bool)? {
         runningReads = runningReads.filter { !$0.value.read.isAnswered }
         let key = [app.id, app.bundleID, app.appName].joined(separator: "\n")
-        if let held = runningReads[app.id] { return held.app == key ? held.read : nil }
+        if let held = runningReads[app.id] { return held.app == key ? (held.read, true) : nil }
         guard runningReads.count < Self.maxRunningReads else { return nil }
         let read = RunningRead()
         runningReads[app.id] = (key, read)
@@ -370,7 +386,7 @@ public final class AppActions: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             read.give((try? installer.isRunning(app)) == true)
         }
-        return read
+        return (read, false)
     }
 
     private func show(_ appID: String, _ step: InstallProgress, _ release: ChosenRelease?) {
