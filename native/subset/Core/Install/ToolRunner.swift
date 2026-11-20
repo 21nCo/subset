@@ -23,13 +23,12 @@ struct ToolResult: Sendable {
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
 /// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell; `environment`
-/// and `directory`, when given, replace this process's environment and working directory. With `channel`, the tool's
-/// standard input is instead the writing end of a pipe whose data `channel` gets as it arrives (not kept in the result):
-/// a channel a shell's startup files cannot send elsewhere by redirecting its output. With `ownSession`, the tool
+/// and `directory`, when given, replace this process's environment and working directory. With `ownSession`, the tool
 /// leads a session of its own, which every process it starts stays in even in a process group of its own (a job a
 /// shell with job control on started) and after the tool exits; stopping it signals every process in that session,
-/// and it settles only once they are gone too, or at the same bound. Only a process that starts a session itself
-/// leaves it.
+/// and it settles only once they are gone too, or at the same bound. A tool that exits by itself with processes left
+/// in its session, even ones holding none of its output, has them stopped `drainAfterExit` seconds later. Only a
+/// process that starts a session itself leaves it.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
@@ -37,12 +36,12 @@ enum ToolRunner {
 
     static func run(
         _ path: String, _ arguments: [String], argv0: String? = nil, environment: [String: String]? = nil, directory: String? = nil,
-        timeout: TimeInterval = 300, cancellable: Bool = true, ownSession: Bool = false, channel: (@Sendable (Data) -> Void)? = nil
+        timeout: TimeInterval = 300, cancellable: Bool = true, ownSession: Bool = false
     ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
         let run = try ToolRun(
             path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout,
-            ownSession: ownSession, channel: channel
+            ownSession: ownSession
         )
         let result = await withTaskCancellationHandler {
             await run.result()
@@ -79,31 +78,26 @@ private final class ToolRun: @unchecked Sendable {
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
     private let ownSession: Bool
-    private let channel: (@Sendable (Data) -> Void)?
-    private var channelBytes = 0
 
     init(
         path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval,
-        ownSession: Bool, channel: (@Sendable (Data) -> Void)?
+        ownSession: Bool
     ) throws {
         self.ownSession = ownSession
-        self.channel = channel
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
-        var side: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard pipe(&err) == 0, channel == nil || pipe(&side) == 0 else {
+        guard pipe(&err) == 0 else {
             let code = errno
-            for fd in out + err where fd >= 0 { close(fd) }
+            close(out[0]); close(out[1])
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
-        let readEnds = channel == nil ? [out[0], err[0]] : [out[0], err[0], side[0]]
-        for fd in readEnds { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        for fd in [out[0], err[0]] { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
-        if channel == nil { posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0) } else { posix_spawn_file_actions_adddup2(&actions, side[1], 0) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, out[1], 1)
         posix_spawn_file_actions_adddup2(&actions, err[1], 2)
         if let directory { posix_spawn_file_actions_addchdir_np(&actions, directory) }
@@ -129,19 +123,17 @@ private final class ToolRun: @unchecked Sendable {
         let code = posix_spawn(&child, path, &actions, &attributes, argv, envp)
         close(out[1])
         close(err[1])
-        if channel != nil { close(side[1]) }
         guard code == 0 else {
-            for fd in readEnds { close(fd) }
+            close(out[0]); close(err[0])
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         pid = child
 
         queue.sync {
-            open = readEnds.count
-            for (fd, stream) in zip(readEnds, [Stream.out, .err, .channel]) {
+            for (fd, isOut) in [(out[0], true), (err[0], false)] {
                 _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
                 let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-                source.setEventHandler { [unowned self, unowned source] in read(fd, from: source, stream) }
+                source.setEventHandler { [unowned self, unowned source] in read(fd, from: source, isOut: isOut) }
                 source.setCancelHandler { [self] in
                     close(fd)
                     open -= 1
@@ -178,10 +170,8 @@ private final class ToolRun: @unchecked Sendable {
         queue.async { [self] in stopOnQueue(reason) }
     }
 
-    private enum Stream { case out, err, channel }
-
     /// One read per event, so the timers and stop requests queued meanwhile run between reads.
-    private func read(_ fd: Int32, from source: DispatchSourceRead, _ stream: Stream) {
+    private func read(_ fd: Int32, from source: DispatchSourceRead, isOut: Bool) {
         var buffer = [UInt8](repeating: 0, count: 65536)
         var count: Int
         repeat { count = Darwin.read(fd, &buffer, buffer.count) } while count < 0 && errno == EINTR
@@ -191,15 +181,8 @@ private final class ToolRun: @unchecked Sendable {
             source.cancel()
             return
         }
-        let room = max(0, ToolRunner.maxOutputBytes - (stream == .channel ? channelBytes : stdout.count + stderr.count))
-        let kept = buffer[0..<min(count, room)]
-        switch stream {
-        case .out: stdout.append(contentsOf: kept)
-        case .err: stderr.append(contentsOf: kept)
-        case .channel:
-            channelBytes += kept.count
-            if !kept.isEmpty { channel?(Data(kept)) }
-        }
+        let room = max(0, ToolRunner.maxOutputBytes - stdout.count - stderr.count)
+        if isOut { stdout.append(contentsOf: buffer[0..<min(count, room)]) } else { stderr.append(contentsOf: buffer[0..<min(count, room)]) }
         guard count > room else { return }
         // Nothing more is kept: the pipes close (a process still writing gets SIGPIPE) and the group is stopped.
         stopOnQueue("it wrote more than \(ToolRunner.maxOutputBytes) bytes")
@@ -213,9 +196,11 @@ private final class ToolRun: @unchecked Sendable {
         guard finished == nil else { return reap() }
         finishIfDone()
         guard finished == nil, stopping == nil else { return }
-        // A process the tool started still holds its output: it gets a moment to finish, then the group is stopped.
+        // A process the tool started still holds its output or is in its session: it gets a moment to finish, then the
+        // group (and session) is stopped.
         queue.asyncAfter(deadline: .now() + ToolRunner.drainAfterExit) { [self] in
-            stopOnQueue("a process it started still held its output \(Int(ToolRunner.drainAfterExit)) seconds after it exited")
+            let held = open > 0 ? "held its output" : "ran in its session"
+            stopOnQueue("a process it started still \(held) \(Int(ToolRunner.drainAfterExit)) seconds after it exited")
         }
     }
 
@@ -279,7 +264,7 @@ private final class ToolRun: @unchecked Sendable {
     private func finishIfDone() {
         guard finished == nil else { return }
         let settled: Bool
-        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 }
+        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 && sessionMembers.isEmpty }
         guard settled else { return }
         var text = String(decoding: stderr, as: UTF8.self)
         var status: Int32?

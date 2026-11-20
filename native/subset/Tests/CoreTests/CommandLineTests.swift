@@ -156,12 +156,14 @@ final class CommandLineTests: XCTestCase {
         for cut in [10, 30, frame.count - 10] { XCTAssertNil(LoginShell.snapshot(in: frame.prefix(cut), mark: mark), "\(cut)") }
         XCTAssertNil(LoginShell.snapshot(in: Data("\(mark)\n/home\u{0}\(mark)\n".utf8), mark: mark), "no environment")
         XCTAssertNil(LoginShell.snapshot(in: Data("\(mark)\nA=1\u{0}\u{0}\(mark)\n".utf8), mark: mark), "no folder")
-        XCTAssertFalse(LoginShell.script(mark: mark).contains("!"))
+        XCTAssertFalse(LoginShell.script(mark: mark, channel: "/private/tmp/subset-check.test/channel").contains("!"))
     }
 
-    /// The temporary folder's entries named as the check once named its snapshots.
+    /// The temporary folder's entries named as the check once named its snapshots, and the check's named-pipe folders.
     static func checkEntries() -> Set<String> {
-        Set(((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? []).filter { $0.hasPrefix("subset-check-") })
+        let temporary = (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? []
+        let channels = (try? FileManager.default.contentsOfDirectory(atPath: "/private/tmp")) ?? []
+        return Set(temporary.filter { $0.hasPrefix("subset-check-") } + channels.filter { $0.hasPrefix("subset-check.") })
     }
 
     /// A real /bin/sh that prints before the command and, from an EXIT trap, after it and exits 3, with a `subset` on
@@ -339,36 +341,38 @@ final class CommandLineTests: XCTestCase {
     }
 
     /// The examples show at once and whether a helper is missing once its lookup, off the main thread, ends; a stalled
-    /// lookup holds nothing up, and the newer installed apps are looked for again.
+    /// lookup holds nothing up. Only the lookup of the copies shown counts: an update of the same copy drops the earlier
+    /// result at once, and a lookup ending after a newer update is ignored.
     @MainActor
     func testHelperAvailabilityIsLookedUpOffTheMainThread() async throws {
-        let release = DispatchSemaphore(value: 0)
-        let onMain = Found()
-        let model = HelperExamplesModel { bundle, _ in
-            if Thread.isMainThread { onMain.paths.append(LoginEnvironment(variables: [:], directory: bundle)) }
-            if bundle == "/Applications/Stalled.app" { release.wait() }
-            return bundle != "/Applications/New.app"
-        }
+        let lookups = Lookups()
+        let first = lookups.stall("/Applications/Timer.app")
+        let model = HelperExamplesModel { bundle, _ in lookups.lookUp(bundle) }
         let apps = [app("timer", "Timer", helpers: [helper("timer", kind: "node")])]
-        func copy(_ name: String) -> InstalledCopy {
-            InstalledCopy(path: "/Applications/\(name).app", folder: "/Applications", version: "0.1.0", build: "1", channel: nil)
+        func copy(_ name: String) -> [String: [InstalledCopy]] {
+            ["timer": [InstalledCopy(path: "/Applications/\(name).app", folder: "/Applications", version: "0.1.0", build: "1", channel: nil)]]
         }
         let started = Date()
-        model.update(apps: apps, installed: ["timer": [copy("Stalled")]])
+        model.update(apps: apps, installed: copy("Timer"))
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
         XCTAssertEqual(model.examples.map(\.example), ["subset timer list"])
         XCTAssertEqual(model.examples.map(\.missingFromCopy), [false], "shown as missing before the lookup ended")
-        model.update(apps: apps, installed: ["timer": [copy("Old")]])
+        model.update(apps: apps, installed: copy("Other"))
         for _ in 0..<100 where model.examples.first?.missingFromCopy != true { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertEqual(model.examples.map(\.missingFromCopy), [true], "a newer lookup waited for the stalled one")
-        // After an update the new copy has its helper; the stalled lookup, ending last, does not replace that.
-        model.update(apps: apps, installed: ["timer": [copy("New")]])
-        for _ in 0..<100 where model.examples.first?.missingFromCopy != false { try await Task.sleep(nanoseconds: 20_000_000) }
-        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false])
-        release.signal()
+        // The same copy repaired: its old result is dropped before the new lookup ends.
+        let second = lookups.stall("/Applications/Other.app")
+        model.update(apps: apps, installed: copy("Other"))
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false], "an earlier lookup's result was shown for a newer look")
+        lookups.answer("/Applications/Other.app", missing: false)
+        second.signal()
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(model.examples.map(\.missingFromCopy), [false])
-        XCTAssertEqual(onMain.paths.count, 0, "a helper was looked up on the main thread")
+        // The stalled first lookup ends last, finding its helper missing; it is ignored.
+        first.signal()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false])
+        XCTAssertFalse(lookups.ranOnMainThread, "a helper was looked up on the main thread")
     }
 
     /// Each look for the installed apps looks the helpers up again, also when it found the same copies (a helper added
@@ -457,6 +461,34 @@ final class CommandLineTests: XCTestCase {
 
     private func helper(_ command: String, kind: String = "native") -> CatalogHelper {
         CatalogHelper(command: command, path: kind == "node" ? "Contents/Resources/\(command)-cli/dist/cli.mjs" : "Contents/Helpers/\(command)", kind: kind)
+    }
+}
+
+/// Helper lookups for the model test: each bundle's answer (missing unless told otherwise), held while it is stalled.
+private final class Lookups: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stalls: [String: DispatchSemaphore] = [:]
+    private var answers: [String: Bool] = [:]
+    private var onMain = false
+    var ranOnMainThread: Bool { lock.withLock { onMain } }
+
+    func stall(_ bundle: String) -> DispatchSemaphore {
+        let gate = DispatchSemaphore(value: 0)
+        lock.withLock { stalls[bundle] = gate }
+        return gate
+    }
+
+    func answer(_ bundle: String, missing: Bool) {
+        lock.withLock { answers[bundle] = missing }
+    }
+
+    func lookUp(_ bundle: String) -> Bool {
+        let gate = lock.withLock {
+            if Thread.isMainThread { onMain = true }
+            return stalls.removeValue(forKey: bundle)
+        }
+        gate?.wait()
+        return lock.withLock { answers[bundle] ?? true }
     }
 }
 
@@ -600,10 +632,11 @@ final class CommandLineLoginShellTests: XCTestCase {
 
     /// The version command gets what the login files set: an unset variable stays unset, an exported one is there, and a
     /// relative PATH entry is found from the folder they changed to (its name has a line break), even when they exported
-    /// another PWD and sent the shell's output to a log, which gets none of the environment.
+    /// another PWD and sent the shell's output to a log and its input to a file, which get none of the environment.
     func testTheVersionCommandRunsInTheLoginShellsEnvironmentAndDirectory() async throws {
         let profile = """
             exec >> "$HOME/login.log" 2>&1
+            exec 0<>"$HOME/session.log"
             unset NODE_OPTIONS
             SUBSET_LOGIN=test-login-value; export SUBSET_LOGIN
             cd "$SUBSET_TEST_FOLDER/two"$'\\n'"lines"
@@ -625,6 +658,8 @@ final class CommandLineLoginShellTests: XCTestCase {
             let log = (try? String(contentsOf: fixture.folder.appendingPathComponent("home/login.log"), encoding: .utf8)) ?? ""
             XCTAssertTrue(log.contains("login done"))
             XCTAssertFalse(log.contains("test-login-value"), "the environment went to the shell's log")
+            let session = (try? String(contentsOf: fixture.folder.appendingPathComponent("home/session.log"), encoding: .utf8)) ?? ""
+            XCTAssertFalse(session.contains("test-login-value"), "the environment went to the shell's input file")
         }
         let found = await SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")).detect()
         XCTAssertEqual(found, .installed(version: "1.2.3"))
@@ -682,32 +717,39 @@ final class CommandLineLoginShellTests: XCTestCase {
     }
 
     /// A job a startup file started in the background with job control on (a process group of its own) that outlives
-    /// the shell is stopped once the shell has ended and when the model stops.
+    /// the shell is stopped soon after the shell has ended, the shell staying tracked until then, also when the job holds
+    /// none of the shell's input or output; stopping the model ends it at once.
     @MainActor
     func testABackgroundStartupJobThatOutlivesTheShellIsStopped() async throws {
-        let job = "set -m\n\"$SUBSET_TEST_FOLDER/bin/subset\" --job &\n"
         let subset = "if [ \"$1\" = --job ]; then echo $$ > \"$SUBSET_TEST_FOLDER/job-pid\"; exec sleep 120; fi\necho 1.2.3\n"
-        let fixture = try Fixture(home: [".bash_profile": job], subset: subset)
-        var pid: pid_t = 0
-        defer {
-            if pid > 0 { kill(pid, SIGKILL) }
-            fixture.remove()
+        for (job, waitForIt) in [("", false), (" 0</dev/null >/dev/null 2>&1", false), (" 0</dev/null >/dev/null 2>&1", true)] {
+            let fixture = try Fixture(home: [".bash_profile": "set -m\n\"$SUBSET_TEST_FOLDER/bin/subset\" --job\(job) &\n"], subset: subset)
+            var pid: pid_t = 0
+            defer {
+                if pid > 0 { kill(pid, SIGKILL) }
+                fixture.remove()
+            }
+            let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")))
+            await model.check()
+            XCTAssertEqual(model.status, .installed(version: "1.2.3"), job)
+            // The job runs on its own, so it may write its pid after the answer.
+            let pidFile = fixture.folder.appendingPathComponent("job-pid")
+            for _ in 0..<100 where pid == 0 {
+                pid = (try? String(contentsOf: pidFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+                if pid == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
+            }
+            XCTAssertGreaterThan(pid, 0, "\(job): the startup job never ran")
+            XCTAssertEqual(getpgid(pid), pid, "\(job): the job is not in a process group of its own")
+            if waitForIt {
+                XCTAssertTrue(model.hasRunningShell, "the shell was forgotten while its job still ran")
+                for _ in 0..<200 where kill(pid, 0) == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
+                XCTAssertNotEqual(kill(pid, 0), 0, "the job outlived the shell by more than 10 seconds")
+            }
+            await model.stop()
+            XCTAssertFalse(model.hasRunningShell, job)
+            let ended = await Self.ends(pid)
+            XCTAssertTrue(ended, "\(job): the background startup job is still running after the model stopped")
         }
-        let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")))
-        await model.check()
-        XCTAssertEqual(model.status, .installed(version: "1.2.3"))
-        // The job runs on its own, so it may write its pid after the answer.
-        let pidFile = fixture.folder.appendingPathComponent("job-pid")
-        for _ in 0..<100 where pid == 0 {
-            pid = (try? String(contentsOf: pidFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
-            if pid == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
-        }
-        XCTAssertGreaterThan(pid, 0, "the startup job never ran")
-        XCTAssertEqual(getpgid(pid), pid, "the job is not in a process group of its own")
-        await model.stop()
-        XCTAssertFalse(model.hasRunningShell)
-        let ended = await Self.ends(pid)
-        XCTAssertTrue(ended, "the background startup job is still running after the model stopped")
     }
 
     /// Each login shell, csh and tcsh too, finds `subset` on the PATH only its login file sets, and nothing without it,

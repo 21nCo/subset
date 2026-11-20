@@ -47,8 +47,7 @@ public struct LoginEnvironment: Equatable, Sendable {
 /// The user's login shell, run as an interactive login shell, so the environment set in its startup files (a PATH from
 /// nvm, fnm or Homebrew, an unset NODE_OPTIONS) applies. It is started as login(1) starts one, with `-` before its name as argument zero, and `-ic`, which zsh, bash,
 /// sh, ksh, dash, fish, tcsh and csh all accept (tcsh and csh reject `-ilc`). It runs with nothing on its standard
-/// input but the app's private channel, in a session of its own, and is stopped with everything it started after `timeout`
-/// (`ToolRunner`).
+/// input, in a session of its own, and is stopped with everything it started after `timeout` (`ToolRunner`).
 public struct LoginShell: CommandShell {
     public let path: String
 
@@ -68,16 +67,16 @@ public struct LoginShell: CommandShell {
     }
 
     /// The shell line runs one process, awk, which writes its environment (the shell's exported variables) and the
-    /// folder the shell is in (every line of `pwd -P`: PWD can be unset or name another folder) to /dev/stdin, the
-    /// app's private channel (`ToolRunner`), which a startup file redirecting the shell's output to a log does not
-    /// change, framed by a line made up for this check: `<mark>\n`, each NAME=value and the folder followed by NUL,
-    /// `<mark>\n`. Nothing is written to disk or to the shell's output, no path is in the line, and no shell command runs
-    /// inside the frame. The line reads the same in every shell above (single quotes, no `!`). It starts with `set +m`
-    /// (job control off), so a startup file that turns it on does not give the work of an EXIT trap or logout file a
-    /// process group of its own; csh and tcsh only print an error. The shell leads a session of its own, so a job that
-    /// still gets a group of its own is stopped with it.
-    static func script(mark: String) -> String {
-        let write = "> \"/dev/stdin\""
+    /// folder the shell is in (every line of `pwd -P`: PWD can be unset or name another folder) to `channel`, a named
+    /// pipe only the app reads, framed by a line made up for this check: `<mark>\n`, each NAME=value and the folder
+    /// followed by NUL, `<mark>\n`. What passes through a named pipe is never written to disk, and no redirection of the
+    /// shell's input, output or errors by a startup file changes where it goes. No shell command runs inside the frame.
+    /// The line reads the same in every shell above (single quotes, no `!`; `channel` is letters, digits, `.`, `-` and
+    /// `/` only). It starts with `set +m` (job control off), so a startup file that turns it on does not give the work of
+    /// an EXIT trap or logout file a process group of its own; csh and tcsh only print an error. The shell leads a
+    /// session of its own, so a job that still gets a group of its own is stopped with it.
+    static func script(mark: String, channel: String) -> String {
+        let write = "> \"\(channel)\""
         return "set +m; /usr/bin/awk 'BEGIN { while ((\"/bin/pwd -P\" | getline line) > 0) folder = folder (n++ ? \"\\n\" : \"\") line; "
             + "printf \"%s\\n\", \"\(mark)\" \(write); for (name in ENVIRON) printf \"%s=%s%c\", name, ENVIRON[name], 0 \(write); "
             + "printf \"%s%c%s\\n\", folder, 0, \"\(mark)\" \(write) }'"
@@ -106,13 +105,49 @@ public struct LoginShell: CommandShell {
         return Dictionary(entries, uniquingKeysWith: { _, last in last })
     }
 
+    /// The named pipe is in a folder of its own, only the user's, in /private/tmp (whose path has no character a shell
+    /// line would need quoted), which is removed once the shell and everything it started have ended, so no process can
+    /// still write to that path. A folder a crash left holds an empty named pipe and nothing else; it is never swept.
     public func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable (LoginEnvironment) -> Void) async {
+        var template = Array("/private/tmp/subset-check.XXXXXXXX".utf8CString)
+        guard let made = mkdtemp(&template) else { return }
+        let folder = String(cString: made)
+        let channel = folder + "/channel"
+        defer {
+            unlink(channel)
+            rmdir(folder)
+        }
+        guard mkfifo(channel, 0o600) == 0 else { return }
+        // The app holds the writing end too, so the pipe never reads as ended before awk opens it.
+        let reader = open(channel, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        let holder = open(channel, O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+        guard reader >= 0, holder >= 0 else {
+            for fd in [reader, holder] where fd >= 0 { close(fd) }
+            return
+        }
         let mark = "subset-check-" + UUID().uuidString
         let output = Snapshot()
-        let name = "-" + (path as NSString).lastPathComponent
-        _ = try? await ToolRunner.run(path, ["-ic", Self.script(mark: mark)], argv0: name, timeout: timeout, ownSession: true) { chunk in
-            if let snapshot = output.add(chunk, mark: mark) { found(snapshot) }
+        let queue = DispatchQueue(label: "dev.subset.login-environment")
+        // Reads what is there; once more after the shell has ended, before the reader is closed.
+        let drain = {
+            var buffer = [UInt8](repeating: 0, count: 65536)
+            while true {
+                let count = Darwin.read(reader, &buffer, buffer.count)
+                guard count > 0 else { return }
+                if let snapshot = output.add(Data(buffer[0..<count]), mark: mark) { found(snapshot) }
+            }
         }
+        let source = DispatchSource.makeReadSource(fileDescriptor: reader, queue: queue)
+        source.setEventHandler(handler: drain)
+        source.setCancelHandler {
+            close(reader)
+            close(holder)
+        }
+        source.resume()
+        let name = "-" + (path as NSString).lastPathComponent
+        _ = try? await ToolRunner.run(path, ["-ic", Self.script(mark: mark, channel: channel)], argv0: name, timeout: timeout, ownSession: true)
+        queue.sync(execute: drain)
+        source.cancel()
     }
 
     public func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput? {
@@ -270,9 +305,10 @@ private final class Snapshot: @unchecked Sendable {
     private var output = Data()
     private var told = false
 
+    /// Nil, and nothing more is kept, once a frame was told or past 1 MiB.
     func add(_ chunk: Data, mark: String) -> LoginEnvironment? {
         lock.withLock {
-            guard !told else { return nil }
+            guard !told, output.count + chunk.count <= ToolRunner.maxOutputBytes else { return nil }
             output.append(chunk)
             guard let snapshot = LoginShell.snapshot(in: output, mark: mark) else { return nil }
             told = true

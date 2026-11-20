@@ -101,7 +101,9 @@ public enum HelperExamples {
 /// `follow` looks them up again after each look for the installed apps (after an install, update or move to the Trash
 /// too), also when it found what was already shown, since a helper can be added to or removed from the same copy.
 /// At most `maxLookups` lookups run at once, so a stalled volume holds no more threads; the newest one asked for while
-/// they run starts when one ends, and an older lookup never replaces a newer one's result.
+/// they run starts when one ends. Only the lookup of the installed apps shown counts: each update drops what an earlier
+/// lookup found (the same copy may since have been updated or repaired), and a lookup that ends after a newer update
+/// is ignored.
 @MainActor
 public final class HelperExamplesModel: ObservableObject {
     public static let maxLookups = 2
@@ -111,10 +113,9 @@ public final class HelperExamplesModel: ObservableObject {
     private let isMissing: @Sendable (String, String) -> Bool
     private var apps: [CatalogApp] = []
     private var installed: [String: [InstalledCopy]] = [:]
-    /// Whether each helper path (bundle, NUL, relative path) is missing, from the newest lookup that ended.
+    /// Whether each helper path (bundle, NUL, relative path) is missing, from the lookup of the installed apps shown.
     private var missing: [String: Bool] = [:]
     private var asked = 0
-    private var shown = 0
     private var running = 0
     private var pending: (number: Int, paths: [(String, String)])?
     private var following: AnyCancellable?
@@ -140,6 +141,7 @@ public final class HelperExamplesModel: ObservableObject {
         _ = HelperExamples.examples(apps: apps, installed: installed) { paths.append(($0, $1)); return false }
         asked += 1
         pending = (asked, paths)
+        missing = [:]
         publish()
         startPending()
     }
@@ -157,8 +159,7 @@ public final class HelperExamplesModel: ObservableObject {
 
     private func ended(_ number: Int, _ found: [(String, Bool)]) {
         running -= 1
-        if number > shown {
-            shown = number
+        if number == asked {
             missing = Dictionary(found, uniquingKeysWith: { _, last in last })
             publish()
         }
