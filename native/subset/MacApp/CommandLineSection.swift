@@ -21,12 +21,18 @@ struct CommandLineSection: View {
                     .help("Look for subset in your login shell again")
             }
             copyLine("Set up:", HelperExamples.setupCommand, help: "Installs the subset command with npm (needs Node.js)")
+            if case .installed(let version) = model.status, !examples.isEmpty, !HelperExamples.runsBundledCommands(version) {
+                note("subset \(version) does not run the commands below: they need subset \(HelperExamples.minimumLauncherVersion) or later")
+            }
             ForEach(examples) { example in
                 HStack(spacing: 8) {
                     copyLine("\(example.appName):", example.example, help: "Runs the command \(example.appName) bundles")
                     Link("Agent instructions", destination: example.guide)
                         .font(.caption)
                         .help("Open the instructions for agents in the README")
+                }
+                if !example.bundled {
+                    note("This copy of \(example.appName) does not include subset \(example.command): update \(example.appName) first")
                 }
             }
         }
@@ -57,6 +63,10 @@ struct CommandLineSection: View {
                 .foregroundStyle(.secondary)
                 .help("Not found on your login shell's PATH within 5 seconds")
         }
+    }
+
+    private func note(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
     }
 
     private func copyLine(_ label: String, _ command: String, help: String) -> some View {

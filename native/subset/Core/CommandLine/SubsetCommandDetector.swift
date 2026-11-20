@@ -11,7 +11,7 @@ public enum SubsetCommandStatus: Equatable, Sendable {
     case notInstalled
 }
 
-/// What a shell command did: its exit status (nil when it was stopped or ended by a signal) and its standard output.
+/// What the version command did: its exit status (nil when it was stopped or ended by a signal) and its standard output.
 public struct ShellOutput: Equatable, Sendable {
     public var status: Int32?
     public var stdout: String
@@ -22,14 +22,19 @@ public struct ShellOutput: Equatable, Sendable {
     }
 }
 
-/// Runs one command line in a shell. Nil when it could not be started or was cancelled.
+/// The user's login shell, which only tells the PATH its startup files set, and a runner for the version command.
 public protocol CommandShell: Sendable {
-    func run(_ command: String, timeout: TimeInterval) async -> ShellOutput?
+    /// Runs the login shell until it ends or is stopped (`timeout`, or the calling task cancelled). `found` gets the
+    /// PATH as soon as it is known, which can be well before the shell ends (an EXIT trap or a logout file still runs).
+    func readPath(timeout: TimeInterval, found: @escaping @Sendable (String) -> Void) async
+    /// Runs a program as the app's own process. Nil when it could not be started or was cancelled.
+    func run(_ path: String, _ arguments: [String], timeout: TimeInterval) async -> ShellOutput?
 }
 
-/// The user's login shell, run as an interactive login shell (`-ilc`, as Minutes finds Node.js), so the PATH set in
-/// its startup files (nvm, fnm, Homebrew) applies. It runs with nothing on its standard input, in its own process group,
-/// and is stopped with everything it started after `timeout` (`ToolRunner`).
+/// The user's login shell, run as an interactive login shell, so the PATH set in its startup files (nvm, fnm, Homebrew)
+/// applies. It is started as login(1) starts one, with `-` before its name as argument zero, and `-ic`, which zsh, bash,
+/// sh, ksh, dash, fish, tcsh and csh all accept (tcsh and csh reject `-ilc`). It runs with nothing on its standard
+/// input, in its own process group, and is stopped with everything it started after `timeout` (`ToolRunner`).
 public struct LoginShell: CommandShell {
     public let path: String
 
@@ -48,100 +53,126 @@ public struct LoginShell: CommandShell {
         [account, environment].compactMap { $0 }.first { $0.hasPrefix("/") && isExecutable($0) } ?? "/bin/zsh"
     }
 
-    public func run(_ command: String, timeout: TimeInterval) async -> ShellOutput? {
-        guard let result = try? await ToolRunner.run(path, ["-ilc", command], timeout: timeout) else { return nil }
+    /// The shell line writes the PATH to a file in a private folder and renames it when complete, so what the shell
+    /// prints does not count and the PATH is read as soon as the file appears, not when the shell ends. `printenv` and
+    /// `mv` by absolute path, `>`, `&&` and single quotes mean the same in every shell above.
+    static func script(partial: String, complete: String) -> String {
+        "/usr/bin/printenv PATH > '\(partial)' && /bin/mv '\(partial)' '\(complete)'"
+    }
+
+    public func readPath(timeout: TimeInterval, found: @escaping @Sendable (String) -> Void) async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
+        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])) != nil else { return }
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let complete = folder.appendingPathComponent("path")
+        // Looks every 50 ms, and once more after the shell has ended.
+        let watch = Task.detached {
+            while true {
+                if let text = try? String(contentsOf: complete, encoding: .utf8) {
+                    let path = text.trimmingCharacters(in: .newlines)
+                    if !path.isEmpty { found(path) }
+                    return
+                }
+                if Task.isCancelled { return }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        let line = Self.script(partial: folder.appendingPathComponent("partial").path, complete: complete.path)
+        let name = "-" + (path as NSString).lastPathComponent
+        _ = try? await ToolRunner.run(path, ["-ic", line], argv0: name, timeout: timeout)
+        watch.cancel()
+        await watch.value
+    }
+
+    public func run(_ path: String, _ arguments: [String], timeout: TimeInterval) async -> ShellOutput? {
+        guard let result = try? await ToolRunner.run(path, arguments, timeout: timeout) else { return nil }
         return ShellOutput(status: result.status, stdout: String(decoding: result.stdout, as: UTF8.self))
     }
 }
 
-/// One check's shell run. It may outlive the answer: a shell that has not answered by the time limit is stopped, and
-/// stopping an interactive shell with everything it started can take longer (`ToolRunner`: SIGTERM, then SIGKILL).
-public struct SubsetCommandProbe: Sendable {
-    let token: String
-    let run: Task<ShellOutput?, Never>
+/// One check: the login shell telling its PATH, then the version command run with it. Both are the app's own processes
+/// and may outlive the answer: a shell can still run its EXIT trap or logout files after the answer is shown, and a run
+/// stopped at the time limit takes a moment to end (`ToolRunner`: SIGTERM, then SIGKILL).
+public final class SubsetCommandProbe: Sendable {
+    let shell: Task<Void, Never>
+    let answer: Task<ShellOutput?, Never>
+    private let path: OneShot<String>
 
-    /// Stops the shell if it still runs.
-    public func cancel() {
-        run.cancel()
+    init(shell: any CommandShell, timeLimit: TimeInterval) {
+        let path = OneShot<String>()
+        let deadline = Date().addingTimeInterval(timeLimit)
+        self.path = path
+        self.shell = Task.detached {
+            await shell.readPath(timeout: timeLimit) { path.set($0) }
+            path.set(nil)
+        }
+        answer = Task.detached {
+            guard let found = await path.value else { return nil }
+            return await shell.run("/usr/bin/env", ["PATH=\(found)"] + SubsetCommandDetector.arguments, timeout: max(0, deadline.timeIntervalSinceNow))
+        }
     }
 
-    /// Returns once the shell has ended or been stopped with everything it started.
+    /// Stops the shell and the version command if they still run, and starts no version command.
+    public func cancel() {
+        path.set(nil)
+        shell.cancel()
+        answer.cancel()
+    }
+
+    /// Returns once the shell and the version command have ended or been stopped with everything they started.
     public func ended() async {
-        _ = await run.value
+        await shell.value
+        _ = await answer.value
     }
 }
 
-/// Finds `subset` by running `/usr/bin/env subset --version` in the user's login shell, for 5 seconds at most. Any
-/// failure is `notInstalled`; nothing is installed and no error is raised.
+/// Finds `subset` by running `/usr/bin/env subset --version` with the PATH of the user's login shell, for 5 seconds
+/// at most. Any failure is `notInstalled`; nothing is installed and no error is raised.
 public struct SubsetCommandDetector: Sendable {
     public static let command = "/usr/bin/env subset --version"
+    static let arguments = ["subset", "--version"]
     public static let timeLimit: TimeInterval = 5
     /// What `subset --version` prints: a version such as 0.2.0 or 0.2.1-beta.1, at most 64 characters.
     static let versionPattern = #"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"#
 
     let shell: any CommandShell
     let timeLimit: TimeInterval
-    let token: @Sendable () -> String
 
-    /// `token` names each check's output markers; a new random one by default.
-    public init(
-        shell: any CommandShell, timeLimit: TimeInterval = SubsetCommandDetector.timeLimit,
-        token: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
-    ) {
+    public init(shell: any CommandShell, timeLimit: TimeInterval = SubsetCommandDetector.timeLimit) {
         self.shell = shell
         self.timeLimit = timeLimit
-        self.token = token
     }
 
     public static func standard() -> SubsetCommandDetector {
         SubsetCommandDetector(shell: LoginShell.user())
     }
 
-    /// The shell line: the command between a start marker and an end marker printed only when the command exits 0, so
-    /// what startup and logout files or an EXIT trap print, and the shell's own exit status, do not count. `echo`, `;`
-    /// and `&&` mean the same in sh, bash, zsh and fish.
-    ///
-    /// It starts with `set +m` (job control off). An interactive bash or sh, even with no terminal, runs each command in
-    /// a process group of its own, which `ToolRunner` does not signal when it stops the shell's group, so a stalled
-    /// `subset` would outlive a timeout or Quit. With job control off the command stays in the shell's group, and the
-    /// group stop reaches it. zsh already runs `-ilc` that way; a shell that rejects `set +m` just prints to stderr.
-    static func script(token: String) -> String {
-        "set +m; echo \(startMarker(token)); \(command) && echo \(endMarker(token))"
-    }
-
-    static func startMarker(_ token: String) -> String { "subset-check-\(token)-start" }
-    static func endMarker(_ token: String) -> String { "subset-check-\(token)-end" }
-
     /// Checks once: `start()`, then `detect(_:)`.
     public func detect() async -> SubsetCommandStatus {
         await detect(start())
     }
 
-    /// Starts the shell. Its run belongs to the caller, who can stop it and wait for it to end (`SubsetCommandProbe`).
+    /// Starts the check. Its processes belong to the caller, who can stop them and wait for them to end.
     public func start() -> SubsetCommandProbe {
-        let shell = shell
-        let token = token()
-        let limit = timeLimit
-        return SubsetCommandProbe(token: token, run: Task.detached { await shell.run(Self.script(token: token), timeout: limit) })
+        SubsetCommandProbe(shell: shell, timeLimit: timeLimit)
     }
 
-    /// `installed` with the version when the command exited 0 and printed a version between the markers; otherwise
-    /// `notInstalled`, also when the shell has not answered within the time limit or the caller is cancelled. Then the
-    /// probe is stopped but not waited for (an interactive shell ignores SIGTERM until it is killed).
+    /// `installed` with the version when the version command exited 0 and printed only a version; otherwise
+    /// `notInstalled`, also when there is no answer within the time limit or the caller is cancelled. Then the probe
+    /// is stopped but not waited for (an interactive shell ignores SIGTERM until it is killed). An answer does not wait
+    /// for the shell to end.
     public func detect(_ probe: SubsetCommandProbe) async -> SubsetCommandStatus {
-        guard let answer = await Self.within(timeLimit, { await probe.run.value }) else {
+        guard let answer = await Self.within(timeLimit, { await probe.answer.value }) else {
             probe.cancel()
             return .notInstalled
         }
-        guard let output = answer, let version = Self.version(in: output.stdout, token: probe.token) else { return .notInstalled }
+        guard let output = answer, output.status == 0, let version = Self.version(in: output.stdout) else { return .notInstalled }
         return .installed(version: version)
     }
 
-    /// The text between the start marker and the end marker after it, when it is one version.
-    static func version(in stdout: String, token: String) -> String? {
-        guard let start = stdout.range(of: startMarker(token)),
-              let end = stdout.range(of: endMarker(token), range: start.upperBound..<stdout.endIndex) else { return nil }
-        let line = stdout[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The version command's output, when it is one version.
+    static func version(in stdout: String) -> String? {
+        let line = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard line.count <= 64, line.range(of: versionPattern, options: .regularExpression) != nil else { return nil }
         return line
     }
@@ -196,5 +227,37 @@ private final class Race<T: Sendable>: @unchecked Sendable {
         lock.unlock()
         if value == nil { work?.cancel() }
         continuation?.resume(returning: value)
+    }
+}
+
+/// A value set once (the first `set` wins), awaited by one caller.
+private final class OneShot<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: T??
+    private var waiter: CheckedContinuation<T?, Never>?
+
+    func set(_ value: T?) {
+        lock.lock()
+        guard result == nil else { return lock.unlock() }
+        result = .some(value)
+        let waiter = waiter
+        self.waiter = nil
+        lock.unlock()
+        waiter?.resume(returning: value)
+    }
+
+    var value: T? {
+        get async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    continuation.resume(returning: result)
+                } else {
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        }
     }
 }

@@ -22,14 +22,17 @@ struct ToolResult: Sendable {
 /// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
+/// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
     static let drainAfterExit: TimeInterval = 2
 
-    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 300, cancellable: Bool = true) async throws -> ToolResult {
+    static func run(
+        _ path: String, _ arguments: [String], argv0: String? = nil, timeout: TimeInterval = 300, cancellable: Bool = true
+    ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
-        let run = try ToolRun(path: path, arguments: arguments, timeout: timeout)
+        let run = try ToolRun(path: path, arguments: arguments, argv0: argv0, timeout: timeout)
         let result = await withTaskCancellationHandler {
             await run.result()
         } onCancel: {
@@ -65,7 +68,7 @@ private final class ToolRun: @unchecked Sendable {
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
 
-    init(path: String, arguments: [String], timeout: TimeInterval) throws {
+    init(path: String, arguments: [String], argv0: String?, timeout: TimeInterval) throws {
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -95,7 +98,7 @@ private final class ToolRun: @unchecked Sendable {
         sigemptyset(&none)
         posix_spawnattr_setsigmask(&attributes, &none)
 
-        let argv: [UnsafeMutablePointer<CChar>?] = ([path] + arguments).map { strdup($0) } + [nil]
+        let argv: [UnsafeMutablePointer<CChar>?] = ([argv0 ?? path] + arguments).map { strdup($0) } + [nil]
         let envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { (argv + envp).forEach { free($0) } }
         var child: pid_t = 0
