@@ -62,8 +62,8 @@ public final class AppListModel: ObservableObject {
     /// Looks for installed apps run one after another, each once the one before it has ended; a look held up (a stalled
     /// folder) holds the next one up for `scanWait` at most, and the next then looks for itself. Each look is ordered by
     /// when it ran (`Observation`), not by when it was asked for: one that began after the shown one ended is newer and
-    /// is shown; one that ended before the shown one began is older and is not; two that overlapped and disagree are
-    /// settled by a look begun after both. So what is shown never goes back to an older state, a later install seen by a
+    /// is shown; one that ended before the shown one began is older and is not; one that overlapped and agrees extends
+    /// how late what is shown was seen; two that overlapped and disagree are settled by a look begun after both. So what is shown never goes back to an older state, a later install seen by a
     /// held look is not lost, and `installed` always comes from the apps of the catalog shown (`publishedApps`).
     private var lastScan: Task<Observation, Never>?
     var scanWait: Duration = .seconds(10)
@@ -182,7 +182,7 @@ public final class AppListModel: ObservableObject {
         fetchedAt = nextFetchedAt
         status = nextStatus
         if let found, let apps = nextCatalog?.apps {
-            if judge(found, apps) == .newer { publish(found, apps) }
+            _ = settle(found, apps)
         } else {
             shown = nil
             publishedApps = nil
@@ -223,12 +223,21 @@ public final class AppListModel: ObservableObject {
             let observation = await scan(apps)
             // The catalog changed meanwhile: look again with its apps.
             guard catalog?.apps == apps else { continue }
-            switch judge(observation, apps) {
-            case .newer: publish(observation, apps); return
-            case .older, .same: return
-            case .conflicting: continue
-            }
+            if settle(observation, apps) { return }
         }
+    }
+
+    /// Takes `observation` into what is shown unless it conflicts (then returns false, to look again): a newer one is
+    /// shown; one that agrees with what is shown extends how late that was seen, so a look begun before then that
+    /// disagrees is settled by looking again rather than shown; an older one changes nothing.
+    private func settle(_ observation: Observation, _ apps: [CatalogApp]) -> Bool {
+        switch judge(observation, apps) {
+        case .newer: publish(observation, apps)
+        case .same: if let seen = shown?.ended, observation.ended > seen { shown?.ended = observation.ended }
+        case .older: break
+        case .conflicting: return false
+        }
+        return true
     }
 
     private enum Verdict { case newer, older, same, conflicting }

@@ -69,6 +69,52 @@ final class GatedLoader: CatalogLoading, @unchecked Sendable {
 }
 
 /// Detects with `finder`, except that call numbers `gatedCalls` (from 1) wait until `release`, then find nothing.
+/// A finder whose scripted calls (numbered from 1) wait at a gate the test opens, before or after reading the folders.
+final class ScriptedFinder: InstalledAppDetecting, @unchecked Sendable {
+    enum Step { case holdThenRead, readThenHold }
+    private let finder: InstalledAppFinder
+    private let steps: [Int: Step]
+    private let gates: [Int: DispatchSemaphore]
+    private let lock = NSLock()
+    private var calls = 0
+    private var holding: Set<Int> = []
+    private var done: Set<Int> = []
+
+    init(_ finder: InstalledAppFinder, _ steps: [Int: Step]) {
+        self.finder = finder
+        self.steps = steps
+        gates = steps.mapValues { _ in DispatchSemaphore(value: 0) }
+    }
+
+    var callCount: Int { lock.withLock { calls } }
+    func isHolding(_ call: Int) -> Bool { lock.withLock { holding.contains(call) } }
+    func isDone(_ call: Int) -> Bool { lock.withLock { done.contains(call) } }
+    func release(_ call: Int) { gates[call]?.signal() }
+
+    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
+        let call = lock.withLock { () -> Int in
+            calls += 1
+            return calls
+        }
+        defer { _ = lock.withLock { done.insert(call) } }
+        guard let step = steps[call], let gate = gates[call] else { return finder.detect(apps) }
+        let hold = {
+            _ = self.lock.withLock { self.holding.insert(call) }
+            gate.wait()
+            _ = self.lock.withLock { self.holding.remove(call) }
+        }
+        switch step {
+        case .holdThenRead:
+            hold()
+            return finder.detect(apps)
+        case .readThenHold:
+            let found = finder.detect(apps)
+            hold()
+            return found
+        }
+    }
+}
+
 final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
     private let finder: InstalledAppFinder
     private let gatedCalls: Set<Int>
@@ -619,5 +665,31 @@ final class AppListModelTests: XCTestCase {
         let shown = await reload.value
         XCTAssertTrue(shown, "ended by the refresh's look, begun after it was asked")
         gated.release()
+    }
+
+    // A look that overlapped the shown one and agrees with it still counts as seen as late as it ended: a later-ending
+    // look that read before then and disagrees is settled by looking again, not shown. Here look 4 reads an install,
+    // the app is removed, look 2 (held since before look 3) reads the removal and agrees with what look 3 showed, then
+    // look 4 returns the install it read before the removal.
+    func testAnAgreeingLookKeepsAnOlderDisagreeingOneFromBeingShown() async throws {
+        let scripted = ScriptedFinder(finder, [2: .holdThenRead, 4: .readThenHold])
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: scripted, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        let first = Task { _ = await model.reloadInstalled() }
+        try await waitUntil({ scripted.isHolding(2) }, stopping: first, release: { scripted.release(2) })
+        await model.reloadInstalled()
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        let last = Task { _ = await model.reloadInstalled() }
+        try await waitUntil({ scripted.isHolding(4) }, stopping: last, release: { scripted.release(4) })
+        try FileManager.default.removeItem(at: root.appendingPathComponent("apps/Breaks.app"))
+        scripted.release(2)
+        try await waitUntil({ scripted.isDone(2) }, stopping: first, release: {})
+        await first.value
+        try await Task.sleep(for: .milliseconds(50))
+        scripted.release(4)
+        await last.value
+        XCTAssertEqual(model.installed["breaks"], [], "the removal look 2 saw is not undone by what look 4 read before it")
+        XCTAssertEqual(scripted.callCount, 5, "one more look settled the disagreement")
     }
 }

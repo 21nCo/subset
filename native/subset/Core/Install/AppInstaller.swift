@@ -56,7 +56,8 @@ public struct AppInstaller: Sendable {
     public static let downloadPrefix = "https://github.com/21nCo/subset/releases/download/"
     /// The copying tool (tests give a wrapper that can be held mid-copy).
     var ditto = "/usr/bin/ditto"
-    /// Runs right after an update renames the verified copy into place (tests change what is there then).
+    /// Run just before and right after an update renames the verified copy into place (tests change what is there then).
+    var beforePlacing: @Sendable (URL) -> Void = { _ in }
     var afterPlacing: @Sendable (URL) -> Void = { _ in }
 
     public var setup: InstallSetup
@@ -256,14 +257,14 @@ public struct AppInstaller: Sendable {
                     throw InstallFailure(.trash, "\(copy.path) cannot be set aside to move it to the Trash (\(Self.errnoText()))")
                 }
                 guard Self.identity(aside) == identities[copy.path] else {
-                    throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was left in place\(Self.putBack(aside, bundle))")
+                    throw InstallFailure(.trash, "\(copy.path) was replaced since it was checked, so it was left in place\(Self.putBack(aside, bundle, notes))")
                 }
                 do {
                     let trashed = try trash.trash(aside, appName: app.appName, at: clock())
                     notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)", changed: true)
                     if let hidden = trashed.hiddenNote { notes.add(hidden, changed: true) }
                 } catch let failure as InstallFailure {
-                    throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle))
+                    throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle, notes))
                 }
             }
             // The receipt goes only when no copy that is or may be the app is in either folder any more, decided as
@@ -537,16 +538,28 @@ public struct AppInstaller: Sendable {
         guard renamex_np(target.path, backup.path, UInt32(RENAME_EXCL)) == 0 else {
             throw InstallFailure(.install, errno == ENOENT ? changed : "\(target.path) cannot be moved aside (\(Self.errnoText()))")
         }
-        guard Self.identity(backup) == identity else { throw InstallFailure(.install, changed + Self.putBack(backup, target)) }
+        guard Self.identity(backup) == identity else { throw InstallFailure(.install, changed + Self.putBack(backup, target, notes)) }
         // The verified copy, identified before its rename: what is at `target` afterwards is it only when it matches.
         let verified = Self.identity(staged)
+        beforePlacing(target)
         guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
-            throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target))")
+            throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target, notes))")
         }
         afterPlacing(target)
-        // Only the verified copy at `target` makes this an update: anything else there (or nothing) is left as it is, the
-        // receipt is not touched and the previous copy is not disposed of.
+        // The new receipt is written aside first; nothing is changed by it until the copy in place is checked below.
+        var temporary: URL?
+        var receiptFailure: String?
+        if let receipt {
+            do {
+                temporary = try receipt.writeTemporary(installedAt: clock())
+            } catch let failure as InstallFailure {
+                receiptFailure = failure.message
+            }
+        }
+        // Only the verified copy at `target`, checked after everything that can wait, makes this an update: anything else
+        // there (or nothing) is left as it is, the receipt is not touched and the previous copy is not disposed of.
         guard let verified, Self.identity(target) == verified else {
+            if let temporary { unlink(temporary.path) }
             let why = "\(target.path) was changed or removed right after the new copy was put there (by the subset command?)"
             if Self.identity(target) == nil, renamex_np(backup.path, target.path, UInt32(RENAME_EXCL)) == 0 {
                 throw InstallFailure(.install, "\(why), so the previous copy was put back")
@@ -554,22 +567,18 @@ public struct AppInstaller: Sendable {
             notes.add("The previous copy of \(appName) is kept at \(backup.path); rename it to \(target.path) to use it again.", changed: true)
             throw InstallFailure(.install, "\(why), so it was left as it is and the receipt was not changed")
         }
-        var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
-        if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         // A receipt is advisory: when it cannot be written, the one there (describing the old copy) is removed.
         if let receipt {
-            do {
-                let temporary = try receipt.writeTemporary(installedAt: clock())
-                if Self.identity(target) != verified || rename(temporary.path, receipt.file.path) != 0 {
-                    unlink(temporary.path)
-                    unlink(receipt.file.path)
-                    notes.add("The receipt \(receipt.file.path) was not written; the app is updated without one.")
-                }
-            } catch let failure as InstallFailure {
+            if let temporary, rename(temporary.path, receipt.file.path) == 0 {
+                // Written.
+            } else {
+                if let temporary { unlink(temporary.path) }
                 unlink(receipt.file.path)
-                notes.add("\(failure.message); the app is updated without one.")
+                notes.add(receiptFailure.map { "\($0); the app is updated without one." } ?? "The receipt \(receipt.file.path) was not written; the app is updated without one.")
             }
         }
+        var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
+        if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         return (old, verified)
     }
 
@@ -720,10 +729,13 @@ public struct AppInstaller: Sendable {
         return FileIdentity(device: status.st_dev, inode: status.st_ino)
     }
 
-    /// Renames `from` back to `to` after a failed step; returns what to add to the message when that fails too.
-    static func putBack(_ from: URL, _ to: URL) -> String {
+    /// Renames `from` back to `to` after a failed step; returns what to add to the message when that fails too, and then
+    /// counts the copy left aside as a change in `notes`.
+    static func putBack(_ from: URL, _ to: URL, _ notes: Notes) -> String {
         if renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 { return "" }
-        return ", and the previous copy could not be put back (\(errnoText())): it is at \(from.path); rename it to \(to.path)"
+        let why = errnoText()
+        notes.copyLeftAside()
+        return ", and the previous copy could not be put back (\(why)): it is at \(from.path); rename it to \(to.path)"
     }
 
     /// `path` with every link resolved, or nil when it cannot be (it does not exist).
@@ -778,6 +790,9 @@ final class Notes: @unchecked Sendable {
         if recovered { self.recovered = true }
         if quit { self.quit = true }
     }
+
+    /// A copy was moved aside and could not be put back: a change, which the failure's message describes.
+    func copyLeftAside() { changed = true }
 }
 
 extension FileManager {
