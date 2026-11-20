@@ -9,12 +9,14 @@ public enum AppActivity: Equatable, Sendable {
     case failed(String)
 }
 
-/// An operation waiting for the user to agree that the running app may be quit.
+/// An operation waiting for the user to agree that the running app may be quit. The answer holds only for the app it
+/// names (`appName`, `bundleID`): when the row then lists another app, nothing is quit.
 public struct QuitRequest: Identifiable, Equatable, Sendable {
     public enum Kind: Sendable { case update, moveToTrash }
     public var id: String { appID }
     public var appID: String
     public var appName: String
+    public var bundleID: String
     public var kind: Kind
 
     public var title: String { "Quit \(appName)?" }
@@ -38,8 +40,9 @@ public final class AppActions: ObservableObject {
     private let model: AppListModel
     /// Each app's operation until its row is enabled again (after the installed apps were looked for again).
     @Published private var tasks: [String: Task<Void, Never>] = [:]
-    /// Each app's install, update or move to the Trash itself, which ends with its message once it has cleaned up.
-    @Published private var operations: [String: Task<AppActivity, Never>] = [:]
+    /// Each app's install, update or move to the Trash itself, which ends with its message once it has cleaned up, or
+    /// with nil when the app runs and the user is to be asked first.
+    @Published private var operations: [String: Task<AppActivity?, Never>] = [:]
     /// Set once Subset is quitting: no operation starts any more.
     private var closed = false
     /// How long after its operation a row still waiting for what is installed to be looked for again says so.
@@ -61,15 +64,16 @@ public final class AppActions: ObservableObject {
     /// Whether the app's install, update or move to the Trash itself still runs, so Cancel can stop it.
     public func canCancel(_ appID: String) -> Bool { operations[appID] != nil }
 
-    public func install(_ appID: String) { start(appID, kind: nil, quitAllowed: false) }
-    public func update(_ appID: String) { start(appID, kind: .update, quitAllowed: false) }
-    public func moveToTrash(_ appID: String) { start(appID, kind: .moveToTrash, quitAllowed: false) }
+    public func install(_ appID: String) { start(appID, kind: nil) }
+    public func update(_ appID: String) { start(appID, kind: .update) }
+    public func moveToTrash(_ appID: String) { start(appID, kind: .moveToTrash) }
 
-    /// The user agreed to quit the app in `request`, the one the alert presented: its operation starts. It does not
-    /// read `quitRequest`, which the alert may already have cleared when it was dismissed.
+    /// The user agreed to quit the app in `request`, the one the alert presented: its operation starts, only while the
+    /// row still lists that app (its bundle ID and name). It does not read `quitRequest`, which the alert may already
+    /// have cleared when it was dismissed.
     public func confirmQuit(_ request: QuitRequest) {
         if quitRequest == request { quitRequest = nil }
-        start(request.appID, kind: request.kind, quitAllowed: true)
+        start(request.appID, kind: request.kind, consent: request)
     }
 
     /// Stops a running operation; its message then says what it had already changed, if anything.
@@ -102,8 +106,16 @@ public final class AppActions: ObservableObject {
     /// Waits for the app's running operation, if any (tests).
     public func wait(_ appID: String) async { await tasks[appID]?.value }
 
-    private func start(_ appID: String, kind: QuitRequest.Kind?, quitAllowed: Bool) {
+    /// Starts the app's operation. An update or move to the Trash without the user's `consent` first reads, off the main
+    /// actor and cancellably, whether the app runs; when it does, the row is freed and the user is asked (`quitRequest`).
+    private func start(_ appID: String, kind: QuitRequest.Kind?, consent: QuitRequest? = nil) {
         guard !closed, !isBusy(appID), let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
+        // The answer was given for the app the alert named; a row that now lists another app quits nothing.
+        if let consent, app.bundleID != consent.bundleID || app.name != consent.appName {
+            activities[appID] = .failed("Nothing was quit or changed: the list changed while Subset asked to quit \(consent.appName), so that answer no longer applies. Try again.")
+            return
+        }
+        let quitAllowed = consent != nil
         let copies = model.installed[appID] ?? []
         let release: ChosenRelease?
         switch kind {
@@ -113,18 +125,17 @@ public final class AppActions: ObservableObject {
         }
         if kind != .moveToTrash, release == nil { return }
         let installer = installer
-        // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that reason.
-        if let kind, !quitAllowed, (try? installer.isRunning(app)) == true {
-            quitRequest = QuitRequest(appID: appID, appName: app.name, kind: kind)
-            return
-        }
-        activities[appID] = .working("Starting…", fraction: nil)
+        let check = kind != nil && !quitAllowed
+        activities[appID] = .working(check ? "Checking whether \(app.name) is running…" : "Starting…", fraction: nil)
         let progress: @Sendable (InstallProgress) -> Void = { [weak self] step in
             Task { @MainActor in self?.show(appID, step, release) }
         }
-        let operation = Task { () -> AppActivity in
+        let operation = Task { () -> AppActivity? in
             let message: AppActivity
             do {
+                // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that
+                // reason.
+                if check, try await Self.isRunning(installer, app) { return nil }
                 switch kind {
                 case nil:
                     let outcome = try await installer.install(app, release!, progress: progress)
@@ -154,7 +165,38 @@ public final class AppActions: ObservableObject {
         }
         operations[appID] = operation
         tasks[appID] = Task { [weak self] in
-            await self?.finish(appID, await operation.value)
+            guard let message = await operation.value else {
+                if let kind { self?.ask(appID, app, kind) }
+                return
+            }
+            await self?.finish(appID, message)
+        }
+    }
+
+    /// The app runs and the user has not agreed to quit it: its row is free again, nothing was changed, and the user is
+    /// asked (unless Subset is quitting).
+    private func ask(_ appID: String, _ app: CatalogApp, _ kind: QuitRequest.Kind) {
+        operations[appID] = nil
+        guard tasks[appID] != nil else { return }
+        tasks[appID] = nil
+        activities[appID] = nil
+        if !closed { quitRequest = QuitRequest(appID: appID, appName: app.name, bundleID: app.bundleID, kind: kind) }
+    }
+
+    /// Whether some installed copy of `app` runs, read on a thread of its own so a stalled folder or process list never
+    /// holds up the window. A cancel ends the wait at once (the read, which cannot be stopped, ends on its own). An answer
+    /// that cannot be read is false: the operation then starts without leave to quit and refuses with that reason.
+    private nonisolated static func isRunning(_ installer: AppInstaller, _ app: CatalogApp) async throws -> Bool {
+        let answer = OneAnswer()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard answer.wait(continuation) else { return }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    answer.give(.success((try? installer.isRunning(app)) == true))
+                }
+            }
+        } onCancel: {
+            answer.give(.failure(InstallFailure(.interrupted, "it was cancelled before anything was changed")))
         }
     }
 
@@ -207,5 +249,36 @@ public final class AppActions: ObservableObject {
 
     private nonisolated static func join(_ first: String, _ notes: [String]) -> String {
         ([first] + notes).joined(separator: " ")
+    }
+}
+
+/// The first of a read's answer or a cancel, given to one waiting continuation exactly once.
+private final class OneAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, any Error>?
+    private var result: Result<Bool, any Error>?
+
+    /// Waits with `continuation`; returns false when the answer is already known (it is then resumed at once).
+    func wait(_ continuation: CheckedContinuation<Bool, any Error>) -> Bool {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    /// Gives the answer; any later one is dropped.
+    func give(_ answer: Result<Bool, any Error>) {
+        lock.lock()
+        guard result == nil else { return lock.unlock() }
+        result = answer
+        let waiting = continuation
+        continuation = nil
+        lock.unlock()
+        waiting?.resume(with: answer)
     }
 }

@@ -115,7 +115,11 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     /// The helper exits between the first look and the quit (so a fresh look finds nothing).
     var helperExitsOnQuit = false
 
+    /// Runs as each look at the process list begins (to hold it up, as a stalled read would).
+    var hold: (@Sendable () -> Void)?
+
     func processes(inside bundle: URL) throws -> [pid_t] {
+        hold?()
         if unreadable { throw InstallFailure(.running, "whether the app is running cannot be read (fake)") }
         return (running.get().contains(bundle.path) ? [4242] : []) + (helpers.get().contains(bundle.path) ? [4343] : [])
     }

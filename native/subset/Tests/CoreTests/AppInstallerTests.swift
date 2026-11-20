@@ -1674,3 +1674,106 @@ private final class SubstitutingTrash: Trashing, @unchecked Sendable {
         return Trashed(url: place)
     }
 }
+
+// MARK: - Only the recorded previous copy and receipt are moved, renamed back or put back
+
+extension AppInstallerTests {
+    // While the image is cleaned up after the swap, something else takes the hidden name the previous copy was kept
+    // under (for one copy, or for the second of two): nothing goes to the Trash for that copy, what is there is left as
+    // it is, the verified copy stays and the result names the path. The first of two copies still goes to the Trash.
+    func testAPreviousCopyReplacedBeforeTheTrashIsLeftAndNamed() async throws {
+        for secondOfTwo in [false, true] {
+            try tearDownWithError()
+            try setUpWithError()
+            try installOld()
+            let second = user.appendingPathComponent("Breaks.app")
+            if secondOfTwo { try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8") }
+            let folder = secondOfTwo ? user : system
+            let armedOn = secondOfTwo ? second.path : target.path
+            let armed = Recorder(false)
+            let substitute = Recorder<URL?>(nil)
+            let moved = root.appendingPathComponent("moved-away.app")
+            images.onDetach = {
+                guard armed.get(), substitute.get() == nil else { return }
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+                guard let hidden = names.first(where: { $0.hasPrefix(".Breaks.app.subset-old-") }) else { return }
+                let url = folder.appendingPathComponent(hidden)
+                try? FileManager.default.moveItem(at: url, to: moved)
+                try? makeBundle(url, bundleID: "dev.subset.other", version: "9.0")
+                substitute.update { $0 = url }
+            }
+            let scripted = ScriptedTrash(inner: trash)
+            trash = scripted
+            var installer = installer()
+            installer.afterPlacing = { placed in if placed.path == armedOn { armed.update { $0 = true } } }
+            let outcome = try await installer.update(Self.breaks, Self.live, quitAllowed: false)
+            let label = secondOfTwo ? "second of two" : "one copy"
+            let left = try XCTUnwrap(substitute.get(), label)
+            XCTAssertEqual(scripted.calls.get(), secondOfTwo ? 1 : 0, "\(label): only the first copy's previous copy goes to the Trash")
+            XCTAssertEqual(InstalledAppFinder.infoPlist(left.path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "\(label): left as it is")
+            XCTAssertEqual(version(secondOfTwo ? second : target), "0.1.0", "\(label): the update stands")
+            XCTAssertEqual(version(moved), secondOfTwo ? "0.0.8" : "0.0.9", label)
+            XCTAssertTrue(outcome.notes.contains("The previous copy of Breaks (\(secondOfTwo ? "0.0.8" : "0.0.9")) is no longer at \(left.path), where it was kept to be moved to the Trash, so nothing was moved to the Trash and what is there was left as it is."), "\(label): \(outcome.notes)")
+        }
+    }
+
+    // A previous copy renamed back to the install path is checked there: when something else is there right after the
+    // rename (put at the hidden name or the install path meanwhile), it is left as it is, never renamed again.
+    func testWhatIsAtTheInstallPathAfterARenameBackIsNotRenamedAgain() throws {
+        let previous = system.appendingPathComponent(".Breaks.app.subset-update-1-aaaaaaaaaaaa")
+        try makeBundle(previous, bundleID: "dev.subset.breaks", version: "0.0.9")
+        let expected = try XCTUnwrap(AppInstaller.identity(previous))
+        let path = target
+        let moved = root.appendingPathComponent("moved.app")
+        let other = Recorder<FileIdentity?>(nil)
+        let restore = AppInstaller.restorePrevious(previous, identity: expected, to: target, afterRename: {
+            try? FileManager.default.moveItem(at: path, to: moved)
+            try? makeBundle(path, bundleID: "dev.subset.other", version: "9.0")
+            other.update { $0 = AppInstaller.identity(path) }
+        })
+        XCTAssertEqual(restore, .otherAtTarget)
+        XCTAssertNotNil(other.get())
+        XCTAssertEqual(AppInstaller.identity(target), other.get(), "what is there stays")
+        XCTAssertNil(AppInstaller.identity(previous), "nothing is renamed to the hidden name")
+        XCTAssertEqual(AppInstaller.identity(moved), expected)
+        let note = AppInstaller.notRestoredNote(restore, previous, identity: expected, inTrash: false, appName: "Breaks", target: target)
+        XCTAssertEqual(note, "What is at \(target.path) after the previous copy of Breaks was renamed back there from \(previous.path) is not that copy, so it was left as it is; look for the previous copy in the Trash.")
+        // And the copy itself, with nothing at the install path, is put back.
+        try FileManager.default.removeItem(at: target)
+        try FileManager.default.moveItem(at: moved, to: previous)
+        XCTAssertEqual(AppInstaller.restorePrevious(previous, identity: expected, to: target), .restored)
+        XCTAssertEqual(AppInstaller.identity(target), expected)
+    }
+
+    // An update undone after its swap puts the receipt back only while it is still the one the update left there:
+    // a receipt rewritten in place, replaced or removed meanwhile is left as it is, named, and not claimed put back.
+    func testAnUndoneUpdateLeavesAReceiptChangedSinceItWroteIt() async throws {
+        for change in ["rewritten", "replaced", "removed"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let path = target.path
+            let file = receiptFile
+            let armed = Recorder(false)
+            let other = Data("{\"note\":\"written by another manager\"}".utf8)
+            images.onDetach = {
+                guard armed.get() else { return }
+                try? FileManager.default.removeItem(atPath: path)
+                switch change {
+                case "rewritten": try? other.write(to: file)
+                case "replaced": try? other.write(to: file, options: .atomic)
+                default: try? FileManager.default.removeItem(at: file)
+                }
+            }
+            var installer = installer()
+            installer.afterPlacing = { _ in armed.update { $0 = true } }
+            var failure: InstallFailure?
+            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: false) } catch { failure = error as? InstallFailure }
+            XCTAssertEqual(try? Data(contentsOf: receiptFile), change == "removed" ? nil : other, change)
+            XCTAssertEqual(AppInstaller.identity(target), old, "\(change): the previous copy is back")
+            XCTAssertEqual(failure?.message, "\(path) was changed or removed after the new copy was put there (by the subset command?), so the previous copy was put back", change)
+            XCTAssertEqual(failure?.partial, false, change)
+            XCTAssertTrue(failure?.notes.contains("The receipt \(receiptFile.path) was changed or removed after this update wrote it, so it was left as it is; it may not describe what is at \(path).") == true, "\(change): \(failure?.notes ?? [])")
+        }
+    }
+}
