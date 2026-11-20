@@ -100,8 +100,13 @@ public struct SubsetCommandDetector: Sendable {
     /// The shell line: the command between a start marker and an end marker printed only when the command exits 0, so
     /// what startup and logout files or an EXIT trap print, and the shell's own exit status, do not count. `echo`, `;`
     /// and `&&` mean the same in sh, bash, zsh and fish.
+    ///
+    /// It starts with `set +m` (job control off). An interactive bash or sh, even with no terminal, runs each command in
+    /// a process group of its own, which `ToolRunner` does not signal when it stops the shell's group, so a stalled
+    /// `subset` would outlive a timeout or Quit. With job control off the command stays in the shell's group, and the
+    /// group stop reaches it. zsh already runs `-ilc` that way; a shell that rejects `set +m` just prints to stderr.
     static func script(token: String) -> String {
-        "echo \(startMarker(token)); \(command) && echo \(endMarker(token))"
+        "set +m; echo \(startMarker(token)); \(command) && echo \(endMarker(token))"
     }
 
     static func startMarker(_ token: String) -> String { "subset-check-\(token)-start" }

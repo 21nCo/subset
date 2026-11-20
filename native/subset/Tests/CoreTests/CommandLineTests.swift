@@ -12,7 +12,7 @@ final class CommandLineTests: XCTestCase {
         let status = await detector(shell).detect()
         XCTAssertEqual(status, .installed(version: "0.2.0"))
         XCTAssertEqual(shell.calls.map(\.command), [
-            "echo subset-check-test-check-start; /usr/bin/env subset --version && echo subset-check-test-check-end",
+            "set +m; echo subset-check-test-check-start; /usr/bin/env subset --version && echo subset-check-test-check-end",
         ])
         XCTAssertEqual(shell.calls.map(\.timeout), [5])
     }
@@ -130,6 +130,45 @@ final class CommandLineTests: XCTestCase {
         XCTAssertEqual(foundStatus, .installed(version: "0.2.0"))
         let missingStatus = await SubsetCommandDetector(shell: LoginShell(path: missing)).detect()
         XCTAssertEqual(missingStatus, .notInstalled)
+    }
+
+    /// A stalled `subset` is stopped with its login shell when the check times out and when the model stops, under
+    /// zsh, bash and sh run for real with no terminal (as `ToolRunner` runs them): bash and sh give a foreground command
+    /// a process group of its own unless job control is off.
+    @MainActor
+    func testATimedOutOrQuitCheckStopsTheStalledSubsetCommandUnderEachLoginShell() async throws {
+        for shellPath in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: shellPath), "\(shellPath) is missing")
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-command-\(UUID().uuidString)")
+            let bin = folder.appendingPathComponent("bin")
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            let pidFile = folder.appendingPathComponent("pid")
+            let fake = bin.appendingPathComponent("subset")
+            // `exec` makes the recorded pid the long sleep's own.
+            try "#!/bin/sh\necho $$ > '\(pidFile.path)'\nexec sleep 120\n".write(to: fake, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+            let oldPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+            setenv("PATH", "\(bin.path):\(oldPath)", 1)
+            var pid: pid_t = 0
+            defer {
+                setenv("PATH", oldPath, 1)
+                if pid > 0 { kill(pid, SIGKILL) }
+                try? FileManager.default.removeItem(at: folder)
+            }
+            let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: shellPath), timeLimit: 1.5))
+            await model.check()
+            let recorded = (try? String(contentsOf: pidFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+            pid = try XCTUnwrap(recorded.flatMap { pid_t($0) }, "\(shellPath): the fake subset never ran")
+            XCTAssertEqual(model.status, .notInstalled, shellPath)
+            await model.stop()
+            XCTAssertFalse(model.hasRunningShell, shellPath)
+            var gone = false
+            for _ in 0..<50 where !gone {
+                gone = kill(pid, 0) != 0
+                if !gone { try await Task.sleep(nanoseconds: 40_000_000) }
+            }
+            XCTAssertTrue(gone, "\(shellPath): the stalled subset command is still running after the check was stopped")
+        }
     }
 
     func testTheUsersShellIsAnAbsoluteExecutablePathOrZsh() {
