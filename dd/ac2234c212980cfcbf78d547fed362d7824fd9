@@ -1,0 +1,25 @@
+native/subset/Core/Install/AppActions.swift
+  s_efd51dfde742e9::t_4de6d1e05628e6 67-69,195-196,200-201,268-270,284,289-301,339-343,375-378,381,389
+native/subset/MacApp/MainWindowView.swift
+  s_efd51dfde742e9::t_f6c0acb7621c68 14,16,18
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_efd51dfde742e9::t_2aba2f69a8fa81 121-123,127-129
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_efd51dfde742e9::t_4bda63373f3889 558,563,569,585-586,588,599,607,611-614,783-827
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ddac2234c212980cfcbf78d547fed362d7824fd9",
+  "prompts": {},
+  "sessions": {
+    "s_efd51dfde742e9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_efd51dfde742e9",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
