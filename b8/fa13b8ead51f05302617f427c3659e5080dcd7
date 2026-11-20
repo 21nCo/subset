@@ -1,0 +1,21 @@
+native/subset/Core/Install/AppActions.swift
+  s_cd6befefdb9c41::t_999204a823fb68 15-17,20,35-36,40-42,57-59,61-62,64-66,86-90,105-107,110-120,129-132,140,142-186,220-222,236-242,252,291,312-313,321-334,336,391-393,395-406,408,411-434
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_cd6befefdb9c41::t_2529be61739751 110,410-411,418-419,500,511-680
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8fa13b8ead51f05302617f427c3659e5080dcd7",
+  "prompts": {},
+  "sessions": {
+    "s_cd6befefdb9c41": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "32acaefe-cc26-4e01-8a81-c6eccbed369d",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
