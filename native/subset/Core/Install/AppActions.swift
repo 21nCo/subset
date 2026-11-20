@@ -13,16 +13,17 @@ public enum AppActivity: Equatable, Sendable {
 /// names (`appName`, `bundleID`, and `bundleName`, the `<bundleName>.app` it is installed as): when the row then lists
 /// another app, or the same one under another bundle name, nothing is quit.
 ///
-/// Each request is one question (`id`), and two requests are equal only when they are the same question: a row asked
-/// again gets another one, so a late answer to the earlier question never clears it.
+/// Each request is one question (`id`), whose app and operation cannot change, and two requests are equal only when
+/// they are the same question: a row asked again gets another one, so a late answer to the earlier question never
+/// clears it, and an answer can only be to what was asked.
 public struct QuitRequest: Identifiable, Equatable, Sendable {
     public enum Kind: Sendable { case update, moveToTrash }
     public let id = UUID()
-    public var appID: String
-    public var appName: String
-    public var bundleID: String
-    public var bundleName: String
-    public var kind: Kind
+    public let appID: String
+    public let appName: String
+    public let bundleID: String
+    public let bundleName: String
+    public let kind: Kind
 
     init(appID: String, _ app: CatalogApp, kind: Kind) {
         self.appID = appID
