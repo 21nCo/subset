@@ -103,7 +103,6 @@ struct FakeVerifier: AppVerifying {
 final class FakeRunning: RunningAppControlling, @unchecked Sendable {
     let running = Recorder<Set<String>>([])
     let quits = Recorder<[String]>([])
-    let reopened = Recorder<[String]>([])
     var stubborn = false
     /// The list of processes cannot be read (libproc failed).
     var unreadable = false
@@ -121,9 +120,8 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
         return (running.get().contains(bundle.path) ? [4242] : []) + (helpers.get().contains(bundle.path) ? [4343] : [])
     }
 
-    /// Runs just before an app would be asked to quit, or reopened (to replace the copy then).
+    /// Runs just before an app would be asked to quit (to replace the copy then).
     var beforeQuit: (@Sendable () -> Void)?
-    var beforeReopen: (@Sendable () -> Void)?
 
     func quit(_ bundle: URL, timeout _: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool) {
         beforeQuit?()
@@ -136,12 +134,5 @@ final class FakeRunning: RunningAppControlling, @unchecked Sendable {
         quits.update { $0.append(bundle.path) }
         if !stubborn { running.update { $0.remove(bundle.path) } }
         return (try processes(inside: bundle), true)
-    }
-
-    func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String? {
-        beforeReopen?()
-        guard isExpected() else { return "\(bundle.path) is not the copy expected there" }
-        reopened.update { $0.append(bundle.path) }
-        return nil
     }
 }

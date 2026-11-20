@@ -336,7 +336,7 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(version(target), "0.0.9")
     }
 
-    func testARunningAppIsQuitOnlyAfterTheNewCopyIsVerifiedAndThenReopened() async throws {
+    func testARunningAppIsQuitOnlyAfterTheNewCopyIsVerifiedAndIsNotOpenedAgain() async throws {
         try installOld()
         let path = target.path
         running.running.update { $0.insert(path) }
@@ -349,9 +349,10 @@ final class AppInstallerTests: XCTestCase {
             XCTAssertEqual(count, 1, "quit only once the new copy is verified")
             XCTAssertEqual(installed, "0.0.9")
         }
-        _ = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
+        let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
         XCTAssertEqual(running.quits.get(), [path])
-        XCTAssertEqual(running.reopened.get(), [path])
+        // Subset never opens it again (RunningAppControlling has no way to): the result ends by saying to.
+        XCTAssertEqual(outcome.notes.last, "Breaks was asked to quit for the update. Open Breaks again.")
         XCTAssertEqual(version(target), "0.1.0")
     }
 
@@ -362,13 +363,14 @@ final class AppInstallerTests: XCTestCase {
         let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(refused?.step, .running)
         XCTAssertEqual(AppInstaller.identity(target), old)
-        XCTAssertEqual(running.reopened.get(), [target.path], "an app asked to quit is reopened")
+        XCTAssertEqual(refused?.notes, ["Breaks was asked to quit for the update. Open Breaks again."], "an app asked to quit is said to be, and not opened again")
         assertNoLeftovers()
     }
 
-    // An app quit for an update is reopened only from the copy that was quit (after a failure) or the verified one put
-    // in place (after the update): something put at its path meanwhile is not opened, and that is said.
-    func testOnlyTheCopyThatWasQuitOrTheVerifiedOneIsReopened() async throws {
+    // An app asked to quit for an update is never opened again by Subset, whatever then happens: the update fails
+    // (a copy put at its path meanwhile stays), the app does not quit, or the update succeeds. The result says it was
+    // asked to quit, ends with "Open Breaks again.", and is not "only partly" done when no copy changed.
+    func testAQuitForAnUpdateIsSaidAndNothingIsOpenedAgain() async throws {
         try installOld()
         let quitPath = target.path
         running.running.update { $0.insert(quitPath) }
@@ -379,36 +381,20 @@ final class AppInstallerTests: XCTestCase {
         let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(failed?.step, .install)
         XCTAssertEqual(failed?.partial, false, "asking the app to quit changed no copy")
-        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened as the copy checked (\(quitPath) is not the copy expected there)."])
-        XCTAssertEqual(running.reopened.get(), [])
+        XCTAssertEqual(failed?.notes, ["Breaks was asked to quit for the update. Open Breaks again."])
         XCTAssertEqual(version(target), "0.3.0", "what was put there stays")
         assertNoLeftovers()
 
-        // Replaced just before it would be reopened, after an app that did not quit kept the update from running.
         try tearDownWithError()
         try setUpWithError()
         try installOld()
         let stubbornPath = target.path
         running.running.update { $0.insert(stubbornPath) }
         running.stubborn = true
-        running.beforeReopen = {
-            try? FileManager.default.removeItem(atPath: stubbornPath)
-            try? makeBundle(URL(fileURLWithPath: stubbornPath), bundleID: "dev.subset.breaks", version: "0.3.0")
-        }
         let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(refused?.step, .running)
-        XCTAssertEqual(refused?.notes, ["Breaks was quit for the update and was not reopened as the copy checked (\(stubbornPath) is not the copy expected there)."])
-        XCTAssertEqual(running.reopened.get(), [])
-
-        try tearDownWithError()
-        try setUpWithError()
-        try installOld()
-        let updatedPath = target.path
-        running.running.update { $0.insert(updatedPath) }
-        trash = ReplacingTrash(inner: trash, path: updatedPath)
-        let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
-        XCTAssertEqual(outcome.notes.last, "Breaks could not be reopened as the copy checked (\(updatedPath) is not the copy expected there).")
-        XCTAssertEqual(running.reopened.get(), [])
+        XCTAssertEqual(refused?.partial, false)
+        XCTAssertEqual(refused?.notes, ["Breaks was asked to quit for the update. Open Breaks again."])
     }
 
     // A copy replaced after it was checked and before its app is asked to quit is not quit, updated or moved: the
@@ -559,7 +545,7 @@ final class AppInstallerTests: XCTestCase {
     }
 
     func testCancellingWhileARunningAppQuitsChangesNothingElse() async throws {
-        // Update: the app is reopened and the old copy stays.
+        // Update: the app is said to have been asked to quit, and the old copy stays.
         let old = try installOld()
         let receiptBefore = try Data(contentsOf: receiptFile)
         running.running.update { $0.insert(target.path) }
@@ -568,9 +554,8 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(update?.step, .interrupted)
         XCTAssertEqual(update?.message, "it was cancelled before it was installed")
         XCTAssertEqual(update?.partial, false, "the app was quit, and no copy was changed")
-        XCTAssertEqual(update?.notes, ["Breaks was asked to quit for the update and was reopened."])
+        XCTAssertEqual(update?.notes, ["Breaks was asked to quit for the update. Open Breaks again."])
         XCTAssertEqual(running.quits.get(), [target.path])
-        XCTAssertEqual(running.reopened.get(), [target.path])
         XCTAssertEqual(AppInstaller.identity(target), old, "nothing was swapped")
         XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
         XCTAssertEqual(names(trashFolder), [])
@@ -620,7 +605,6 @@ final class AppInstallerTests: XCTestCase {
 
         _ = try await installer().moveToTrash(Self.breaks, quitAllowed: true)
         XCTAssertEqual(running.quits.get(), [target.path])
-        XCTAssertEqual(running.reopened.get(), [], "an app moved to the Trash is not reopened")
         XCTAssertEqual(names(system), [])
     }
 
@@ -1017,7 +1001,7 @@ final class AppInstallerTests: XCTestCase {
         XCTAssertEqual(refused?.step, .interrupted)
         XCTAssertEqual(refused?.partial, false)
         XCTAssertEqual(running.quits.get(), [])
-        XCTAssertEqual(running.reopened.get(), [])
+        XCTAssertEqual(refused?.notes.contains("Breaks was asked to quit for the update. Open Breaks again."), false, "nothing was asked to quit")
         XCTAssertEqual(AppInstaller.identity(target), old)
         XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
         assertNoLeftovers()
@@ -1042,7 +1026,7 @@ final class AppInstallerTests: XCTestCase {
         assertNoLeftovers()
     }
 
-    func testAHelperIsNamedAndOnlyAnAppThatQuitIsReopened() async throws {
+    func testAHelperIsNamedAndOnlyAnAppAskedToQuitIsSaidToBe() async throws {
         let old = try installOld()
         let path = target.path
         running.helpers.update { $0.insert(path) }
@@ -1052,13 +1036,13 @@ final class AppInstallerTests: XCTestCase {
         let trashed = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: true) }
         XCTAssertEqual(trashed?.step, .running)
         XCTAssertEqual(trashed?.partial, false)
-        XCTAssertEqual(running.reopened.get(), [], "an app that never ran is not opened")
-        // The app quits but its helper stays: refused, and the app that quit is reopened.
+        XCTAssertEqual(update?.notes, [], "no app was asked to quit")
+        // The app quits but its helper stays: refused, and the app is said to have been asked to quit.
         running.running.update { $0.insert(path) }
         let both = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(both?.message, "Breaks is still running 1 seconds after it was asked to quit (pid 4343)")
         XCTAssertEqual(running.quits.get(), [path])
-        XCTAssertEqual(running.reopened.get(), [path])
+        XCTAssertEqual(both?.notes, ["Breaks was asked to quit for the update. Open Breaks again."])
         XCTAssertEqual(AppInstaller.identity(target), old)
         XCTAssertEqual(names(trashFolder), [])
         assertNoLeftovers()
@@ -1072,7 +1056,7 @@ final class AppInstallerTests: XCTestCase {
             }
         }.value
         XCTAssertEqual(asked, [1], "the request made is kept; no further one is made")
-        // terminate() is false for an app that exited before it was asked: it does not count as asked (nor reopened).
+        // terminate() is false for an app that exited before it was asked: it does not count as asked.
         XCTAssertEqual(WorkspaceRunningApps.ask([1, 2, 3]) { $0 != 2 }, [1, 3])
     }
 
@@ -1080,9 +1064,9 @@ final class AppInstallerTests: XCTestCase {
         try installOld()
         running.helpers.update { $0.insert(self.target.path) }
         running.helperExitsOnQuit = true
-        _ = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
+        let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
         XCTAssertEqual(version(target), "0.1.0")
-        XCTAssertEqual(running.reopened.get(), [], "nothing was quit, so nothing is reopened")
+        XCTAssertFalse(outcome.notes.contains("Breaks was asked to quit for the update. Open Breaks again."), "nothing was asked to quit")
     }
 
     func testACopyLeftUnderItsHiddenNameInTheTrashIsReportedWithWhy() async throws {
@@ -1153,15 +1137,21 @@ struct CheckingTrash: Trashing {
     }
 }
 
-/// Moves a copy to the Trash, then puts another app at `path`, as another manager might just after an update.
-struct ReplacingTrash: Trashing {
+/// A Trash whose call number `call` (from 1) throws `error` before moving anything, or moves the copy and then runs
+/// `after` (as another manager changing the install path just then).
+struct ScriptedTrash: Trashing {
     var inner: any Trashing
-    var path: String
+    var call = 1
+    var error: (any Error & Sendable)?
+    var after: (@Sendable () -> Void)?
+    let calls = Recorder(0)
 
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
+        calls.update { $0 += 1 }
+        guard calls.get() == call else { return try inner.trash(bundle, appName: appName, at: date) }
+        if let error { throw error }
         let trashed = try inner.trash(bundle, appName: appName, at: date)
-        try FileManager.default.removeItem(atPath: path)
-        try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.breaks", version: "0.3.0")
+        after?()
         return trashed
     }
 }
@@ -1187,7 +1177,7 @@ struct HiddenTrash: Trashing {
     }
 }
 
-// MARK: - The shared detector, the update's commit and the reopen, end to end
+// MARK: - The shared detector and the update's commit, end to end
 
 extension AppInstallerTests {
     /// The installer as the app makes it, with the system's process list in place of the fake.
@@ -1275,8 +1265,7 @@ extension AppInstallerTests {
             XCTAssertEqual(failure?.step, .install, label)
             XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, "\(label): the receipt is unchanged")
             XCTAssertEqual(names(trashFolder), [], "\(label): the previous copy is not moved to the Trash")
-            // Only the copy that was quit is opened again: put back, it is; a replacement is not.
-            XCTAssertEqual(running.reopened.get(), disappears ? [path] : [], label)
+            XCTAssertEqual(failure?.notes.last, "Breaks was asked to quit for the update. Open Breaks again.", "\(label): the quit is said; nothing is opened again")
             let hidden = names(system).filter { $0.hasPrefix(".Breaks.app.subset-update-") }
             if disappears {
                 XCTAssertEqual(failure?.message, "\(path) was changed or removed right after the new copy was put there (by the subset command?), so the previous copy was put back")
@@ -1301,7 +1290,7 @@ extension AppInstallerTests {
     // The image is detached after the swap, and progress is reported, before the previous copy goes to the Trash; if the
     // verified copy is changed or removed meanwhile, the previous copy does not go and the update is not reported as
     // done: the receipt is put back as it was, the previous copy is put back when nothing is there (then nothing has
-    // changed, and the copy quit is reopened), otherwise kept and named.
+    // changed), otherwise kept and named.
     func testAnUpdateWhoseNewCopyChangesDuringCleanupKeepsThePreviousCopy() async throws {
         for (disappears, atProgress) in [(true, false), (false, false), (true, true), (false, true)] {
             try tearDownWithError()
@@ -1333,12 +1322,10 @@ extension AppInstallerTests {
                 XCTAssertEqual(failure?.message, "\(path) was changed or removed after the new copy was put there (by the subset command?), so the previous copy and its receipt were put back")
                 XCTAssertEqual(AppInstaller.identity(target), old)
                 XCTAssertEqual(hidden, [])
-                XCTAssertEqual(running.reopened.get(), [path], "the copy quit is reopened")
             } else {
                 XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the replacement stays")
                 XCTAssertEqual(hidden.count, 1)
                 XCTAssertEqual(AppInstaller.identity(system.appendingPathComponent(hidden.first ?? "")), old, "the previous copy is kept")
-                XCTAssertEqual(running.reopened.get(), [])
             }
             XCTAssertEqual(names(receipts), ["dev.subset.breaks.json"], label)
         }
@@ -1373,70 +1360,6 @@ extension AppInstallerTests {
             XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", operation)
         }
     }
-
-    // The reopen never hands the request to a copy already running elsewhere (substitution off) and is bound to the copy
-    // checked by its executable file: an app opened at another path, or one running another file (a copy put in its
-    // place while it opened), is said, and nothing is asked to quit; the checked copy opens with nothing to say.
-    func testReopenOpensOnlyTheCheckedCopyWithoutSubstitution() async {
-        let bundle = URL(fileURLWithPath: "/Applications/Breaks.app")
-        let checked = FileIdentity(device: 1, inode: 100)
-        let substitution = Recorder<[Bool]>([])
-        let opens = { (opened: URL?, pid: pid_t) -> @Sendable (URL, NSWorkspace.OpenConfiguration) async throws -> WorkspaceRunningApps.Opened in
-            { _, configuration in
-                substitution.update { $0.append(configuration.allowsRunningApplicationSubstitution) }
-                return WorkspaceRunningApps.Opened(bundle: opened, pid: pid)
-            }
-        }
-        // pid 10 runs the checked file; pid 11 another file (the replacement's, wherever it is now).
-        let running: @Sendable (pid_t) -> FileIdentity? = { $0 == 10 ? checked : FileIdentity(device: 1, inode: 200) }
-        let reopen = { (isExpected: @escaping @Sendable () -> Bool, executable: FileIdentity?, open: @escaping @Sendable (URL, NSWorkspace.OpenConfiguration) async throws -> WorkspaceRunningApps.Opened) async in
-            await WorkspaceRunningApps.reopen(bundle, isExpected: isExpected, executable: { _ in executable }, running: running, open: open)
-        }
-        let opened = await reopen({ true }, checked, opens(bundle, 10))
-        XCTAssertNil(opened)
-
-        // A second copy of the app runs from ~/Applications and Launch Services answers with it.
-        let elsewhere = await reopen({ true }, checked, opens(URL(fileURLWithPath: "/Users/alex/Applications/Breaks.app"), 10))
-        XCTAssertEqual(elsewhere, "the app that opened (/Users/alex/Applications/Breaks.app) cannot be shown to be the copy checked at /Applications/Breaks.app, which may have been replaced while it opened")
-
-        // Replaced after the check, while it opened: the process runs another file, or the copy is no longer there.
-        let replaced = await reopen({ true }, checked, opens(bundle, 11))
-        XCTAssertEqual(replaced, "the app that opened (/Applications/Breaks.app) cannot be shown to be the copy checked at /Applications/Breaks.app, which may have been replaced while it opened")
-        let checks = Recorder<Int>(0)
-        let moved = await reopen({ checks.update { $0 += 1 }; return checks.get() == 1 }, checked, opens(bundle, 10))
-        XCTAssertNotNil(moved)
-
-        // Replaced before the check, or its executable unknown: nothing is opened.
-        let before = await reopen({ false }, checked, opens(bundle, 10))
-        XCTAssertEqual(before, "/Applications/Breaks.app is not the copy expected there")
-        let unnamed = await reopen({ true }, nil, opens(bundle, 10))
-        XCTAssertEqual(unnamed, "/Applications/Breaks.app is not the copy expected there")
-        XCTAssertEqual(substitution.get(), [false, false, false, false], "every launch refuses substitution, and none is made unchecked")
-    }
-
-    // The real executable of a copy and of a process are the same file, by device and inode.
-    func testTheExecutableOfACopyAndOfItsProcessAreTheSameFile() async throws {
-        let bundle = root.appendingPathComponent("Sleeper.app")
-        try makeBundle(bundle, bundleID: "dev.subset.sleeper", version: "1.0")
-        let info = bundle.appendingPathComponent("Contents/Info.plist")
-        var plist = try XCTUnwrap(NSDictionary(contentsOf: info) as? [String: Any])
-        plist["CFBundleExecutable"] = "Sleeper"
-        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: info)
-        let executable = bundle.appendingPathComponent("Contents/MacOS/Sleeper")
-        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
-        let signed = try await ToolRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", executable.path], timeout: 60)
-        XCTAssertEqual(signed.status, 0, signed.stderr)
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["30"]
-        try process.run()
-        defer { process.terminate() }
-        let file = try XCTUnwrap(WorkspaceRunningApps.executableFile(bundle))
-        XCTAssertEqual(WorkspaceRunningApps.runningFile(process.processIdentifier), file)
-        XCTAssertNotEqual(WorkspaceRunningApps.runningFile(getpid()), file)
-    }
-
 }
 
 /// A Trash that refuses the copy after something else took its place.
@@ -1445,5 +1368,222 @@ private struct OccupyingTrash: Trashing {
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         occupy()
         throw InstallFailure(.trash, "the fake Trash refused \(bundle.lastPathComponent)")
+    }
+}
+
+// MARK: - The Trash handoff of an update, the receipt it puts back, and errors of any type from the Trash
+
+extension AppInstallerTests {
+    private var quitNote: String { "Breaks was asked to quit for the update. Open Breaks again." }
+
+    // The verified copy is checked again once the previous copy has gone to the Trash: removed or replaced while the
+    // Trash took it, the update is not reported as done, the receipt is put back byte for byte, and the previous copy
+    // comes back from the Trash when nothing is at its path, or stays there and is named, leaving a replacement as it
+    // is. A running copy asked to quit is said to be, and nothing is opened again.
+    func testAnUpdateWhoseNewCopyChangesWhileThePreviousGoesToTheTrashIsUndone() async throws {
+        for disappears in [true, false] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            let path = target.path
+            running.running.update { $0.insert(path) }
+            trash = ScriptedTrash(inner: trash, after: {
+                try? FileManager.default.removeItem(atPath: path)
+                if !disappears { try? makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.other", version: "9.0") }
+            })
+            let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+            let label = disappears ? "removed" : "replaced"
+            XCTAssertEqual(failed?.step, .install, label)
+            XCTAssertEqual(try? Data(contentsOf: receiptFile), receiptBefore, "\(label): the receipt is put back")
+            XCTAssertEqual(failed?.notes.last, quitNote, label)
+            XCTAssertEqual(names(system).filter { $0.contains(".subset-") }, [], label)
+            let why = "\(path) was changed or removed after the new copy was put there (by the subset command?)"
+            if disappears {
+                XCTAssertEqual(failed?.message, "\(why), so the previous copy and its receipt were put back from the Trash")
+                XCTAssertEqual(failed?.partial, false, "nothing is left changed")
+                XCTAssertEqual(AppInstaller.identity(target), old, "the previous copy is back")
+                XCTAssertEqual(names(trashFolder), [])
+            } else {
+                XCTAssertEqual(failed?.message, "\(why), so it was left as it is and the previous copy was left in the Trash")
+                XCTAssertEqual(failed?.partial, true)
+                XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the replacement stays")
+                let trashed = trashFolder.appendingPathComponent(names(trashFolder).first ?? "")
+                XCTAssertEqual(AppInstaller.identity(trashed), old, "the previous copy is in the Trash")
+                XCTAssertTrue(failed?.notes.contains("The previous copy of Breaks is in the Trash at \(trashed.path); rename it to \(path) to use it again.") == true, "\(failed?.notes ?? [])")
+            }
+            assertNoLeftovers()
+        }
+    }
+
+    // Two copies: the second copy's install path is removed while its previous copy goes to the Trash. The first copy
+    // stays updated (said, so the result is only partly done), the second's previous copy comes back, and the receipt is
+    // the one the first copy's update wrote.
+    func testTheSecondCopysTrashHandoffFailingKeepsTheFirstUpdated() async throws {
+        try installOld()
+        let second = user.appendingPathComponent("Breaks.app")
+        try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+        let secondOld = AppInstaller.identity(second)
+        let path = second.path
+        trash = ScriptedTrash(inner: trash, call: 2, after: { try? FileManager.default.removeItem(atPath: path) })
+        let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: false) }
+        XCTAssertEqual(failed?.step, .install)
+        XCTAssertEqual(failed?.partial, true)
+        XCTAssertEqual(failed?.notes.first, "Updated the copy in /Applications from 0.0.9 to 0.1.0.")
+        XCTAssertEqual(version(target), "0.1.0")
+        XCTAssertEqual(AppInstaller.identity(second), secondOld, "the second copy's previous copy is back")
+        let receipt = try Receipt.parse(Data(contentsOf: receiptFile)).get()
+        XCTAssertEqual([receipt.version, receipt.path], ["0.1.0", "/Applications/Breaks.app"], "the first copy's receipt")
+        XCTAssertEqual(names(trashFolder).count, 1, "only the first copy's previous copy is in the Trash")
+        assertNoLeftovers()
+    }
+
+    // An update undone after its swap puts the receipt back as it was: none when there was none, and when it cannot be
+    // put back (its folder became read-only) the result does not claim it was, and says so as a change.
+    func testAnUndoneUpdatePutsTheReceiptBackOrSaysItCouldNot() async throws {
+        for readOnly in [false, true] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            if !readOnly { try FileManager.default.removeItem(at: receiptFile) }
+            let path = target.path
+            let receiptsPath = receipts.path
+            let armed = Recorder(false)
+            images.onDetach = {
+                guard armed.get() else { return }
+                try? FileManager.default.removeItem(atPath: path)
+                if readOnly { chmod(receiptsPath, 0o500) }
+            }
+            var installer = installer()
+            installer.afterPlacing = { _ in armed.update { $0 = true } }
+            var failure: InstallFailure?
+            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: false) } catch { failure = error as? InstallFailure }
+            chmod(receiptsPath, 0o755)
+            let why = "\(path) was changed or removed after the new copy was put there (by the subset command?)"
+            XCTAssertEqual(AppInstaller.identity(target), old, "the previous copy is back")
+            if readOnly {
+                XCTAssertEqual(failure?.message, "\(why), so the previous copy was put back")
+                XCTAssertEqual(failure?.partial, true, "the receipt left for the new copy is a change")
+                XCTAssertTrue(failure?.notes.first?.hasPrefix("The receipt \(receiptFile.path), written for the new copy, could not be put back as it was (") == true, "\(failure?.notes ?? [])")
+            } else {
+                XCTAssertEqual(failure?.message, "\(why), so the previous copy and its receipt were put back")
+                XCTAssertEqual(failure?.partial, false)
+                XCTAssertEqual(names(receipts), [], "there was no receipt, and there is none")
+            }
+        }
+    }
+
+    // A receipt that cannot be read whole, as a regular file within the receipt bound, could not be put back if the
+    // update were undone: the update refuses before any download or quit, leaving the copy and the receipt as they are.
+    func testAReceiptThatCannotBeReadWholeRefusesTheUpdateFirst() async throws {
+        let kinds = ["unreadable", "folder", "pipe", "link", "too large"]
+        for kind in kinds {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let path = target.path
+            running.running.update { $0.insert(path) }
+            let file = receiptFile.path
+            switch kind {
+            case "unreadable": chmod(file, 0)
+            case "folder":
+                try FileManager.default.removeItem(at: receiptFile)
+                try FileManager.default.createDirectory(at: receiptFile, withIntermediateDirectories: false)
+            case "pipe":
+                try FileManager.default.removeItem(at: receiptFile)
+                XCTAssertEqual(mkfifo(file, 0o644), 0)
+            case "link":
+                try FileManager.default.moveItem(at: receiptFile, to: receipts.appendingPathComponent("elsewhere.json"))
+                try FileManager.default.createSymbolicLink(atPath: file, withDestinationPath: "elsewhere.json")
+            default: try Data(repeating: 0x20, count: Receipt.maxBytes + 1).write(to: receiptFile)
+            }
+            let entry = AppInstaller.identity(receiptFile)
+            let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
+            chmod(file, 0o644)
+            XCTAssertEqual(refused?.step, .receipt, kind)
+            XCTAssertTrue(refused?.message.hasPrefix("the receipt \(file) cannot be read (") == true, "\(kind): \(refused?.message ?? "")")
+            XCTAssertEqual(refused?.partial, false, kind)
+            XCTAssertEqual(downloader.calls.get(), 0, "\(kind): before any download")
+            XCTAssertEqual(running.quits.get(), [], "\(kind): before any quit")
+            XCTAssertEqual(AppInstaller.identity(target), old, kind)
+            XCTAssertEqual(AppInstaller.identity(receiptFile), entry, "\(kind): the receipt is as it was")
+            assertNoLeftovers()
+        }
+        XCTAssertEqual(try AppInstaller.snapshotReceipt(receipts.appendingPathComponent("absent.json")), .absent)
+    }
+
+    // The Trash may throw any error. Move to Trash then puts the copy back from its hidden name (the receipt stays), or,
+    // when something took its place, says where it is; an update keeps its success and names the previous copy's
+    // hidden path.
+    func testAnErrorOfAnyTypeFromTheTrashPutsTheCopyBackOrNamesIt() async throws {
+        let errors: [any Error & Sendable] = [CocoaError(.fileWriteNoPermission), POSIXError(.EACCES)]
+        for error in errors {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            trash = ScriptedTrash(inner: trash, error: error)
+            let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+            XCTAssertEqual(refused?.step, .trash, "\(error)")
+            XCTAssertEqual(refused?.message, "\(target.path) cannot be moved to the Trash (\(error.localizedDescription))")
+            XCTAssertEqual(refused?.partial, false, "\(error)")
+            XCTAssertEqual(AppInstaller.identity(target), old, "\(error): the copy is put back")
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+            assertNoLeftovers()
+
+            // Something takes its place first: the copy stays under its hidden name, which the failure names.
+            let path = target.path
+            trash = OccupyingThenFailingTrash(error: error) { try? makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.other", version: "9.0") }
+            let occupied = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+            let hidden = names(system).filter { $0.hasPrefix(".Breaks.app.subset-trash-") }
+            XCTAssertEqual(hidden.count, 1)
+            let aside = system.appendingPathComponent(hidden.first ?? "")
+            XCTAssertEqual(AppInstaller.identity(aside), old)
+            XCTAssertEqual(occupied?.partial, true)
+            XCTAssertTrue(occupied?.message.hasSuffix("it is at \(aside.path); rename it to \(path)") == true, occupied?.message ?? "")
+            XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the occupant stays")
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+
+            // Update: the new copy is verified and in place, so the update stands; the previous copy is named.
+            try tearDownWithError()
+            try setUpWithError()
+            try installOld()
+            trash = ScriptedTrash(inner: trash, error: error)
+            let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: false)
+            XCTAssertEqual(version(target), "0.1.0")
+            XCTAssertEqual(try Receipt.parse(Data(contentsOf: receiptFile)).get().version, "0.1.0")
+            let kept = names(system).filter { $0.hasPrefix(".Breaks.app.subset-old-") }
+            XCTAssertEqual(kept.count, 1)
+            XCTAssertEqual(outcome.notes, ["The previous copy could not be moved to the Trash (\(error.localizedDescription)); it is at \(system.appendingPathComponent(kept.first ?? "").path)."])
+        }
+    }
+
+    // Move to Trash of two copies where the Trash refuses the second (with an untyped error): the first stays in the
+    // Trash, the second is put back, the receipt stays, and the result is only partly done.
+    func testMoveToTrashOfTwoCopiesWhoseSecondFailsKeepsTheFirstInTheTrash() async throws {
+        try installOld()
+        let second = user.appendingPathComponent("Breaks.app")
+        try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+        let secondOld = AppInstaller.identity(second)
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        trash = ScriptedTrash(inner: trash, call: 2, error: POSIXError(.EPERM))
+        let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+        XCTAssertEqual(refused?.step, .trash)
+        XCTAssertEqual(refused?.partial, true)
+        XCTAssertNil(AppInstaller.identity(target))
+        XCTAssertEqual(names(trashFolder).count, 1)
+        XCTAssertEqual(AppInstaller.identity(second), secondOld, "the second copy is put back")
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+        assertNoLeftovers()
+    }
+}
+
+/// Lets something take the copy's place, then throws `error` (not an InstallFailure).
+private struct OccupyingThenFailingTrash: Trashing {
+    let error: any Error & Sendable
+    let occupy: @Sendable () -> Void
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
+        occupy()
+        throw error
     }
 }

@@ -107,6 +107,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
 
         actions.update("breaks")
         XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", appName: "Breaks", kind: .update))
+        XCTAssertEqual(actions.quitRequest?.message, "Breaks is running. Subset asks it to quit before the new version is put in place; open it again once the update ends.")
         XCTAssertFalse(actions.isBusy("breaks"), "nothing starts before the user answers")
         actions.quitRequest = nil
         XCTAssertEqual(running.quits.get(), [])
@@ -122,8 +123,8 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         await actions.wait("breaks")
         guard case .succeeded(let text)? = actions.activities["breaks"] else { return XCTFail("\(String(describing: actions.activities["breaks"]))") }
         XCTAssertTrue(text.hasPrefix("Updated to 0.1.0."), text)
+        XCTAssertTrue(text.hasSuffix(" Breaks was asked to quit for the update. Open Breaks again."), text)
         XCTAssertEqual(running.quits.get().count, 1)
-        XCTAssertEqual(running.reopened.get().count, 1)
         XCTAssertEqual(model.rows.first?.installed.map(\.versionLabel), ["0.1.0"])
     }
 
@@ -235,32 +236,41 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         XCTAssertEqual(running.quits.get(), [])
     }
 
-    // The row comes back once a look begun after its operation is shown, whoever made it: its own look is held, and a
-    // refresh shows the install. With no look shown at all, it comes back after `listWait`, saying the list may lag.
-    func testARowComesBackWithANewerLookOrAfterABoundedWait() async throws {
-        let gated = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2], readsAfterGate: true)
-        let (row, model) = await actions(finder: gated)
-        model.scanWait = .milliseconds(200)
-        row.install("breaks")
-        try await waitFor { gated.isWaiting }
-        XCTAssertTrue(row.isBusy("breaks"))
-        await model.refresh(force: true)
-        XCTAssertEqual(model.rows.first?.installed.map(\.versionLabel), ["0.1.0"])
-        try await waitFor { !row.isBusy("breaks") }
-        XCTAssertEqual(row.activities["breaks"], .succeeded("Installed 0.1.0 in \(system.path)."))
-        gated.release()
-
+    // The row comes back only once a look for installed apps begun after its operation ended is published, however
+    // long that look is held up: until then its buttons stay disabled (an Install chosen from the state before the
+    // operation would put a second copy in place), it says the list is still being read, and Install or Move to Trash
+    // pressed meanwhile starts nothing. Once the look is published, the note goes and the row offers what is installed.
+    func testARowComesBackOnlyOnceALookBegunAfterItsOperationIsPublished() async throws {
+        let user = root.appendingPathComponent("user")
         let stalled = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2], readsAfterGate: true)
-        let (later, laterModel) = await actions(finder: stalled)
-        later.listWait = .milliseconds(300)
-        later.moveToTrash("breaks")
+        let (row, model) = await actions(finder: stalled)
+        row.listNoteDelay = .milliseconds(100)
+        row.install("breaks")
         try await waitFor { stalled.isWaiting }
-        try await waitFor { !later.isBusy("breaks") }
-        guard case .succeeded(let text)? = later.activities["breaks"] else { return XCTFail("\(String(describing: later.activities["breaks"]))") }
-        XCTAssertTrue(text.hasPrefix("Moved to the Trash. ") && text.hasSuffix(" \(AppActions.listPending)"), text)
-        XCTAssertEqual(laterModel.rows.first?.installed.map(\.versionLabel), ["0.1.0"], "not looked at again yet")
+        try await waitFor { !row.canCancel("breaks") }
+        let installed = "Installed 0.1.0 in \(system.path)."
+        XCTAssertEqual(row.activities["breaks"], .succeeded(installed), "the result shows at once")
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertTrue(row.isBusy("breaks"), "the row waits for the look, with no time limit")
+        XCTAssertEqual(row.activities["breaks"], .succeeded("\(installed) \(AppActions.listPending)"))
+        XCTAssertEqual(model.installed["breaks"] ?? [], [], "only the state before the install is known")
+        // With /Applications not writable, a stale Install would put a second copy in ~/Applications.
+        chmod(system.path, 0o555)
+        defer { chmod(system.path, 0o755) }
+        let receiptBefore = try Data(contentsOf: receipts.appendingPathComponent("dev.subset.breaks.json"))
+        row.install("breaks")
+        row.moveToTrash("breaks")
+        XCTAssertFalse(row.canCancel("breaks"), "nothing started")
+        XCTAssertNil(row.quitRequest)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: user.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: system.path), ["Breaks.app"])
+        XCTAssertEqual(try Data(contentsOf: receipts.appendingPathComponent("dev.subset.breaks.json")), receiptBefore)
         stalled.release()
-        try await waitFor { laterModel.rows.first?.installed == [] }
+        await row.wait("breaks")
+        XCTAssertFalse(row.isBusy("breaks"))
+        XCTAssertEqual(row.activities["breaks"], .succeeded(installed), "the note goes once the list shows the install")
+        XCTAssertEqual(model.rows.first?.installed.map(\.versionLabel), ["0.1.0"])
+        XCTAssertNil(model.rows.first?.update, "the row offers what the install left")
     }
 
     // Cancelled while the app quits, through either row action: no copy changed, so the row says it was not updated or
@@ -277,7 +287,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
             await actions.wait("breaks")
             switch kind {
             case .update:
-                XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not updated to 0.1.0: it was cancelled before it was installed. Breaks was asked to quit for the update and was reopened."))
+                XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not updated to 0.1.0: it was cancelled before it was installed. Breaks was asked to quit for the update. Open Breaks again."))
             case .moveToTrash:
                 XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not moved to the Trash: it was cancelled after the app was asked to quit, before any copy was changed. Breaks at \(path) was asked to quit."))
             }

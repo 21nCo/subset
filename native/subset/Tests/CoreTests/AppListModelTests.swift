@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 @testable import SubsetCore
 import XCTest
@@ -68,53 +69,7 @@ final class GatedLoader: CatalogLoading, @unchecked Sendable {
     }
 }
 
-/// Detects with `finder`, except that call numbers `gatedCalls` (from 1) wait until `release`, then find nothing.
-/// A finder whose scripted calls (numbered from 1) wait at a gate the test opens, before or after reading the folders.
-final class ScriptedFinder: InstalledAppDetecting, @unchecked Sendable {
-    enum Step { case holdThenRead, readThenHold }
-    private let finder: InstalledAppFinder
-    private let steps: [Int: Step]
-    private let gates: [Int: DispatchSemaphore]
-    private let lock = NSLock()
-    private var calls = 0
-    private var holding: Set<Int> = []
-    private var done: Set<Int> = []
-
-    init(_ finder: InstalledAppFinder, _ steps: [Int: Step]) {
-        self.finder = finder
-        self.steps = steps
-        gates = steps.mapValues { _ in DispatchSemaphore(value: 0) }
-    }
-
-    var callCount: Int { lock.withLock { calls } }
-    func isHolding(_ call: Int) -> Bool { lock.withLock { holding.contains(call) } }
-    func isDone(_ call: Int) -> Bool { lock.withLock { done.contains(call) } }
-    func release(_ call: Int) { gates[call]?.signal() }
-
-    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
-        let call = lock.withLock { () -> Int in
-            calls += 1
-            return calls
-        }
-        defer { _ = lock.withLock { done.insert(call) } }
-        guard let step = steps[call], let gate = gates[call] else { return finder.detect(apps) }
-        let hold = {
-            _ = self.lock.withLock { self.holding.insert(call) }
-            gate.wait()
-            _ = self.lock.withLock { self.holding.remove(call) }
-        }
-        switch step {
-        case .holdThenRead:
-            hold()
-            return finder.detect(apps)
-        case .readThenHold:
-            let found = finder.detect(apps)
-            hold()
-            return found
-        }
-    }
-}
-
+/// Detects with `finder`, except that call numbers `gatedCalls` (from 1) wait until `release`.
 final class GatedFinder: InstalledAppDetecting, @unchecked Sendable {
     private let finder: InstalledAppFinder
     private let gatedCalls: Set<Int>
@@ -374,7 +329,8 @@ final class AppListModelTests: XCTestCase {
 
     func testARefreshCancelledDuringDetectionChangesNothing() async throws {
         try install("Breaks", "dev.subset.breaks", version: "0.0.9")
-        let gated = GatedFinder(finder, gatedCall: 2)
+        // Every look is published (for the apps of the catalog shown); this one reads what is installed.
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
         let first = try loaded("catalog-valid-live-only")
         clock.advance(60 * 60)
         // The next load succeeds with another feed, then the refresh is cancelled while the apps are detected.
@@ -474,7 +430,8 @@ final class AppListModelTests: XCTestCase {
 
     func testATimedOutWaitDuringDetectionStopsTheRefreshAndChangesNothing() async throws {
         try install("Breaks", "dev.subset.breaks", version: "0.0.9")
-        let gated = GatedFinder(finder, gatedCall: 2)
+        // Every look is published (for the apps of the catalog shown); this one reads what is installed.
+        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
         let first = try loaded("catalog-valid-live-only")
         clock.advance(60 * 60)
         let second = try loaded("catalog-valid-live-and-beta", warning: "offline")
@@ -566,21 +523,74 @@ final class AppListModelTests: XCTestCase {
         }
     }
 
-    // A look held up for good (a stalled folder) holds the next one up only for a while: the later reload then looks and
-    // publishes, and the held look, when it ends, does not publish over it.
-    func testALookHeldUpForGoodDoesNotHoldUpTheNextForever() async throws {
-        let gated = GatedFinder(finder, gatedCalls: [2])
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
-        model.scanWait = .milliseconds(200)
+    // Looks asked for while one is held up (a stalled folder) are merged into one look begun after it ends, whoever
+    // asks (reloads after operations, a manual refresh, the auto-refresh loop): never two detect() calls at once, never
+    // more than one waiting, and the held look runs on a queue of its own, so other async work goes on meanwhile.
+    func testLooksAskedForDuringAHeldLookAreOneLookBegunAfterIt() async throws {
+        let counting = InFlightFinder(finder, gated: 2)
+        let model = AppListModel(loader: RecordedLoader(Array(repeating: try loaded("catalog-valid-live-only"), count: 50)), finder: counting, defaults: defaults)
         await model.refresh()
-        let held = Task { _ = await model.reloadInstalled() }
-        try await waitUntil({ gated.isWaiting }, stopping: held, release: { gated.release() })
+        var reloads: [Task<Void, Never>] = []
+        reloads.append(Task { await model.reloadInstalled() })
+        let deadline = Date().addingTimeInterval(5)
+        while !counting.isHolding, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(counting.isHolding)
+        for _ in 0..<20 { reloads.append(Task { await model.reloadInstalled() }) }
+        let refresh = Task { await model.refresh(force: true) }
+        XCTAssertTrue(model.startAutoRefresh(every: .milliseconds(20)))
+        // 64 tasks on Swift's shared pool, each sleeping and yielding, finish while the look stays held.
+        let started = Date()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    for _ in 0..<5 {
+                        try? await Task.sleep(for: .milliseconds(2))
+                        await Task.yield()
+                    }
+                }
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "other async work is not held up by the held look")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(counting.callCount, 2, "nothing else is looked for while the look is held")
         try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        await model.reloadInstalled()
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
-        gated.release()
-        await held.value
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the held, older look is not published")
+        counting.release()
+        for reload in reloads { await reload.value }
+        await refresh.value
+        model.stopAutoRefresh()
+        XCTAssertEqual(counting.peak, 1, "one detect() at a time")
+        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the merged look, begun after the held one, is shown")
+    }
+
+    // A refresh's look is held, having read before the subset command installs the app, while a reload is asked for:
+    // the looks are published in the order they began, so the held one (nothing installed) comes first and the reload's
+    // (the install) last, whichever caller is awaited first; what is shown never goes back to an older state.
+    func testLooksArePublishedInTheOrderTheyBeganWhicheverCallerEndsFirst() async throws {
+        for refreshFirst in [true, false] {
+            let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: false)
+            let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
+            await model.refresh()
+            let shown = Recorder<[[String]]>([])
+            let watching = model.$installed.sink { installed in shown.update { $0.append(installed["breaks"]?.map(\.versionLabel) ?? []) } }
+            let refresh = Task { await model.refresh(force: true) }
+            try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
+            let reload = Task { await model.reloadInstalled() }
+            try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+            gated.release()
+            if refreshFirst {
+                await refresh.value
+                await reload.value
+            } else {
+                await reload.value
+                await refresh.value
+            }
+            watching.cancel()
+            XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "refresh awaited first: \(refreshFirst)")
+            XCTAssertEqual(shown.get().last, ["0.1.0"])
+            XCTAssertEqual(shown.get().drop { $0 != ["0.1.0"] }.filter { $0 != ["0.1.0"] }, [], "never back to an older state: \(shown.get())")
+            XCTAssertEqual(gated.callCount, 3)
+            try FileManager.default.removeItem(at: root.appendingPathComponent("apps/Breaks.app"))
+        }
     }
 
     // A refresh with a new feed and a reload over the old feed: the list shows the new feed with what is installed for it.
@@ -608,120 +618,39 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(model.installed["other"]?.map(\.versionLabel), ["1.0.0"])
         XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
     }
+}
 
-    // Looks overlap when one is held past `scanWait`: what each saw is ordered by when it ran, not by when it was asked
-    // for. Held, then reading after a later look published (and after the subset command installed the app): what it saw
-    // is not lost, the disagreement is settled by a look begun after both. Held after reading, before the install: it
-    // does not publish over the later look (testALookHeldUpForGoodDoesNotHoldUpTheNextForever).
-    func testAHeldLookThatSawALaterInstallIsNotLost() async throws {
-        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
-        model.scanWait = .milliseconds(200)
-        await model.refresh()
-        let held = Task { _ = await model.reloadInstalled() }
-        try await waitUntil({ gated.isWaiting }, stopping: held, release: { gated.release() })
-        await model.reloadInstalled()
-        XCTAssertNil(model.installed["breaks"]?.first, "the later look saw nothing installed")
-        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        gated.release()
-        // The held reload ended once the later look, begun after it was asked, was shown; its own look goes on.
-        await held.value
-        let deadline = Date().addingTimeInterval(5)
-        while model.installed["breaks"]?.isEmpty != false, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "the held look's later observation is shown")
-        XCTAssertEqual(gated.callCount, 4, "one more look settled the disagreement")
+/// Counts the detect() calls in flight; call `gated` (from 1) waits until `release`.
+final class InFlightFinder: InstalledAppDetecting, @unchecked Sendable {
+    private let finder: InstalledAppFinder
+    private let gated: Int
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var calls = 0
+    private var inFlight = 0
+    private var mostInFlight = 0
+
+    init(_ finder: InstalledAppFinder, gated: Int) {
+        self.finder = finder
+        self.gated = gated
     }
 
-    // A refresh whose look is held past `scanWait` while a reload publishes: the same holds for a refresh.
-    func testAHeldRefreshThatSawALaterInstallIsNotLost() async throws {
-        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
-        model.scanWait = .milliseconds(200)
-        await model.refresh()
-        let refresh = Task { await model.refresh(force: true) }
-        try await waitUntil({ gated.isWaiting }, stopping: refresh, release: { gated.release() })
-        await model.reloadInstalled()
-        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        gated.release()
-        await refresh.value
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
-    }
+    var callCount: Int { lock.withLock { calls } }
+    /// The most detect() calls ever in flight at once.
+    var peak: Int { lock.withLock { mostInFlight } }
+    var isHolding: Bool { lock.withLock { inFlight > 0 && calls == gated } }
 
-    // A reload returns once a look begun after it was asked is shown, even when its own look is still held; with a limit
-    // and no such look shown, it returns false then, and its own look is shown when it ends.
-    func testAReloadEndsWithAnyNewerLookAndIsBounded() async throws {
-        let gated = GatedFinder(finder, gatedCalls: [2], readsAfterGate: true)
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: gated, defaults: defaults)
-        model.scanWait = .milliseconds(200)
-        await model.refresh()
-        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        let bounded = await model.reloadInstalled(within: .milliseconds(300))
-        XCTAssertFalse(bounded, "nothing begun after it was shown within the limit")
-        XCTAssertNil(model.installed["breaks"]?.first)
-        let reload = Task { await model.reloadInstalled() }
-        try await Task.sleep(for: .milliseconds(50))
-        await model.refresh(force: true)
-        XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"])
-        let shown = await reload.value
-        XCTAssertTrue(shown, "ended by the refresh's look, begun after it was asked")
-        gated.release()
-    }
-
-    // A look that overlapped the shown one and agrees with it still counts as seen as late as it ended: a later-ending
-    // look that read before then and disagrees is settled by looking again, not shown. Here look 4 reads an install,
-    // the app is removed, look 2 (held since before look 3) reads the removal and agrees with what look 3 showed, then
-    // look 4 returns the install it read before the removal.
-    func testAnAgreeingLookKeepsAnOlderDisagreeingOneFromBeingShown() async throws {
-        let scripted = ScriptedFinder(finder, [2: .holdThenRead, 4: .readThenHold])
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only")]), finder: scripted, defaults: defaults)
-        model.scanWait = .milliseconds(200)
-        await model.refresh()
-        let first = Task { _ = await model.reloadInstalled() }
-        try await waitUntil({ scripted.isHolding(2) }, stopping: first, release: { scripted.release(2) })
-        await model.reloadInstalled()
-        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
-        let last = Task { _ = await model.reloadInstalled() }
-        try await waitUntil({ scripted.isHolding(4) }, stopping: last, release: { scripted.release(4) })
-        try FileManager.default.removeItem(at: root.appendingPathComponent("apps/Breaks.app"))
-        scripted.release(2)
-        try await waitUntil({ scripted.isDone(2) }, stopping: first, release: {})
-        await first.value
-        try await Task.sleep(for: .milliseconds(50))
-        scripted.release(4)
-        await last.value
-        XCTAssertEqual(model.installed["breaks"], [], "the removal look 2 saw is not undone by what look 4 read before it")
-        XCTAssertEqual(scripted.callCount, 5, "one more look settled the disagreement")
-    }
-
-    // A reload's wait ends when a look begun after it was asked agrees with what is shown, not only when one is newer:
-    // look 2 (begun before the reload) is shown while refresh look 4, begun after the reload and overlapping look 2,
-    // agrees with it; the reload's own look 3 is still held.
-    func testAnAgreeingLookBegunAfterAReloadEndsItsWait() async throws {
-        let scripted = ScriptedFinder(finder, [2: .holdThenRead, 3: .holdThenRead, 4: .readThenHold])
-        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: scripted, defaults: defaults)
-        model.scanWait = .milliseconds(200)
-        await model.refresh()
-        let earlier = Task { _ = await model.reloadInstalled() }
-        try await waitUntil({ scripted.isHolding(2) }, stopping: earlier, release: { scripted.release(2) })
-        let ended = Recorder(false)
-        let reload = Task { () -> Bool in
-            let shown = await model.reloadInstalled()
-            ended.update { $0 = true }
-            return shown
+    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
+        let call = lock.withLock { () -> Int in
+            calls += 1
+            inFlight += 1
+            mostInFlight = max(mostInFlight, inFlight)
+            return calls
         }
-        try await waitUntil({ scripted.isHolding(3) }, stopping: earlier, release: { scripted.release(2); scripted.release(3) })
-        let refresh = Task { await model.refresh(force: true) }
-        try await waitUntil({ scripted.isHolding(4) }, stopping: refresh, release: { scripted.release(2); scripted.release(3); scripted.release(4) })
-        scripted.release(2)
-        await earlier.value
-        XCTAssertFalse(ended.get(), "look 2 began before the reload")
-        scripted.release(4)
-        await refresh.value
-        let deadline = Date().addingTimeInterval(2)
-        while !ended.get(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(ended.get(), "the agreeing refresh look, begun after the reload, ends its wait")
-        scripted.release(3)
-        let shown = await reload.value
-        XCTAssertTrue(shown)
+        defer { lock.withLock { inFlight -= 1 } }
+        if call == gated { gate.wait() }
+        return finder.detect(apps)
     }
+
+    func release() { gate.signal() }
 }

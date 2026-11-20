@@ -4,7 +4,8 @@ import Foundation
 
 /// Moves an app to the Trash; `SystemTrash` uses the user's Trash, tests a folder.
 public protocol Trashing: Sendable {
-    /// Moves `bundle` to the Trash and returns where it is there. Never deletes it.
+    /// Moves `bundle` to the Trash and returns where it is there. Never deletes it. Any error means it was not moved; the
+    /// installer then puts the copy back or says where it is, whatever the error's type.
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed
 }
 
@@ -91,10 +92,6 @@ public protocol RunningAppControlling: Sendable {
     /// asks no further app and waits only for those asked. `isChecked` says whether `bundle` is still the copy the caller
     /// checked; asked just before any app is, it refuses when it is not. Throws only when no app was asked.
     func quit(_ bundle: URL, timeout: TimeInterval, isChecked: @escaping @Sendable () -> Bool) async throws -> (left: [pid_t], asked: Bool)
-    /// Opens the app at `bundle` again after it was quit for an update, when `isExpected` says it is the copy expected
-    /// there, asked just before it is opened and again once it has opened; returns why it was not opened, or was opened
-    /// but cannot be shown to be that copy, or nil.
-    func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String?
 }
 
 /// The processes from libproc (each pid's executable path), quit with NSRunningApplication.terminate().
@@ -268,59 +265,6 @@ public struct WorkspaceRunningApps: RunningAppControlling {
         }
         return asked
     }
-
-    public func reopen(_ bundle: URL, isExpected: @escaping @Sendable () -> Bool) async -> String? {
-        await Self.reopen(bundle, isExpected: isExpected, executable: Self.executableFile, running: Self.runningFile) { url, configuration in
-            let app = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-            return Opened(bundle: app.bundleURL, pid: app.processIdentifier)
-        }
-    }
-
-    /// An app Launch Services opened: where its bundle is, and its process.
-    struct Opened: Sendable {
-        var bundle: URL?
-        var pid: pid_t
-    }
-
-    /// Opens `bundle` with `open`, never handing the request to a copy of the app already running elsewhere
-    /// (allowsRunningApplicationSubstitution off), and only while `isExpected`, asked before and again once it opened.
-    /// The launch is bound to the copy checked by its executable file: `executable` identifies the copy's executable
-    /// before the launch, and `running` the file the opened process runs (libproc names that file where it is now, so a
-    /// copy put in its place, even one moved away again since, is told apart); the opened app's bundle must be `bundle`.
-    /// When that cannot be shown, it is said; nothing is asked to quit, since the user agreed to quit only the copy that
-    /// was updated.
-    static func reopen(
-        _ bundle: URL, isExpected: @escaping @Sendable () -> Bool,
-        executable: @escaping @Sendable (URL) -> FileIdentity?, running: @escaping @Sendable (pid_t) -> FileIdentity?,
-        open: @escaping @Sendable (URL, NSWorkspace.OpenConfiguration) async throws -> Opened
-    ) async -> String? {
-        guard isExpected(), let checked = executable(bundle) else { return "\(bundle.path) is not the copy expected there" }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.allowsRunningApplicationSubstitution = false
-        let opened: Opened
-        do {
-            opened = try await open(bundle, configuration)
-        } catch {
-            return error.localizedDescription
-        }
-        let matcher = BundleMatcher(bundle)
-        let same = opened.bundle.map { matcher.contains($0.path + "/") && BundleMatcher($0).contains(bundle.path + "/") } ?? false
-        guard same, running(opened.pid) == checked, isExpected() else {
-            return "the app that opened (\(opened.bundle?.path ?? "pid \(opened.pid)")) cannot be shown to be the copy checked at \(bundle.path), which may have been replaced while it opened"
-        }
-        return nil
-    }
-
-    /// The identity of the executable file of the app at `bundle` (its Info.plist's CFBundleExecutable), or nil.
-    static func executableFile(_ bundle: URL) -> FileIdentity? {
-        guard let name = InstalledAppFinder.infoPlist(bundle.path)?["CFBundleExecutable"] as? String, !name.contains("/") else { return nil }
-        return AppInstaller.identity(bundle.appendingPathComponent("Contents/MacOS/\(name)"))
-    }
-
-    /// The identity of the file process `pid` runs, where libproc names it now, or nil.
-    static func runningFile(_ pid: pid_t) -> FileIdentity? {
-        executable(of: pid).flatMap { AppInstaller.identity(URL(fileURLWithPath: $0)) }
-    }
 }
 
 /// Whether a process's path is inside a bundle, matched as given and in its canonical form (every link resolved, so
@@ -351,6 +295,8 @@ struct BundleMatcher: Sendable {
     /// resolved prefix. With `linksIntoBundle` false (libproc names the file outside the bundle), a prefix whose link
     /// resolves now into the bundle does not count, nor does the path fully resolved; with it (nothing names the file
     /// now) both do. `resolved` keeps the real paths already read (nil when a path does not exist).
+    /// Not claimed (SET-252): a process another program started through an alias outside the bundle that leads into it,
+    /// whose executable has moved since, is named by neither path.
     func startedInside(_ path: String, resolved: inout [String: String?], linksIntoBundle: Bool) -> Bool {
         let parts = path.split(separator: "/")
         if let saved = confined([], parts[...]), contains(saved) { return true }

@@ -20,7 +20,7 @@ public struct QuitRequest: Identifiable, Equatable, Sendable {
     public var title: String { "Quit \(appName)?" }
     public var message: String {
         switch kind {
-        case .update: return "\(appName) is running. Subset asks it to quit before the new version is put in place, and opens it again afterwards."
+        case .update: return "\(appName) is running. Subset asks it to quit before the new version is put in place; open it again once the update ends."
         case .moveToTrash: return "\(appName) is running. Subset asks it to quit before moving it to the Trash."
         }
     }
@@ -42,8 +42,8 @@ public final class AppActions: ObservableObject {
     @Published private var operations: [String: Task<AppActivity, Never>] = [:]
     /// Set once Subset is quitting: no operation starts any more.
     private var closed = false
-    /// How long a row waits, after its operation, for what is installed to be looked for again and shown.
-    var listWait: Duration = .seconds(30)
+    /// How long after its operation a row still waiting for what is installed to be looked for again says so.
+    var listNoteDelay: Duration = .seconds(10)
 
     public init(installer: AppInstaller, model: AppListModel) {
         self.installer = installer
@@ -166,21 +166,31 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    /// The message shows once the operation has cleaned up; the row's buttons come back once a look for what is
-    /// installed, begun after the operation ended, is shown (its own, or a refresh's), so its next action sees it, or
-    /// after `listWait` at most, saying the list may not show it yet (each action checks the folders again anyway). Once
-    /// Subset is quitting, the row is not used again, so nothing waits for that look.
+    /// The message shows once the operation has cleaned up; the row's buttons come back only once a look for what is
+    /// installed, begun after the operation ended, is published (its own, or a refresh's), so its next action is chosen
+    /// from what the operation left, never from the state before it. A look that takes longer than `listNoteDelay` adds
+    /// a note saying so while the row waits, removed when it ends. Once Subset is quitting, the row is not used again, so
+    /// nothing waits for that look.
     private func finish(_ appID: String, _ message: AppActivity) async {
         operations[appID] = nil
         guard tasks[appID] != nil else { return }
         activities[appID] = message
-        if !closed, !(await model.reloadInstalled(within: listWait)), activities[appID] == message {
-            activities[appID] = Self.adding(Self.listPending, to: message)
+        if !closed {
+            let pending = Self.adding(Self.listPending, to: message)
+            let delay = listNoteDelay
+            let note = Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self, self.activities[appID] == message else { return }
+                self.activities[appID] = pending
+            }
+            await model.reloadInstalled()
+            note.cancel()
+            if activities[appID] == pending { activities[appID] = message }
         }
         tasks[appID] = nil
     }
 
-    static let listPending = "The list of installed apps is still being read and may not show this yet."
+    static let listPending = "The list of installed apps is still being read; this row's buttons come back once it shows this."
 
     private nonisolated static func adding(_ note: String, to message: AppActivity) -> AppActivity {
         switch message {

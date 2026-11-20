@@ -45,13 +45,15 @@ public struct InstallOutcome: Equatable, Sendable {
 ///   4. verify the staged copy (AppVerifying);
 ///   5. install: rename it to `<appName>.app`, never over anything, and rename its receipt into place;
 ///      update: rename the installed copy aside (it must still be the copy checked), rename the new one into place,
-///      write the receipt, and only then move the old copy to the Trash.
+///      write the receipt, and only then move the old copy to the Trash, checking that the verified copy is still in
+///      place before and after that move (otherwise the previous copy and receipt are put back, or the copy is named).
 /// Step 5 is synchronous, so nothing in this app runs between its renames. A failure or a cancel before it removes the
 /// staged copy and writes no receipt; the private folder goes once the image is detached. So the old app or the new
 /// verified one is always in place: only a crash between the two renames of an update can leave `<appName>.app`
 /// missing, and then the next install, update or move to the Trash (here or by `subset`) renames the copy back.
 /// No downgrade, no administrator rights, nothing deleted permanently. A running app is quit (terminate(), never a
-/// force quit) only when the caller says the user agreed, and is reopened after an update.
+/// force quit) only when the caller says the user agreed; it is never opened again by Subset: the result says it was
+/// asked to quit and ends with "Open <app> again." (owner amendment of SET-247).
 public struct AppInstaller: Sendable {
     public static let downloadPrefix = "https://github.com/21nCo/subset/releases/download/"
     /// The copying tool (tests give a wrapper that can be held mid-copy).
@@ -154,21 +156,24 @@ public struct AppInstaller: Sendable {
                 throw InstallFailure(.install, "no installed copy of \(app.name) is older than \(release.label)")
             }
             try refuseOwnCopy(updates, app, doing: "updated")
+            // A receipt that cannot be read whole refuses before any download or quit: it could not be put back.
+            if updates.contains(where: { receiptDocument(app, release, for: $0) != nil }) {
+                _ = try Self.snapshotReceipt(setup.receipts.appendingPathComponent("\(app.bundleID).json"))
+            }
+            let quitNote = "\(app.name) was asked to quit for the update. Open \(app.name) again."
             for copy in updates {
                 let target = URL(fileURLWithPath: copy.path)
                 let identity = identities[copy.path]!
                 if !quitAllowed, try !running.processes(inside: target).isEmpty {
                     throw InstallFailure(.running, "\(app.name) is running; quit it to update it")
                 }
-                let folder = setup.folders.first { $0.label == copy.folder }
-                let receipt = folder.flatMap { ReceiptDocument(app, release, folder: $0, receipts: setup.receipts) }
-                // The receipt as it is before this copy is updated (nil when there is none), put back if the update is undone.
-                let previousReceipt = receipt.flatMap { try? Data(contentsOf: $0.file) }
+                let receipt = receiptDocument(app, release, for: copy)
+                // The receipt's file and what it held before this copy is updated, put back if the update is undone.
+                let previousReceipt = try receipt.map { (file: $0.file, previous: try Self.snapshotReceipt($0.file)) }
                 var quit = false
-                var old: URL?
-                var placed: FileIdentity?
-                var trashedAt: Date?
                 do {
+                    var old: URL?
+                    var placed: FileIdentity?
                     try await stage(app, release, in: target.deletingLastPathComponent(), notes: notes, progress: progress, ready: {
                         let pids = try running.processes(inside: target)
                         guard !pids.isEmpty else { return }
@@ -180,50 +185,64 @@ public struct AppInstaller: Sendable {
                         try Task.checkCancellation()
                         progress(.quitting)
                         let (left, asked) = try await running.quit(target, timeout: quitTimeout) { Self.identity(target) == identity }
-                        // Only an app that was asked to quit is reopened.
                         quit = asked
                         try Task.checkCancellation()
                         try Self.refuseLeft(left, asked: asked, app, at: copy.path, quitTimeout)
                     }) { staged in
                         (old, placed) = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
-                    // Cleanup ran after the swap: the verified copy must still be in place before the previous one goes,
-                    // checked once everything before the move to the Trash has run.
                     if let old, let placed {
-                        progress(.movingToTrash)
-                        trashedAt = clock()
-                        if Self.identity(target) != placed {
-                            try keepPrevious(old, target: target, appName: app.appName, receipt: receipt, previousReceipt: previousReceipt, notes: notes)
-                        }
+                        try handOff(old, placed: placed, target: target, copy: copy, app: app, release: release,
+                                    receipt: previousReceipt, notes: notes, progress: progress)
                     }
                 } catch {
-                    if quit {
-                        // Quitting is said even when the update then failed or was cancelled (it changed no copy). Only
-                        // the copy that was quit is opened again, never something put at its path since.
-                        if let why = await running.reopen(target, isExpected: { Self.identity(target) == identity }) {
-                            notes.add("\(app.name) was quit for the update and was not reopened as the copy checked (\(why)).", quit: true)
-                        } else {
-                            notes.add("\(app.name) was asked to quit for the update and was reopened.", quit: true)
-                        }
-                    }
+                    // Quitting is said, ending the result, even when the update then failed or was cancelled (it changed
+                    // no copy). Nothing is opened again: whatever is at the path now may not be the copy checked.
+                    if quit { notes.add(quitNote, quit: true) }
                     throw error
                 }
-                notes.add("Updated the copy in \(copy.folder) from \(copy.versionLabel) to \(release.label).", changed: true, onlyWhenPartial: true)
-                if let old {
-                    do {
-                        let trashed = try trash.trash(old, appName: app.appName, at: trashedAt ?? clock())
-                        notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)")
-                        if let hidden = trashed.hiddenNote { notes.add(hidden) }
-                    } catch let failure as InstallFailure {
-                        notes.add("The previous copy could not be moved to the Trash (\(failure.message)); it is at \(old.path).")
-                    }
-                }
-                // Only the verified copy put in place is opened, never something put at its path since.
-                if quit, let why = await running.reopen(target, isExpected: { [placed] in placed != nil && Self.identity(target) == placed }) {
-                    notes.add("\(app.name) could not be reopened as the copy checked (\(why)).")
-                }
+                if quit { notes.add(quitNote, quit: true) }
             }
             return updates.last.map(\.path)
+        }
+    }
+
+    /// The receipt an update of `copy` writes, or nil when the shared schema cannot name its folder.
+    private func receiptDocument(_ app: CatalogApp, _ release: ChosenRelease, for copy: InstalledCopy) -> ReceiptDocument? {
+        setup.folders.first { $0.label == copy.folder }.flatMap { ReceiptDocument(app, release, folder: $0, receipts: setup.receipts) }
+    }
+
+    /// The end of an update of one copy, after the swap and the image's cleanup: the previous copy, `old`, goes to the
+    /// Trash only while the verified copy (`placed`) is at `target`, checked before the move and again after it, since
+    /// what was there may have changed while the Trash took it. Either check failing puts the receipt back as it was and
+    /// the previous copy back (from its hidden name or from the Trash) when nothing is at `target`, otherwise names where
+    /// it is, and throws: the copy is not reported updated. Any error from the Trash, whatever its type, leaves the
+    /// previous copy under its hidden name, which a note names; the update stands.
+    private func handOff(
+        _ old: URL, placed: FileIdentity, target: URL, copy: InstalledCopy, app: CatalogApp, release: ChosenRelease,
+        receipt: (file: URL, previous: ReceiptSnapshot)?, notes: Notes, progress: @Sendable (InstallProgress) -> Void
+    ) throws {
+        progress(.movingToTrash)
+        let at = clock()
+        guard Self.identity(target) == placed else {
+            try keepPrevious(old, inTrash: false, target: target, appName: app.appName, receipt: receipt, notes: notes)
+        }
+        var trashed: Trashed?
+        var trashFailure: String?
+        do {
+            trashed = try trash.trash(old, appName: app.appName, at: at)
+        } catch {
+            trashFailure = (error as? InstallFailure)?.message ?? error.localizedDescription
+        }
+        guard Self.identity(target) == placed else {
+            try keepPrevious(trashed?.url ?? old, inTrash: trashed != nil, target: target, appName: app.appName, receipt: receipt, notes: notes)
+        }
+        notes.add("Updated the copy in \(copy.folder) from \(copy.versionLabel) to \(release.label).", changed: true, onlyWhenPartial: true)
+        if let trashed {
+            notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)")
+            if let hidden = trashed.hiddenNote { notes.add(hidden) }
+        } else {
+            notes.add("The previous copy could not be moved to the Trash (\(trashFailure ?? "")); it is at \(old.path).")
         }
     }
 
@@ -274,8 +293,10 @@ public struct AppInstaller: Sendable {
                     let trashed = try trash.trash(aside, appName: app.appName, at: clock())
                     notes.add("Moved \(app.name) \(copy.versionLabel) (\(copy.folder)) to the Trash: \(trashed.url.path)", changed: true)
                     if let hidden = trashed.hiddenNote { notes.add(hidden, changed: true) }
-                } catch let failure as InstallFailure {
-                    throw InstallFailure(.trash, failure.message + Self.putBack(aside, bundle, notes))
+                } catch {
+                    // Whatever the Trash threw, the copy was not moved: it is put back, or where it is is said.
+                    let why = (error as? InstallFailure)?.message ?? "\(copy.path) cannot be moved to the Trash (\(error.localizedDescription))"
+                    throw InstallFailure(.trash, why + Self.putBack(aside, bundle, notes))
                 }
             }
             // The receipt goes only when no copy that is or may be the app is in either folder any more, decided as
@@ -593,26 +614,83 @@ public struct AppInstaller: Sendable {
         return (old, verified)
     }
 
-    /// After an update's swap, `target` no longer holds the verified copy (changed or removed while the image was
-    /// cleaned up): the receipt is put back as it was before (`previousReceipt`, or none), and the previous copy, `old`,
-    /// is put back when nothing is at `target`, otherwise kept where it is and named. Always throws, saying what
-    /// happened; it is a change only when the previous copy stays aside or the receipt cannot be put back.
+    /// After an update's swap, `target` no longer holds the verified copy (changed or removed while the image was cleaned
+    /// up or while the previous copy went to the Trash): the receipt is put back as it was before (`receipt.previous`),
+    /// and the previous copy, `previous` (under its hidden name, or in the Trash when `inTrash`), is put back when nothing
+    /// is at `target`, otherwise left where it is and named. Always throws, saying what happened and claiming the
+    /// receipt was put back only when it was; it is a change only when the previous copy stays away or the receipt
+    /// could not be put back.
     private func keepPrevious(
-        _ old: URL, target: URL, appName: String, receipt: ReceiptDocument?, previousReceipt: Data?, notes: Notes
-    ) throws {
+        _ previous: URL, inTrash: Bool, target: URL, appName: String, receipt: (file: URL, previous: ReceiptSnapshot)?, notes: Notes
+    ) throws -> Never {
         let why = "\(target.path) was changed or removed after the new copy was put there (by the subset command?)"
+        var receiptBack = false
         if let receipt {
-            let restored = previousReceipt.map { (try? $0.write(to: receipt.file, options: .atomic)) != nil }
-                ?? (unlink(receipt.file.path) == 0 || errno == ENOENT)
-            if !restored {
-                notes.add("The receipt \(receipt.file.path), written for the new copy, could not be put back as it was (\(Self.errnoText())).", changed: true)
+            if let failure = Self.restoreReceipt(receipt.previous, to: receipt.file) {
+                notes.add("The receipt \(receipt.file.path), written for the new copy, could not be put back as it was (\(failure)).", changed: true)
+            } else {
+                receiptBack = true
             }
         }
-        if Self.identity(target) == nil, renamex_np(old.path, target.path, UInt32(RENAME_EXCL)) == 0 {
-            throw InstallFailure(.install, "\(why), so the previous copy and its receipt were put back")
+        if Self.identity(target) == nil, renamex_np(previous.path, target.path, UInt32(RENAME_EXCL)) == 0 {
+            let what = receiptBack ? "the previous copy and its receipt were" : "the previous copy was"
+            throw InstallFailure(.install, "\(why), so \(what) put back\(inTrash ? " from the Trash" : "")")
         }
-        notes.add("The previous copy of \(appName) is kept at \(old.path); rename it to \(target.path) to use it again.", changed: true)
-        throw InstallFailure(.install, "\(why), so it was left as it is and the previous copy was kept")
+        let place = inTrash ? "in the Trash at \(previous.path)" : "kept at \(previous.path)"
+        notes.add("The previous copy of \(appName) is \(place); rename it to \(target.path) to use it again.", changed: true)
+        throw InstallFailure(.install, "\(why), so it was left as it is and the previous copy was \(inTrash ? "left in the Trash" : "kept")")
+    }
+
+    /// The receipt as it is before an update: none (ENOENT), or the bytes of a regular file within Receipt.maxBytes,
+    /// opened without following a link or waiting for a writer. Anything else (unreadable, a folder, a pipe, a link,
+    /// too large) throws: it could not be put back if the update were undone, so the update does not start.
+    static func snapshotReceipt(_ file: URL) throws -> ReceiptSnapshot {
+        let refuse = { (why: String) in
+            InstallFailure(.receipt, "the receipt \(file.path) cannot be read (\(why)); move it aside and try again")
+        }
+        let descriptor = open(file.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return .absent }
+            throw refuse(errno == ELOOP ? "it is a symbolic link" : errnoText())
+        }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else { throw refuse(errnoText()) }
+        guard status.st_mode & S_IFMT == S_IFREG else { throw refuse("it is not a regular file") }
+        var data = Data(count: Receipt.maxBytes + 1)
+        var size = 0
+        let failure = data.withUnsafeMutableBytes { buffer -> Int32? in
+            while size < buffer.count {
+                let count = Darwin.read(descriptor, buffer.baseAddress! + size, buffer.count - size)
+                if count == 0 { return nil }
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    return errno
+                }
+                size += count
+            }
+            return nil
+        }
+        if let failure { throw refuse(String(cString: strerror(failure))) }
+        guard size <= Receipt.maxBytes else { throw refuse("it is larger than \(Receipt.maxBytes) bytes") }
+        data.count = size
+        return .contents(data)
+    }
+
+    /// Puts the receipt back as `snapshot` says it was: its bytes written beside it and renamed over it (atomic), or
+    /// none. Returns why that failed, or nil.
+    static func restoreReceipt(_ snapshot: ReceiptSnapshot, to file: URL) -> String? {
+        switch snapshot {
+        case .absent:
+            return unlink(file.path) == 0 || errno == ENOENT ? nil : errnoText()
+        case .contents(let data):
+            do {
+                try data.write(to: file, options: .atomic)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
     }
 
     /// What an interrupted update or move to the Trash (here or by `subset`) left beside `<appName>.app` under a hidden
@@ -791,6 +869,12 @@ public struct AppInstaller: Sendable {
     }
 
     static func errnoText() -> String { String(cString: strerror(errno)) }
+}
+
+/// A receipt as it was before an update: none, or its bytes.
+enum ReceiptSnapshot: Equatable, Sendable {
+    case absent
+    case contents(Data)
 }
 
 /// A file's device and inode: the copy checked is the copy changed.
