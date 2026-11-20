@@ -1,0 +1,29 @@
+native/subset/Core/CommandLine/HelperExamples.swift
+  s_dbeea1912fee4a::t_7265f70e5e582c 1,15-20,30,34-39,43-44,47-50,59,65-69,71
+native/subset/Core/CommandLine/SubsetCommandDetector.swift
+  s_dbeea1912fee4a::t_f60b869c9ee8e5 25,27-33,36-37,58-62,64,67-77,81,85-87,101-102,107,113,116,118,120-121,124-130,136,148-149
+native/subset/Core/Install/ToolRunner.swift
+  s_dbeea1912fee4a::t_5c2fe7d9dbb2e9 25-26,33-34,37,73,90,105
+native/subset/MacApp/CommandLineSection.swift
+  s_dbeea1912fee4a::t_1cea36ada345f2 24-25,29,34-37
+native/subset/README.md
+  s_dbeea1912fee4a::t_0780bc9a3d4412 73,75,77
+native/subset/Tests/CoreTests/CommandLineTests.swift
+  s_dbeea1912fee4a::t_16569522bfb416 10-11,15-16,23,38,52,55-56,63-64,77,79,91,102-103,113-114,121-122,124-129,131,179,191,201-202,219,239,262,268-278,288-292,294-295,300,346,349-350,366,370,374-375,380,384,386,389-390,420-421,424-427,429-434,441-446,449-450,454-467,488-489,518-526,546
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c24ed8d62fec1ce0019a58f11b0202cd803779e3",
+  "prompts": {},
+  "sessions": {
+    "s_dbeea1912fee4a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_dbeea1912fee4a",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
