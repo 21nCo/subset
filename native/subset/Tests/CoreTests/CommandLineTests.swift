@@ -371,6 +371,32 @@ final class CommandLineTests: XCTestCase {
         XCTAssertEqual(onMain.paths.count, 0, "a helper was looked up on the main thread")
     }
 
+    /// Each look for the installed apps looks the helpers up again, also when it found the same copies (a helper added
+    /// to the same copy), and nothing else starts a lookup.
+    @MainActor
+    func testHelpersAreLookedUpAgainAfterEachLookForInstalledApps() async throws {
+        let timer = app("timer", "Timer", helpers: [helper("timer", kind: "node")])
+        let catalog = Catalog(generatedAt: "2026-11-20T00:00:00Z", apps: [timer], tools: [])
+        let loaded = LoadedCatalog(catalog: catalog, url: URL(string: "https://example.invalid/catalog.json")!, fetchedAt: Date(), cached: false)
+        let suite = "subset-helpers-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let list = AppListModel(loader: RecordedLoader([.success(loaded)]), finder: SameCopies(), defaults: defaults)
+        let state = HelperState()
+        let helpers = HelperExamplesModel { _, _ in state.lookUp() }
+        helpers.follow(list)
+        await list.refresh()
+        for _ in 0..<100 where helpers.examples.first?.missingFromCopy != true { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(helpers.examples.map(\.missingFromCopy), [true])
+        let looks = state.lookups
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(state.lookups, looks, "a lookup started with nothing looked for again")
+        state.missing = false
+        await list.reloadInstalled()
+        for _ in 0..<100 where helpers.examples.first?.missingFromCopy != false { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(helpers.examples.map(\.missingFromCopy), [false])
+    }
+
     /// Only a `subset` older than `minimumLauncherVersion` is known to run no bundled command; the `subset.dev` in this
     /// checkout is not older.
     func testOnlyALauncherOlderThanTheMinimumVersionIsKnownToRunNoBundledCommand() throws {
@@ -431,6 +457,32 @@ final class CommandLineTests: XCTestCase {
 
     private func helper(_ command: String, kind: String = "native") -> CatalogHelper {
         CatalogHelper(command: command, path: kind == "node" ? "Contents/Resources/\(command)-cli/dist/cli.mjs" : "Contents/Helpers/\(command)", kind: kind)
+    }
+}
+
+/// Finds the same copy of Timer every time.
+private final class SameCopies: InstalledAppDetecting, @unchecked Sendable {
+    func detect(_ apps: [CatalogApp]) -> [String: [InstalledCopy]] {
+        ["timer": [InstalledCopy(path: "/Applications/Timer.app", folder: "/Applications", version: "0.1.0", build: "1", channel: nil)]]
+    }
+}
+
+/// Whether the helper is missing, and how many lookups asked.
+private final class HelperState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answer = true
+    private var count = 0
+    var missing: Bool {
+        get { lock.withLock { answer } }
+        set { lock.withLock { answer = newValue } }
+    }
+    var lookups: Int { lock.withLock { count } }
+
+    func lookUp() -> Bool {
+        lock.withLock {
+            count += 1
+            return answer
+        }
     }
 }
 
@@ -547,15 +599,33 @@ final class CommandLineLoginShellTests: XCTestCase {
     }
 
     /// The version command gets what the login files set: an unset variable stays unset, an exported one is there, and a
-    /// relative PATH entry is found from the folder they changed to, even when they exported another PWD.
+    /// relative PATH entry is found from the folder they changed to (its name has a line break), even when they exported
+    /// another PWD and sent the shell's output to a log, which gets none of the environment.
     func testTheVersionCommandRunsInTheLoginShellsEnvironmentAndDirectory() async throws {
-        let profile = "unset NODE_OPTIONS\nSUBSET_LOGIN=yes; export SUBSET_LOGIN\ncd \"$SUBSET_TEST_FOLDER\"\nPWD=/usr; export PWD\nPATH=\"bin:$PATH\"; export PATH\n"
+        let profile = """
+            exec >> "$HOME/login.log" 2>&1
+            unset NODE_OPTIONS
+            SUBSET_LOGIN=test-login-value; export SUBSET_LOGIN
+            cd "$SUBSET_TEST_FOLDER/two"$'\\n'"lines"
+            PWD=/usr; export PWD
+            PATH="bin:$PATH"; export PATH
+            echo "login done"
+
+            """
         let fixture = try Fixture(
             home: [".bash_profile": profile],
-            subset: "[ -z \"$NODE_OPTIONS\" ] && [ \"$SUBSET_LOGIN\" = yes ] && [ -d bin ] && echo 1.2.3\n", onPath: false
+            subset: "[ -z \"$NODE_OPTIONS\" ] && [ \"$SUBSET_LOGIN\" = test-login-value ] && [ -d bin ] && echo 1.2.3\n", onPath: false
         )
+        let lines = fixture.folder.appendingPathComponent("two\nlines/bin")
+        try FileManager.default.createDirectory(at: lines, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: fixture.folder.appendingPathComponent("bin/subset"), to: lines.appendingPathComponent("subset"))
         setenv("NODE_OPTIONS", "--require /no/such/preload.js", 1)
         defer { fixture.remove() }
+        defer {
+            let log = (try? String(contentsOf: fixture.folder.appendingPathComponent("home/login.log"), encoding: .utf8)) ?? ""
+            XCTAssertTrue(log.contains("login done"))
+            XCTAssertFalse(log.contains("test-login-value"), "the environment went to the shell's log")
+        }
         let found = await SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")).detect()
         XCTAssertEqual(found, .installed(version: "1.2.3"))
     }
@@ -609,6 +679,35 @@ final class CommandLineLoginShellTests: XCTestCase {
             let ended = await Self.ends(pid)
             XCTAssertTrue(ended, "\(shell): the startup job is still running after the check was stopped")
         }
+    }
+
+    /// A job a startup file started in the background with job control on (a process group of its own) that outlives
+    /// the shell is stopped once the shell has ended and when the model stops.
+    @MainActor
+    func testABackgroundStartupJobThatOutlivesTheShellIsStopped() async throws {
+        let job = "set -m\n\"$SUBSET_TEST_FOLDER/bin/subset\" --job &\n"
+        let subset = "if [ \"$1\" = --job ]; then echo $$ > \"$SUBSET_TEST_FOLDER/job-pid\"; exec sleep 120; fi\necho 1.2.3\n"
+        let fixture = try Fixture(home: [".bash_profile": job], subset: subset)
+        var pid: pid_t = 0
+        defer {
+            if pid > 0 { kill(pid, SIGKILL) }
+            fixture.remove()
+        }
+        let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")))
+        await model.check()
+        XCTAssertEqual(model.status, .installed(version: "1.2.3"))
+        // The job runs on its own, so it may write its pid after the answer.
+        let pidFile = fixture.folder.appendingPathComponent("job-pid")
+        for _ in 0..<100 where pid == 0 {
+            pid = (try? String(contentsOf: pidFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+            if pid == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
+        }
+        XCTAssertGreaterThan(pid, 0, "the startup job never ran")
+        XCTAssertEqual(getpgid(pid), pid, "the job is not in a process group of its own")
+        await model.stop()
+        XCTAssertFalse(model.hasRunningShell)
+        let ended = await Self.ends(pid)
+        XCTAssertTrue(ended, "the background startup job is still running after the model stopped")
     }
 
     /// Each login shell, csh and tcsh too, finds `subset` on the PATH only its login file sets, and nothing without it,

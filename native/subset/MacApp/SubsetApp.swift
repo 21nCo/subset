@@ -19,7 +19,7 @@ struct SubsetApp: App {
         .menuBarExtraStyle(.menu)
 
         Window(SubsetIdentity.appName, id: SubsetIdentity.mainWindowID) {
-            MainWindowView(model: appDelegate.model, actions: appDelegate.actions, commandLine: appDelegate.commandLine)
+            MainWindowView(model: appDelegate.model, actions: appDelegate.actions, commandLine: appDelegate.commandLine, helpers: appDelegate.helpers)
         }
         .defaultSize(width: 720, height: 480)
     }
@@ -33,6 +33,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     lazy var actions = AppActions(installer: AppInstaller(setup: .standard()), model: model)
     /// Whether the `subset` command is on the PATH, for the window's Command Line section.
     let commandLine = CommandLineModel(detector: .standard())
+    /// The examples of the installed apps' commands, looked up again after each look for the installed apps.
+    lazy var helpers: HelperExamplesModel = {
+        let helpers = HelperExamplesModel()
+        helpers.follow(model)
+        return helpers
+    }()
 
     func applicationWillFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the policy

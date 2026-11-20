@@ -98,7 +98,8 @@ public enum HelperExamples {
 
 /// The Command Line section's examples. They are shown at once; whether each helper is missing from its copy is looked
 /// up on a thread of its own, never the main thread (a stalled volume would freeze the window), and shown when known.
-/// `update` is called whenever the installed apps are looked for again (after an install, update or move to the Trash).
+/// `follow` looks them up again after each look for the installed apps (after an install, update or move to the Trash
+/// too), also when it found what was already shown, since a helper can be added to or removed from the same copy.
 /// At most `maxLookups` lookups run at once, so a stalled volume holds no more threads; the newest one asked for while
 /// they run starts when one ends, and an older lookup never replaces a newer one's result.
 @MainActor
@@ -116,9 +117,20 @@ public final class HelperExamplesModel: ObservableObject {
     private var shown = 0
     private var running = 0
     private var pending: (number: Int, paths: [(String, String)])?
+    private var following: AnyCancellable?
 
     public init(isMissing: @escaping @Sendable (String, String) -> Bool = HelperExamples.isMissing) {
         self.isMissing = isMissing
+    }
+
+    /// Updates the examples after each look `list` shows for the installed apps, once it is set (one subscription).
+    public func follow(_ list: AppListModel) {
+        following = list.$installedLooks.receive(on: RunLoop.main).sink { [weak self, weak list] _ in
+            MainActor.assumeIsolated {
+                guard let self, let list else { return }
+                self.update(apps: list.catalog?.apps ?? [], installed: list.installed)
+            }
+        }
     }
 
     public func update(apps: [CatalogApp], installed: [String: [InstalledCopy]]) {
@@ -154,7 +166,8 @@ public final class HelperExamplesModel: ObservableObject {
     }
 
     private func publish() {
-        examples = HelperExamples.examples(apps: apps, installed: installed) { missing[Self.key($0, $1)] ?? false }
+        let shown = HelperExamples.examples(apps: apps, installed: installed) { missing[Self.key($0, $1)] ?? false }
+        if shown != examples { examples = shown }
     }
 
     private nonisolated static func key(_ bundle: String, _ relative: String) -> String { bundle + "\u{0}" + relative }

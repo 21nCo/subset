@@ -9,7 +9,7 @@ struct MainWindowView: View {
     @ObservedObject var model: AppListModel
     @ObservedObject var actions: AppActions
     let commandLine: CommandLineModel
-    @StateObject private var helpers = HelperExamplesModel()
+    let helpers: HelperExamplesModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,10 +26,6 @@ struct MainWindowView: View {
             content
             Divider()
             CommandLineSection(model: commandLine, helpers: helpers)
-                // Each look for the installed apps (after an install, update or move to the Trash too) looks for their helpers.
-                .onReceive(model.$installed.combineLatest(model.$catalog)) { installed, catalog in
-                    helpers.update(apps: catalog?.apps ?? [], installed: installed)
-                }
         }
         .frame(minWidth: 560, minHeight: 360)
         .toolbar {

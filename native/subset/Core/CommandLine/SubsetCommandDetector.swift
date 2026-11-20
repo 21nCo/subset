@@ -47,7 +47,8 @@ public struct LoginEnvironment: Equatable, Sendable {
 /// The user's login shell, run as an interactive login shell, so the environment set in its startup files (a PATH from
 /// nvm, fnm or Homebrew, an unset NODE_OPTIONS) applies. It is started as login(1) starts one, with `-` before its name as argument zero, and `-ic`, which zsh, bash,
 /// sh, ksh, dash, fish, tcsh and csh all accept (tcsh and csh reject `-ilc`). It runs with nothing on its standard
-/// input, in its own process group, and is stopped with everything it started after `timeout` (`ToolRunner`).
+/// input but the app's private channel, in a session of its own, and is stopped with everything it started after `timeout`
+/// (`ToolRunner`).
 public struct LoginShell: CommandShell {
     public let path: String
 
@@ -66,17 +67,20 @@ public struct LoginShell: CommandShell {
         [account, environment].compactMap { $0 }.first { $0.hasPrefix("/") && isExecutable($0) } ?? "/bin/zsh"
     }
 
-    /// The shell line runs one process, awk, which prints its environment (the shell's exported variables) and the
-    /// folder the shell is in (`pwd -P`: PWD can be unset or name another folder) on the shell's standard output, framed
-    /// by a line made up for this check: `<mark>\n`, each NAME=value and the folder followed by NUL, `<mark>\n`. Nothing
-    /// is written to disk and no path is in the line; what the shell itself prints around the frame does not count, and
-    /// no shell command runs inside it. The line reads the same in every shell above (single quotes, no `!`). It starts
-    /// with `set +m` (job control off), so a startup file that turns it on does not give the work of an EXIT trap or
-    /// logout file a process group of its own; csh and tcsh only print an error. A job that still gets one is stopped
-    /// with the shell's descendants (`ToolRunner`).
+    /// The shell line runs one process, awk, which writes its environment (the shell's exported variables) and the
+    /// folder the shell is in (every line of `pwd -P`: PWD can be unset or name another folder) to /dev/stdin, the
+    /// app's private channel (`ToolRunner`), which a startup file redirecting the shell's output to a log does not
+    /// change, framed by a line made up for this check: `<mark>\n`, each NAME=value and the folder followed by NUL,
+    /// `<mark>\n`. Nothing is written to disk or to the shell's output, no path is in the line, and no shell command runs
+    /// inside the frame. The line reads the same in every shell above (single quotes, no `!`). It starts with `set +m`
+    /// (job control off), so a startup file that turns it on does not give the work of an EXIT trap or logout file a
+    /// process group of its own; csh and tcsh only print an error. The shell leads a session of its own, so a job that
+    /// still gets a group of its own is stopped with it.
     static func script(mark: String) -> String {
-        "set +m; /usr/bin/awk 'BEGIN { \"/bin/pwd -P\" | getline folder; printf \"%s\\n\", \"\(mark)\"; "
-            + "for (name in ENVIRON) printf \"%s=%s%c\", name, ENVIRON[name], 0; printf \"%s%c%s\\n\", folder, 0, \"\(mark)\" }'"
+        let write = "> \"/dev/stdin\""
+        return "set +m; /usr/bin/awk 'BEGIN { while ((\"/bin/pwd -P\" | getline line) > 0) folder = folder (n++ ? \"\\n\" : \"\") line; "
+            + "printf \"%s\\n\", \"\(mark)\" \(write); for (name in ENVIRON) printf \"%s=%s%c\", name, ENVIRON[name], 0 \(write); "
+            + "printf \"%s%c%s\\n\", folder, 0, \"\(mark)\" \(write) }'"
     }
 
     /// The environment and folder in a complete frame of `script(mark:)` in `output`, or nil until the frame is complete.
@@ -106,7 +110,7 @@ public struct LoginShell: CommandShell {
         let mark = "subset-check-" + UUID().uuidString
         let output = Snapshot()
         let name = "-" + (path as NSString).lastPathComponent
-        _ = try? await ToolRunner.run(path, ["-ic", Self.script(mark: mark)], argv0: name, timeout: timeout) { chunk in
+        _ = try? await ToolRunner.run(path, ["-ic", Self.script(mark: mark)], argv0: name, timeout: timeout, ownSession: true) { chunk in
             if let snapshot = output.add(chunk, mark: mark) { found(snapshot) }
         }
     }

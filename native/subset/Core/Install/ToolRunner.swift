@@ -19,14 +19,17 @@ struct ToolResult: Sendable {
 /// task is cancelled and `cancellable` is true, the group is sent SIGTERM, then SIGKILL 5 seconds later, and the result
 /// has no status. Past 1 MiB nothing more is kept and the output pipes are closed, so a writer that ignores SIGTERM ends
 /// on SIGPIPE. A stopped tool settles once its output has ended and its group is empty, or 5 seconds after the
-/// SIGKILL, so nothing waits forever. A process the tool started in a group of its own (a job a shell with job control
-/// on started) is signalled with it, found among the tool's descendants at each signal and while it stops, and the
-/// tool settles only once they are gone too, or at that same bound. A tool that exits by itself settles when its output ends; when a process it
+/// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
 /// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell; `environment`
-/// and `directory`, when given, replace this process's environment and working directory. `onStdout` gets the standard
-/// output as it arrives, before the tool ends.
+/// and `directory`, when given, replace this process's environment and working directory. With `channel`, the tool's
+/// standard input is instead the writing end of a pipe whose data `channel` gets as it arrives (not kept in the result):
+/// a channel a shell's startup files cannot send elsewhere by redirecting its output. With `ownSession`, the tool
+/// leads a session of its own, which every process it starts stays in even in a process group of its own (a job a
+/// shell with job control on started) and after the tool exits; stopping it signals every process in that session,
+/// and it settles only once they are gone too, or at the same bound. Only a process that starts a session itself
+/// leaves it.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
@@ -34,11 +37,12 @@ enum ToolRunner {
 
     static func run(
         _ path: String, _ arguments: [String], argv0: String? = nil, environment: [String: String]? = nil, directory: String? = nil,
-        timeout: TimeInterval = 300, cancellable: Bool = true, onStdout: (@Sendable (Data) -> Void)? = nil
+        timeout: TimeInterval = 300, cancellable: Bool = true, ownSession: Bool = false, channel: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
         let run = try ToolRun(
-            path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout, onStdout: onStdout
+            path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout,
+            ownSession: ownSession, channel: channel
         )
         let result = await withTaskCancellationHandler {
             await run.result()
@@ -74,39 +78,42 @@ private final class ToolRun: @unchecked Sendable {
     private var givenUp = false
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
-    private let onStdout: (@Sendable (Data) -> Void)?
-    /// The tool's descendants seen since it was first signalled, by pid and start time, so a reused pid is never signalled.
-    private var descendants: [pid_t: UInt64] = [:]
-    /// The last signal sent, which a descendant found later gets too.
-    private var lastSignal: Int32?
+    private let ownSession: Bool
+    private let channel: (@Sendable (Data) -> Void)?
+    private var channelBytes = 0
 
     init(
         path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval,
-        onStdout: (@Sendable (Data) -> Void)?
+        ownSession: Bool, channel: (@Sendable (Data) -> Void)?
     ) throws {
-        self.onStdout = onStdout
+        self.ownSession = ownSession
+        self.channel = channel
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
+        var side: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard pipe(&err) == 0 else {
+        guard pipe(&err) == 0, channel == nil || pipe(&side) == 0 else {
             let code = errno
-            close(out[0]); close(out[1])
+            for fd in out + err where fd >= 0 { close(fd) }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
-        for fd in [out[0], err[0]] { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        let readEnds = channel == nil ? [out[0], err[0]] : [out[0], err[0], side[0]]
+        for fd in readEnds { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        if channel == nil { posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0) } else { posix_spawn_file_actions_adddup2(&actions, side[1], 0) }
         posix_spawn_file_actions_adddup2(&actions, out[1], 1)
         posix_spawn_file_actions_adddup2(&actions, err[1], 2)
         if let directory { posix_spawn_file_actions_addchdir_np(&actions, directory) }
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        // Its own group (pgid = its pid), only stdin, stdout and stderr open, default signal handling and no blocked signals.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // Its own group (pgid = its pid), or its own session, which also makes it its own group; only stdin, stdout and
+        // stderr open, default signal handling and no blocked signals.
+        let group = ownSession ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP
+        posix_spawnattr_setflags(&attributes, Int16(group | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
         var all = sigset_t()
         sigfillset(&all)
@@ -122,17 +129,19 @@ private final class ToolRun: @unchecked Sendable {
         let code = posix_spawn(&child, path, &actions, &attributes, argv, envp)
         close(out[1])
         close(err[1])
+        if channel != nil { close(side[1]) }
         guard code == 0 else {
-            close(out[0]); close(err[0])
+            for fd in readEnds { close(fd) }
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         pid = child
 
         queue.sync {
-            for (fd, isOut) in [(out[0], true), (err[0], false)] {
+            open = readEnds.count
+            for (fd, stream) in zip(readEnds, [Stream.out, .err, .channel]) {
                 _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
                 let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-                source.setEventHandler { [unowned self, unowned source] in read(fd, from: source, isOut: isOut) }
+                source.setEventHandler { [unowned self, unowned source] in read(fd, from: source, stream) }
                 source.setCancelHandler { [self] in
                     close(fd)
                     open -= 1
@@ -169,8 +178,10 @@ private final class ToolRun: @unchecked Sendable {
         queue.async { [self] in stopOnQueue(reason) }
     }
 
+    private enum Stream { case out, err, channel }
+
     /// One read per event, so the timers and stop requests queued meanwhile run between reads.
-    private func read(_ fd: Int32, from source: DispatchSourceRead, isOut: Bool) {
+    private func read(_ fd: Int32, from source: DispatchSourceRead, _ stream: Stream) {
         var buffer = [UInt8](repeating: 0, count: 65536)
         var count: Int
         repeat { count = Darwin.read(fd, &buffer, buffer.count) } while count < 0 && errno == EINTR
@@ -180,12 +191,14 @@ private final class ToolRun: @unchecked Sendable {
             source.cancel()
             return
         }
-        let room = max(0, ToolRunner.maxOutputBytes - stdout.count - stderr.count)
-        if isOut {
-            stdout.append(contentsOf: buffer[0..<min(count, room)])
-            if room > 0 { onStdout?(Data(buffer[0..<min(count, room)])) }
-        } else {
-            stderr.append(contentsOf: buffer[0..<min(count, room)])
+        let room = max(0, ToolRunner.maxOutputBytes - (stream == .channel ? channelBytes : stdout.count + stderr.count))
+        let kept = buffer[0..<min(count, room)]
+        switch stream {
+        case .out: stdout.append(contentsOf: kept)
+        case .err: stderr.append(contentsOf: kept)
+        case .channel:
+            channelBytes += kept.count
+            if !kept.isEmpty { channel?(Data(kept)) }
         }
         guard count > room else { return }
         // Nothing more is kept: the pipes close (a process still writing gets SIGPIPE) and the group is stopped.
@@ -223,46 +236,26 @@ private final class ToolRun: @unchecked Sendable {
     }
 
     /// Signals the tool's group, even when the tool itself has exited; the tool alone when it left its group. Both stay
-    /// its own until it is reaped, which happens only once nothing more is signalled. Its descendants are found first
-    /// (a parent signalled first could end and leave them to launchd) and signalled too.
+    /// its own until it is reaped, which happens only once nothing more is signalled.
     private func signal(_ signal: Int32) {
-        lastSignal = signal
-        signalDescendants()
         if killpg(pid, signal) != 0, waitStatus == nil { kill(pid, signal) }
+        // Each process's session is read just before it is signalled; the session's ID is the tool's pid, its own until
+        // it is reaped.
+        for member in sessionMembers where getsid(member) == pid { kill(member, signal) }
     }
 
-    /// Adds the descendants the tool has now to those seen, and sends the last signal to each still running.
-    private func signalDescendants() {
-        guard let lastSignal else { return }
-        var parents = [pid]
-        while let parent = parents.popLast(), descendants.count < 512 {
-            var children = [pid_t](repeating: 0, count: 256)
-            let count = proc_listchildpids(parent, &children, Int32(children.count * MemoryLayout<pid_t>.size))
-            for child in children.prefix(Int(max(0, count))) where child > 0 && descendants[child] == nil {
-                guard let started = Self.startTime(child) else { continue }
-                descendants[child] = started
-                parents.append(child)
-            }
-        }
-        for (child, started) in descendants where Self.startTime(child) == started { kill(child, lastSignal) }
+    /// The processes other than the tool in its session, when it leads one.
+    private var sessionMembers: [pid_t] {
+        guard ownSession else { return [] }
+        var all = [pid_t](repeating: 0, count: 8192)
+        let count = proc_listallpids(&all, Int32(all.count * MemoryLayout<pid_t>.size))
+        return all.prefix(Int(max(0, count))).filter { $0 > 0 && $0 != pid && getsid($0) == pid }
     }
 
-    /// When the process started, or nil when there is no such process (a zombie counts as none).
-    private static func startTime(_ pid: pid_t) -> UInt64? {
-        var info = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != UInt32(SZOMB) else { return nil }
-        return info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
-    }
-
-    /// Whether every descendant seen has ended.
-    private var descendantsGone: Bool {
-        descendants.allSatisfy { Self.startTime($0.key) != $0.value }
-    }
-
-    /// Whether no process is left in the tool's group besides the exited, unreaped tool (EPERM from killpg means one is,
-    /// though it cannot be signalled, or only the unreaped tool is).
+    /// Whether no process is left in the tool's group or session besides the exited, unreaped tool (EPERM from killpg
+    /// means one is, though it cannot be signalled, or only the unreaped tool is).
     private var groupGone: Bool {
+        guard sessionMembers.isEmpty else { return false }
         if killpg(pid, 0) != 0, errno == ESRCH { return true }
         guard waitStatus != nil else { return false }
         var members = [pid_t](repeating: 0, count: 64)
@@ -278,7 +271,6 @@ private final class ToolRun: @unchecked Sendable {
     }
 
     private func poll() {
-        signalDescendants()
         finishIfDone()
         guard finished == nil else { return }
         queue.asyncAfter(deadline: .now() + 0.1) { [self] in poll() }
@@ -287,7 +279,7 @@ private final class ToolRun: @unchecked Sendable {
     private func finishIfDone() {
         guard finished == nil else { return }
         let settled: Bool
-        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone && descendantsGone } else { settled = waitStatus != nil && open == 0 }
+        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 }
         guard settled else { return }
         var text = String(decoding: stderr, as: UTF8.self)
         var status: Int32?
@@ -296,7 +288,7 @@ private final class ToolRun: @unchecked Sendable {
             if waitStatus & 0x7f == 0 { status = (waitStatus >> 8) & 0xff } else { text += "\nended by signal \(waitStatus & 0x7f)" }
         }
         if let stopping { text += "\nstopped: \(stopping)" }
-        if givenUp, !(open == 0 && groupGone && descendantsGone) { text += "\nstopped: a process it started did not exit" }
+        if givenUp, !(open == 0 && groupGone) { text += "\nstopped: a process it started did not exit" }
         let result = ToolResult(status: status, stdout: stdout, stderr: text)
         finished = result
         reap()
