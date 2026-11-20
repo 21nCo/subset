@@ -331,7 +331,9 @@ final class InstallReceiptAndActionsTests: XCTestCase {
             running.running.update { $0.insert(path) }
             running.cancelDuringQuit = true
             let (actions, _) = await actions(running: running)
-            actions.confirmQuit(QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: kind))
+            if kind == .update { actions.update("breaks") } else { actions.moveToTrash("breaks") }
+            await actions.wait("breaks")
+            actions.confirmQuit(try XCTUnwrap(actions.quitRequest, "\(kind)"))
             await actions.wait("breaks")
             switch kind {
             case .update:
@@ -550,12 +552,24 @@ final class InstallReceiptAndActionsTests: XCTestCase {
                         try await waitFor { actions.quitRequest == nil }
                     }
                     XCTAssertNil(actions.quitRequest, "\(label): no question stays")
-                    XCTAssertEqual(actions.activities["breaks"], .failed("Nothing was quit or changed: the list changed before Subset could quit Breaks, so it no longer asks. Try again."), label)
+                    // A row the list still shows says why; once it is gone, the window does.
+                    let withdrawn = "Nothing was quit or changed: the list changed before Subset could quit Breaks, so it no longer asks. Try again."
+                    if change == "removed" {
+                        XCTAssertEqual(actions.notice, "\(withdrawn) (Breaks is no longer listed.)", label)
+                    } else {
+                        XCTAssertEqual(actions.activities["breaks"], .failed(withdrawn), label)
+                    }
                     if let presented {
+                        actions.dismissNotice()
                         actions.dismissQuit(presented)
                         actions.confirmQuit(presented)
                         await actions.wait("breaks")
-                        XCTAssertEqual(actions.activities["breaks"], .failed("Nothing was quit or changed: the list changed while Subset asked to quit Breaks, so that answer no longer applies. Try again."), label)
+                        let stale = "Nothing was quit or changed: the list changed while Subset asked to quit Breaks, so that answer no longer applies. Try again."
+                        if change == "removed" {
+                            XCTAssertEqual(actions.notice, "\(stale) (Breaks is no longer listed.)", label)
+                        } else {
+                            XCTAssertEqual(actions.activities["breaks"], .failed(stale), label)
+                        }
                     }
                     XCTAssertFalse(actions.isWorking, label)
                     XCTAssertEqual(running.quits.get(), [], "\(label): nothing is quit")
@@ -590,12 +604,12 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         let first = try XCTUnwrap(actions.quitRequest)
         XCTAssertTrue(first.asks("breaks", apps[0], kind: .moveToTrash))
         await model.refresh()
-        try await waitFor { actions.activities["other"] != nil }
+        try await waitFor { actions.notice != nil }
         XCTAssertEqual(actions.quitRequest, first, "the presented question still applies")
         actions.dismissQuit(first)
         try await waitFor { actions.quitRequest != nil }
         XCTAssertEqual(actions.quitRequest?.asks("third", apps[2], kind: .moveToTrash), true, "the next question the list offers is asked")
-        XCTAssertEqual(actions.activities["other"], .failed("Nothing was quit or changed: the list changed before Subset could quit Other, so it no longer asks. Try again."))
+        XCTAssertEqual(actions.notice, "Nothing was quit or changed: the list changed before Subset could quit Other, so it no longer asks. Try again. (Other is no longer listed.)", "the window says so, as its row is gone")
         actions.dismissQuit(try XCTUnwrap(actions.quitRequest))
         XCTAssertEqual(running.quits.get(), [])
     }
@@ -676,6 +690,92 @@ final class InstallReceiptAndActionsTests: XCTestCase {
             XCTAssertEqual(running.quits.get(), [], "\(kind)")
             XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleShortVersionString"] as? String, "0.0.9", "\(kind)")
         }
+    }
+
+    // An answer to a question the row has since replaced grants nothing: Update is asked and declined, then Move to Trash
+    // is asked for the same running app, and the late Quit of the Update question neither starts the update nor clears
+    // the Move to Trash question, which still works.
+    func testAConfirmationOfAReplacedQuestionStartsNothing() async throws {
+        let path = system.appendingPathComponent("Breaks.app").path
+        try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.breaks", version: "0.0.9")
+        let running = FakeRunning()
+        running.running.update { $0.insert(path) }
+        let (actions, _) = await actions(running: running)
+        actions.update("breaks")
+        await actions.wait("breaks")
+        let update = try XCTUnwrap(actions.quitRequest)
+        actions.dismissQuit(update)
+        actions.moveToTrash("breaks")
+        await actions.wait("breaks")
+        let trash = try XCTUnwrap(actions.quitRequest)
+        XCTAssertTrue(trash.asks("breaks", AppInstallerTests.breaks, kind: .moveToTrash))
+        actions.confirmQuit(update)
+        XCTAssertFalse(actions.isBusy("breaks"), "the replaced question starts nothing")
+        XCTAssertEqual(actions.quitRequest, trash, "the question asked since stays")
+        XCTAssertNil(actions.activities["breaks"])
+        XCTAssertEqual(running.quits.get(), [])
+        XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleShortVersionString"] as? String, "0.0.9")
+        actions.dismissQuit(trash)
+        actions.confirmQuit(trash)
+        await actions.wait("breaks")
+        XCTAssertEqual(running.quits.get(), [path], "the question asked since is the one that works")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Trash").path).count, 1)
+    }
+
+    // Reads held up for good are bounded across rows and across a row's apps: a row whose read of an earlier app (the
+    // list changed since) is held up, or a fifth row while four reads are held up, is refused at once, with nothing read,
+    // quit or changed, and can be tried again once the reads end.
+    func testHeldUpReadsAreBoundedAcrossRowsAndAppsOfARow() async throws {
+        let names = ["A1", "A2", "A3", "A4", "A5"]
+        let paths = names.map { system.appendingPathComponent("\($0).app").path }
+        for (name, path) in zip(names, paths) {
+            try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.\(name.lowercased())", version: "0.0.9")
+        }
+        let copyPath = system.appendingPathComponent("A1Copy.app").path
+        try makeBundle(URL(fileURLWithPath: copyPath), bundleID: "dev.subset.a1", version: "0.0.9")
+        let running = FakeRunning()
+        running.running.update { $0.formUnion(paths + [copyPath]) }
+        let apps = names.map {
+            CatalogApp(id: $0.lowercased(), name: $0, summary: "s", appName: $0, bundleID: "dev.subset.\($0.lowercased())", live: AppInstallerTests.breaks.live, beta: nil)
+        }
+        let a1Copy = CatalogApp(id: "a1", name: "A1", summary: "s", appName: "A1Copy", bundleID: "dev.subset.a1", live: AppInstallerTests.breaks.live, beta: nil)
+        let (actions, model) = await actions(running: running, catalogs: [Self.catalog(apps), Self.catalog([a1Copy] + apps.dropFirst())])
+        let gate = DispatchSemaphore(value: 0)
+        let blocking = Recorder(true)
+        let reads = Recorder(0)
+        running.hold = {
+            reads.update { $0 += 1 }
+            if blocking.get() { gate.wait() }
+        }
+        let refused = { (name: String) in
+            AppActivity.failed("\(name) was not moved to the Trash: Subset is still waiting for an earlier check of which apps are running, which is held up. Nothing was quit or changed; try again in a moment.")
+        }
+        for (index, app) in apps.prefix(4).enumerated() {
+            actions.moveToTrash(app.id)
+            try await waitFor { reads.get() == index + 1 }
+            actions.cancel(app.id)
+            await actions.wait(app.id)
+        }
+        actions.moveToTrash("a5")
+        XCTAssertFalse(actions.canCancel("a5"), "a fifth read is not begun")
+        XCTAssertEqual(actions.activities["a5"], refused("A5"))
+        await model.refresh()
+        XCTAssertEqual(model.catalog?.apps.first?.appName, "A1Copy")
+        actions.moveToTrash("a1")
+        XCTAssertFalse(actions.canCancel("a1"), "the row's read of its earlier app is not joined")
+        XCTAssertEqual(actions.activities["a1"], refused("A1"))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(reads.get(), 4)
+        XCTAssertNil(actions.quitRequest)
+        XCTAssertEqual(running.quits.get(), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Trash").path), [])
+        blocking.update { $0 = false }
+        for _ in 0..<reads.get() { gate.signal() }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(actions.quitRequest, "the held-up reads, whose attempts were cancelled, ask nothing")
+        actions.moveToTrash("a5")
+        await actions.wait("a5")
+        XCTAssertEqual(actions.quitRequest?.asks("a5", apps[4], kind: .moveToTrash), true, "tried again once the reads ended")
     }
 
     private static func catalog(_ apps: [CatalogApp]) -> Catalog {
