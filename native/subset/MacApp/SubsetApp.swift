@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The Subset manager: a menu bar item whose menu opens the main window. There is no Dock icon (LSUIElement in
 /// Info.plist), so the menu is how the window is opened and reopened after it is closed. The window lists the catalog's
-/// apps (SET-246); installing them is SET-247.
+/// apps (SET-246), and installs, updates and moves them to the Trash (SET-247).
 @main
 struct SubsetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -18,7 +18,7 @@ struct SubsetApp: App {
         .menuBarExtraStyle(.menu)
 
         Window(SubsetIdentity.appName, id: SubsetIdentity.mainWindowID) {
-            MainWindowView(model: appDelegate.model)
+            MainWindowView(model: appDelegate.model, actions: appDelegate.actions)
         }
         .defaultSize(width: 720, height: 480)
     }
@@ -28,11 +28,24 @@ struct SubsetApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The catalog and installed apps, shared by the menu and the window.
     let model = AppListModel(loader: CatalogLoader.standard(), finder: InstalledAppFinder.standard())
+    /// The rows' Install, Update and Move to Trash buttons.
+    lazy var actions = AppActions(installer: AppInstaller(setup: .standard()), model: model)
 
     func applicationWillFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the policy
         // here too and both stay out of the Dock.
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    // Quitting while an install, update or move to the Trash runs cancels it and quits once it has cleaned up (no staged
+    // copy, private folder or attached image is left behind).
+    func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+        guard actions.isWorking else { return .terminateNow }
+        Task {
+            await actions.cancelAll()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationDidFinishLaunching(_: Notification) {
