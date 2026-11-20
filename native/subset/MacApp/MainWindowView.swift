@@ -3,10 +3,12 @@ import SubsetCore
 import SwiftUI
 
 /// The main window: every app in the catalog feed with what is installed, its newest live release, its newest beta when
-/// Show betas is on, an Update available badge, and Install, Update and Move to Trash buttons with their progress.
+/// Show betas is on, an Update available badge, and Install, Update and Move to Trash buttons with their progress; below
+/// it, the Command Line section.
 struct MainWindowView: View {
     @ObservedObject var model: AppListModel
     @ObservedObject var actions: AppActions
+    let commandLine: CommandLineModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +23,10 @@ struct MainWindowView: View {
                 .background(.yellow.opacity(0.15))
             }
             content
+            Divider()
+            CommandLineSection(
+                model: commandLine, examples: HelperExamples.examples(apps: model.catalog?.apps ?? [], installed: model.installed)
+            )
         }
         .frame(minWidth: 560, minHeight: 360)
         .toolbar {
