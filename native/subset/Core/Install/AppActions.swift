@@ -12,9 +12,12 @@ public enum AppActivity: Equatable, Sendable {
 /// An operation waiting for the user to agree that the running app may be quit. The answer holds only for the app it
 /// names (`appName`, `bundleID`, and `bundleName`, the `<bundleName>.app` it is installed as): when the row then lists
 /// another app, or the same one under another bundle name, nothing is quit.
+///
+/// Each request is one question (`id`), and two requests are equal only when they are the same question: a row asked
+/// again gets another one, so a late answer to the earlier question never clears it.
 public struct QuitRequest: Identifiable, Equatable, Sendable {
     public enum Kind: Sendable { case update, moveToTrash }
-    public var id: String { appID }
+    public let id = UUID()
     public var appID: String
     public var appName: String
     public var bundleID: String
@@ -29,8 +32,13 @@ public struct QuitRequest: Identifiable, Equatable, Sendable {
         self.kind = kind
     }
 
+    public static func == (lhs: QuitRequest, rhs: QuitRequest) -> Bool { lhs.id == rhs.id }
+
     /// Whether `app` is the app this request named.
     func names(_ app: CatalogApp) -> Bool { app.name == appName && app.bundleID == bundleID && app.appName == bundleName }
+
+    /// Whether this asks to quit `app`, shown in row `appID`, for `kind`.
+    func asks(_ appID: String, _ app: CatalogApp, kind: Kind) -> Bool { self.appID == appID && names(app) && self.kind == kind }
 
     public var title: String { "Quit \(appName)?" }
     public var message: String {
@@ -46,12 +54,16 @@ public struct QuitRequest: Identifiable, Equatable, Sendable {
 @MainActor
 public final class AppActions: ObservableObject {
     @Published public private(set) var activities: [String: AppActivity] = [:]
-    /// Set when an update or move to the Trash needs the user to agree to quit the app. It is cleared only by an answer
-    /// to that very request (`confirmQuit`, `dismissQuit`), so an alert that reports its answer twice clears it once.
+    /// Set when an update or move to the Trash needs the user to agree to quit the app. It is cleared by an answer to
+    /// that very request (`confirmQuit`, `dismissQuit`), so an alert that reports its answer twice clears it once, or
+    /// withdrawn, with a message on its row, once the list no longer offers that action for that app.
     @Published public private(set) var quitRequest: QuitRequest?
-    /// Requests of other rows that came while one was presented, in the order they came; the next is presented on a
-    /// later turn of the main actor once the presented one is answered, after its alert has gone.
+    /// Requests of other rows that came while one was presented, in the order they came; the next one the list still
+    /// offers is presented on a later turn of the main actor once the presented one is answered, after its alert has gone.
     private var waitingRequests: [QuitRequest] = []
+    /// Each app's read of whether it runs, one at a time per app: an attempt made while it is held up waits for it too.
+    private var runningReads: [String: RunningRead] = [:]
+    private var revalidationScheduled = false
 
     private let installer: AppInstaller
     private let model: AppListModel
@@ -71,7 +83,11 @@ public final class AppActions: ObservableObject {
     public init(installer: AppInstaller, model: AppListModel) {
         self.installer = installer
         self.model = model
-        modelChanges = model.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        modelChanges = model.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+            MainActor.assumeIsolated { self.scheduleRevalidation() }
+        }
     }
 
     /// Whether an operation on the app is running, or has ended and its app is being looked for again, or what is
@@ -86,11 +102,22 @@ public final class AppActions: ObservableObject {
     public func moveToTrash(_ appID: String) { start(appID, kind: .moveToTrash) }
 
     /// The user agreed to quit the app in `request`, the one the alert presented: its operation starts, only while the
-    /// row still lists that app (its bundle ID and name). It does not read `quitRequest`, which the alert may already
-    /// have cleared when it was dismissed.
+    /// row still lists that app (its bundle ID and name) and offers that action. Otherwise nothing is quit or changed and
+    /// the row says why. It does not read `quitRequest`, which the alert may already have cleared when it was dismissed.
+    /// Once Subset is quitting, or while the row runs another operation (whose message it shows), it does nothing.
     public func confirmQuit(_ request: QuitRequest) {
         dismissQuit(request)
-        start(request.appID, kind: request.kind, consent: request)
+        let appID = request.appID
+        guard !closed, tasks[appID] == nil else { return }
+        guard isValid(request) else {
+            activities[appID] = .failed("Nothing was quit or changed: the list changed while Subset asked to quit \(request.appName), so that answer no longer applies. Try again.")
+            return
+        }
+        guard model.knowsInstalled(appID) else {
+            activities[appID] = .failed("Nothing was quit or changed: the list of installed apps was still being read when \(request.appName) was to be quit. Try again once it shows \(request.appName).")
+            return
+        }
+        start(appID, kind: request.kind, consent: request)
     }
 
     /// The user declined `request`, or its alert went away: it is no longer presented and nothing is quit. Only the
@@ -99,6 +126,10 @@ public final class AppActions: ObservableObject {
     public func dismissQuit(_ request: QuitRequest) {
         guard quitRequest == request else { return }
         quitRequest = nil
+        scheduleNextQuestion()
+    }
+
+    private func scheduleNextQuestion() {
         guard !waitingRequests.isEmpty else { return }
         Task { @MainActor [weak self] in
             await Task.yield()
@@ -106,9 +137,53 @@ public final class AppActions: ObservableObject {
         }
     }
 
+    /// Presents the first waiting request the list still offers; those it no longer offers are withdrawn on the way.
     private func presentNextQuestion() {
-        guard !closed, quitRequest == nil, !waitingRequests.isEmpty else { return }
-        quitRequest = waitingRequests.removeFirst()
+        guard !closed, quitRequest == nil else { return }
+        while !waitingRequests.isEmpty {
+            let next = waitingRequests.removeFirst()
+            guard isValid(next), tasks[next.appID] == nil else {
+                withdraw(next)
+                continue
+            }
+            quitRequest = next
+            return
+        }
+    }
+
+    /// Whether the list still shows `request`'s row with the app it names and still offers its action there: an update
+    /// to offer, or a copy to move to the Trash.
+    private func isValid(_ request: QuitRequest) -> Bool {
+        guard let app = model.catalog?.apps.first(where: { $0.id == request.appID }), request.names(app) else { return false }
+        let copies = model.installed[request.appID] ?? []
+        switch request.kind {
+        case .update: return AppListModel.offeredRelease(app, copies, showBetas: model.showBetas) != nil
+        case .moveToTrash: return !copies.isEmpty
+        }
+    }
+
+    /// `request` is not asked (any more): its row, unless it runs another operation, says nothing was quit or changed.
+    private func withdraw(_ request: QuitRequest) {
+        guard tasks[request.appID] == nil else { return }
+        activities[request.appID] = .failed("Nothing was quit or changed: the list changed before Subset could quit \(request.appName), so it no longer asks. Try again.")
+    }
+
+    /// Once the model has changed (on a later turn of the main actor, as its change is announced before it is made),
+    /// withdraws the requests waiting or presented that the list no longer offers.
+    private func scheduleRevalidation() {
+        guard !revalidationScheduled, quitRequest != nil || !waitingRequests.isEmpty else { return }
+        revalidationScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.revalidationScheduled = false
+            for request in self.waitingRequests where !self.isValid(request) { self.withdraw(request) }
+            self.waitingRequests.removeAll { !self.isValid($0) }
+            if let presented = self.quitRequest, !self.isValid(presented) {
+                self.withdraw(presented)
+                self.quitRequest = nil
+                self.scheduleNextQuestion()
+            }
+        }
     }
 
     /// Stops a running operation; its message then says what it had already changed, if anything.
@@ -142,15 +217,11 @@ public final class AppActions: ObservableObject {
     /// Waits for the app's running operation, if any (tests).
     public func wait(_ appID: String) async { await tasks[appID]?.value }
 
-    /// Starts the app's operation. An update or move to the Trash without the user's `consent` first reads, off the main
-    /// actor and cancellably, whether the app runs; when it does, the row is freed and the user is asked (`quitRequest`).
+    /// Starts the app's operation. An update or move to the Trash without the user's `consent` (which `confirmQuit` has
+    /// checked against the row) first reads, off the main actor and cancellably, whether the app runs; when it does, the
+    /// row is freed and the user is asked (`quitRequest`).
     private func start(_ appID: String, kind: QuitRequest.Kind?, consent: QuitRequest? = nil) {
         guard !closed, !isBusy(appID), let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
-        // The answer was given for the app the alert named; a row that now lists another app quits nothing.
-        if let consent, !consent.names(app) {
-            activities[appID] = .failed("Nothing was quit or changed: the list changed while Subset asked to quit \(consent.appName), so that answer no longer applies. Try again.")
-            return
-        }
         let quitAllowed = consent != nil
         let copies = model.installed[appID] ?? []
         let release: ChosenRelease?
@@ -162,6 +233,13 @@ public final class AppActions: ObservableObject {
         if kind != .moveToTrash, release == nil { return }
         let installer = installer
         let check = kind != nil && !quitAllowed
+        let read = check ? runningRead(app) : nil
+        // A question this row still had waiting or presented is for an attempt this one replaces.
+        waitingRequests.removeAll { $0.appID == appID }
+        if quitRequest?.appID == appID {
+            quitRequest = nil
+            scheduleNextQuestion()
+        }
         activities[appID] = .working(check ? "Checking whether \(app.name) is running…" : "Starting…", fraction: nil)
         let progress: @Sendable (InstallProgress) -> Void = { [weak self] step in
             Task { @MainActor in self?.show(appID, step, release) }
@@ -171,7 +249,7 @@ public final class AppActions: ObservableObject {
             do {
                 // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that
                 // reason.
-                if check, try await Self.isRunning(installer, app) {
+                if let read, try await read.value(cancelled: Self.cancelledCheck) {
                     // Cancel pressed once the answer was in still ends the attempt: nothing is asked.
                     if Task.isCancelled { throw Self.cancelledCheck }
                     return nil
@@ -210,7 +288,7 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    private nonisolated static let cancelledCheck = InstallFailure(.interrupted, "it was cancelled before anything was changed")
+    fileprivate nonisolated static let cancelledCheck = InstallFailure(.interrupted, "it was cancelled before anything was changed")
 
     /// What a row says an operation did not do (or did only partly).
     private nonisolated static func notDone(_ kind: QuitRequest.Kind?, _ app: CatalogApp, _ release: ChosenRelease?, partly: Bool) -> String {
@@ -231,6 +309,8 @@ public final class AppActions: ObservableObject {
         activities[appID] = message
         guard let request, !closed else { return }
         waitingRequests.removeAll { $0.appID == appID }
+        // The list changed while the read ran: what it would ask is no longer offered for that app.
+        guard isValid(request) else { return withdraw(request) }
         if quitRequest == nil || quitRequest?.appID == appID {
             quitRequest = request
         } else {
@@ -238,21 +318,22 @@ public final class AppActions: ObservableObject {
         }
     }
 
-    /// Whether some installed copy of `app` runs, read on a thread of its own so a stalled folder or process list never
-    /// holds up the window. A cancel ends the wait at once (the read, which cannot be stopped, ends on its own). An answer
-    /// that cannot be read is false: the operation then starts without leave to quit and refuses with that reason.
-    private nonisolated static func isRunning(_ installer: AppInstaller, _ app: CatalogApp) async throws -> Bool {
-        let answer = OneAnswer()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                guard answer.wait(continuation) else { return }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    answer.give(.success((try? installer.isRunning(app)) == true))
-                }
-            }
-        } onCancel: {
-            answer.give(.failure(cancelledCheck))
+    /// The read of whether some installed copy of `app` runs, on a thread of its own so a stalled folder or process list
+    /// never holds up the window, and at most one at a time per app: an attempt made while an earlier one's read is held
+    /// up waits for that read (a cancel ends the wait at once, but not the read, which cannot be stopped and ends on its
+    /// own, answering only attempts still waiting). An answer that cannot be read is false: the operation then starts
+    /// without leave to quit and refuses with that reason.
+    private func runningRead(_ app: CatalogApp) -> RunningRead {
+        let key = [app.id, app.bundleID, app.appName].joined(separator: "\n")
+        if let read = runningReads[key], !read.isAnswered { return read }
+        runningReads = runningReads.filter { !$0.value.isAnswered }
+        let read = RunningRead()
+        runningReads[key] = read
+        let installer = installer
+        DispatchQueue.global(qos: .userInitiated).async {
+            read.give((try? installer.isRunning(app)) == true)
         }
+        return read
     }
 
     private func show(_ appID: String, _ step: InstallProgress, _ release: ChosenRelease?) {
@@ -307,33 +388,49 @@ public final class AppActions: ObservableObject {
     }
 }
 
-/// The first of a read's answer or a cancel, given to one waiting continuation exactly once.
-private final class OneAnswer: @unchecked Sendable {
+/// One read of whether an app runs, and the attempts waiting for its answer, each resumed exactly once: with the
+/// answer, or at once with `cancelled` when its task is cancelled first.
+private final class RunningRead: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, any Error>?
-    private var result: Result<Bool, any Error>?
+    private var answer: Bool?
+    private var waiting: [Int: CheckedContinuation<Bool, any Error>] = [:]
+    private var attempts = 0
 
-    /// Waits with `continuation`; returns false when the answer is already known (it is then resumed at once).
-    func wait(_ continuation: CheckedContinuation<Bool, any Error>) -> Bool {
-        lock.lock()
-        if let result {
-            lock.unlock()
-            continuation.resume(with: result)
-            return false
+    var isAnswered: Bool { lock.withLock { answer != nil } }
+
+    /// Gives the answer to every attempt waiting, and to any that waits later.
+    func give(_ value: Bool) {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Bool, any Error>] in
+            answer = value
+            defer { waiting = [:] }
+            return Array(waiting.values)
         }
-        self.continuation = continuation
-        lock.unlock()
-        return true
+        for waiter in waiters { waiter.resume(returning: value) }
     }
 
-    /// Gives the answer; any later one is dropped.
-    func give(_ answer: Result<Bool, any Error>) {
-        lock.lock()
-        guard result == nil else { return lock.unlock() }
-        result = answer
-        let waiting = continuation
-        continuation = nil
-        lock.unlock()
-        waiting?.resume(with: answer)
+    func value(cancelled: InstallFailure) async throws -> Bool {
+        let attempt = lock.withLock { () -> Int in
+            attempts += 1
+            return attempts
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if let answer {
+                    lock.unlock()
+                    return continuation.resume(returning: answer)
+                }
+                // Cancelled before it waits: the cancel handler, which runs after the task is marked, found nothing.
+                if Task.isCancelled {
+                    lock.unlock()
+                    return continuation.resume(throwing: cancelled)
+                }
+                waiting[attempt] = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            let waiter = lock.withLock { waiting.removeValue(forKey: attempt) }
+            waiter?.resume(throwing: cancelled)
+        }
     }
 }
