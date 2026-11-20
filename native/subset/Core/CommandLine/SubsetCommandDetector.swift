@@ -25,12 +25,23 @@ public struct ShellOutput: Equatable, Sendable {
 /// The user's login shell, which only tells the environment its startup files set, and a runner for the version command.
 public protocol CommandShell: Sendable {
     /// Runs the login shell until it ends or is stopped (`timeout`, or the calling task cancelled). `found` gets its
-    /// exported environment (with `PWD`, its working directory) as soon as it is known, which can be well before the
-    /// shell ends (an EXIT trap or a logout file still runs).
-    func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable ([String: String]) -> Void) async
+    /// exported environment and working directory as soon as they are known, which can be well before the shell ends
+    /// (an EXIT trap or a logout file still runs).
+    func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable (LoginEnvironment) -> Void) async
     /// Runs a program as the app's own process with `environment`, in `directory` when given. Nil when it could not be
     /// started or was cancelled.
     func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput?
+}
+
+/// What the login shell's startup files left: its exported variables and the folder it is in.
+public struct LoginEnvironment: Equatable, Sendable {
+    public var variables: [String: String]
+    public var directory: String?
+
+    public init(variables: [String: String], directory: String?) {
+        self.variables = variables
+        self.directory = directory
+    }
 }
 
 /// The user's login shell, run as an interactive login shell, so the environment set in its startup files (a PATH from
@@ -55,13 +66,15 @@ public struct LoginShell: CommandShell {
         [account, environment].compactMap { $0 }.first { $0.hasPrefix("/") && isExecutable($0) } ?? "/bin/zsh"
     }
 
-    /// The shell line writes the environment to a file in a private folder and renames it when complete, so what the
-    /// shell prints does not count and the environment is read as soon as the file appears, not when the shell ends.
-    /// `env` and `mv` by absolute path, `>`, `&&` and single quotes mean the same in every shell above. It starts with
+    /// The shell line writes the folder the shell is in (`pwd -P`: PWD can be unset or name another folder) and then the
+    /// environment to files in a private folder, renaming the second when complete, so what the shell prints does not
+    /// count and both are read as soon as it appears, not when the shell ends; they are deleted once read, and a folder
+    /// a crash left behind is deleted by the next check. `pwd`, `env` and `mv` by absolute path, `>`, `&&` and single
+    /// quotes mean the same in every shell above. It starts with
     /// `set +m` (job control off), so a startup file that turns it on does not give the work of an EXIT trap or logout
     /// file a process group of its own, which stopping the shell's group would miss; csh and tcsh only print an error.
-    static func script(partial: String, complete: String) -> String {
-        "set +m; /usr/bin/env -0 > '\(partial)' && /bin/mv '\(partial)' '\(complete)'"
+    static func script(folder: String) -> String {
+        "set +m; /bin/pwd -P > '\(folder)/directory' && /usr/bin/env -0 > '\(folder)/partial' && /bin/mv '\(folder)/partial' '\(folder)/environment'"
     }
 
     /// `env -0` output: NUL-separated NAME=value entries.
@@ -74,24 +87,35 @@ public struct LoginShell: CommandShell {
         return Dictionary(entries, uniquingKeysWith: { _, last in last })
     }
 
-    public func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable ([String: String]) -> Void) async {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
+    public func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable (LoginEnvironment) -> Void) async {
+        let files = FileManager.default
+        let temporary = files.temporaryDirectory
+        for name in (try? files.contentsOfDirectory(atPath: temporary.path)) ?? [] where name.hasPrefix("subset-check-") {
+            let old = temporary.appendingPathComponent(name)
+            let modified = (try? files.attributesOfItem(atPath: old.path)[.modificationDate]) as? Date
+            if let modified, modified.timeIntervalSinceNow < -60 { try? files.removeItem(at: old) }
+        }
+        let folder = temporary.appendingPathComponent("subset-check-\(UUID().uuidString)")
         guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])) != nil else { return }
         defer { try? FileManager.default.removeItem(at: folder) }
         let complete = folder.appendingPathComponent("environment")
+        let directory = folder.appendingPathComponent("directory")
         // Looks every 50 ms, and once more after the shell has ended.
         let watch = Task.detached {
             while true {
                 if let data = try? Data(contentsOf: complete) {
-                    let environment = Self.environment(data)
-                    if !environment.isEmpty { found(environment) }
+                    let variables = Self.environment(data)
+                    let place = (try? String(contentsOf: directory, encoding: .utf8))?.trimmingCharacters(in: .newlines)
+                    try? FileManager.default.removeItem(at: complete)
+                    try? FileManager.default.removeItem(at: directory)
+                    if !variables.isEmpty { found(LoginEnvironment(variables: variables, directory: place)) }
                     return
                 }
                 if Task.isCancelled { return }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
         }
-        let line = Self.script(partial: folder.appendingPathComponent("partial").path, complete: complete.path)
+        let line = Self.script(folder: folder.path)
         let name = "-" + (path as NSString).lastPathComponent
         _ = try? await ToolRunner.run(path, ["-ic", line], argv0: name, timeout: timeout)
         watch.cancel()
@@ -110,10 +134,10 @@ public struct LoginShell: CommandShell {
 public final class SubsetCommandProbe: Sendable {
     let shell: Task<Void, Never>
     let answer: Task<ShellOutput?, Never>
-    private let environment: OneShot<[String: String]>
+    private let environment: OneShot<LoginEnvironment>
 
     init(shell: any CommandShell, timeLimit: TimeInterval) {
-        let environment = OneShot<[String: String]>()
+        let environment = OneShot<LoginEnvironment>()
         let deadline = Date().addingTimeInterval(timeLimit)
         self.environment = environment
         self.shell = Task.detached {
@@ -122,10 +146,8 @@ public final class SubsetCommandProbe: Sendable {
         }
         answer = Task.detached {
             guard let found = await environment.value else { return nil }
-            var isFolder: ObjCBool = false
-            let directory = found["PWD"].flatMap { FileManager.default.fileExists(atPath: $0, isDirectory: &isFolder) && isFolder.boolValue ? $0 : nil }
             return await shell.run(
-                "/usr/bin/env", SubsetCommandDetector.arguments, environment: found, directory: directory,
+                "/usr/bin/env", SubsetCommandDetector.arguments, environment: found.variables, directory: found.directory,
                 timeout: max(0, deadline.timeIntervalSinceNow)
             )
         }

@@ -22,7 +22,7 @@ struct CommandLineSection: View {
             }
             copyLine("Set up:", HelperExamples.setupCommand, help: "Installs the subset command with npm (needs Node.js)")
             if case .installed(let version) = model.status, !examples.isEmpty, HelperExamples.predatesBundledCommands(version) {
-                note("subset \(version) is older than \(HelperExamples.minimumLauncherVersion) and runs none of the commands below: update it with the setup line")
+                note("subset \(version) is older than \(HelperExamples.minimumLauncherVersion): it runs Timer and Minutes from npm, not from the app, and knows no other command below. Update it with the setup line")
             }
             ForEach(examples) { example in
                 HStack(spacing: 8) {
