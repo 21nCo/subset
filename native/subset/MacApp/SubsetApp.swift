@@ -41,11 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Quitting while an install, update or move to the Trash runs cancels it and quits once it has cleaned up (no staged
-    // copy, private folder or attached image is left behind).
+    // copy, private folder or attached image is left behind). A shell still looking for `subset` (or still being stopped
+    // after its check showed "not installed") is stopped with everything it started first, for 12 seconds at most.
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
-        guard actions.isWorking else { return .terminateNow }
+        guard actions.isWorking || commandLine.hasRunningShell else { return .terminateNow }
         Task {
-            await actions.cancelAll()
+            async let operations: Void = actions.cancelAll()
+            async let shells: Void = commandLine.stop()
+            _ = await (operations, shells)
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

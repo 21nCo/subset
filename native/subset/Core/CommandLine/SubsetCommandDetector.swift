@@ -54,6 +54,23 @@ public struct LoginShell: CommandShell {
     }
 }
 
+/// One check's shell run. It may outlive the answer: a shell that has not answered by the time limit is stopped, and
+/// stopping an interactive shell with everything it started can take longer (`ToolRunner`: SIGTERM, then SIGKILL).
+public struct SubsetCommandProbe: Sendable {
+    let token: String
+    let run: Task<ShellOutput?, Never>
+
+    /// Stops the shell if it still runs.
+    public func cancel() {
+        run.cancel()
+    }
+
+    /// Returns once the shell has ended or been stopped with everything it started.
+    public func ended() async {
+        _ = await run.value
+    }
+}
+
 /// Finds `subset` by running `/usr/bin/env subset --version` in the user's login shell, for 5 seconds at most. Any
 /// failure is `notInstalled`; nothing is installed and no error is raised.
 public struct SubsetCommandDetector: Sendable {
@@ -64,30 +81,63 @@ public struct SubsetCommandDetector: Sendable {
 
     let shell: any CommandShell
     let timeLimit: TimeInterval
+    let token: @Sendable () -> String
 
-    public init(shell: any CommandShell, timeLimit: TimeInterval = SubsetCommandDetector.timeLimit) {
+    /// `token` names each check's output markers; a new random one by default.
+    public init(
+        shell: any CommandShell, timeLimit: TimeInterval = SubsetCommandDetector.timeLimit,
+        token: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
+    ) {
         self.shell = shell
         self.timeLimit = timeLimit
+        self.token = token
     }
 
     public static func standard() -> SubsetCommandDetector {
         SubsetCommandDetector(shell: LoginShell.user())
     }
 
-    /// `installed` with the version when the command exits 0 and its last non-empty output line is a version (a startup
-    /// file may print lines before it); otherwise `notInstalled`, also when the shell has not answered within the time
-    /// limit, even if stopping it takes longer (an interactive shell ignores SIGTERM until it is killed).
-    public func detect() async -> SubsetCommandStatus {
-        let shell = shell
-        let limit = timeLimit
-        let output = await Self.within(limit) { await shell.run(Self.command, timeout: limit) }
-        guard let output = output ?? nil, output.status == 0 else { return .notInstalled }
-        return Self.version(in: output.stdout).map { .installed(version: $0) } ?? .notInstalled
+    /// The shell line: the command between a start marker and an end marker printed only when the command exits 0, so
+    /// what startup and logout files or an EXIT trap print, and the shell's own exit status, do not count. `echo`, `;`
+    /// and `&&` mean the same in sh, bash, zsh and fish.
+    static func script(token: String) -> String {
+        "echo \(startMarker(token)); \(command) && echo \(endMarker(token))"
     }
 
-    static func version(in stdout: String) -> String? {
-        let line = stdout.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
-        guard let line, line.count <= 64, line.range(of: versionPattern, options: .regularExpression) != nil else { return nil }
+    static func startMarker(_ token: String) -> String { "subset-check-\(token)-start" }
+    static func endMarker(_ token: String) -> String { "subset-check-\(token)-end" }
+
+    /// Checks once: `start()`, then `detect(_:)`.
+    public func detect() async -> SubsetCommandStatus {
+        await detect(start())
+    }
+
+    /// Starts the shell. Its run belongs to the caller, who can stop it and wait for it to end (`SubsetCommandProbe`).
+    public func start() -> SubsetCommandProbe {
+        let shell = shell
+        let token = token()
+        let limit = timeLimit
+        return SubsetCommandProbe(token: token, run: Task.detached { await shell.run(Self.script(token: token), timeout: limit) })
+    }
+
+    /// `installed` with the version when the command exited 0 and printed a version between the markers; otherwise
+    /// `notInstalled`, also when the shell has not answered within the time limit or the caller is cancelled. Then the
+    /// probe is stopped but not waited for (an interactive shell ignores SIGTERM until it is killed).
+    public func detect(_ probe: SubsetCommandProbe) async -> SubsetCommandStatus {
+        guard let answer = await Self.within(timeLimit, { await probe.run.value }) else {
+            probe.cancel()
+            return .notInstalled
+        }
+        guard let output = answer, let version = Self.version(in: output.stdout, token: probe.token) else { return .notInstalled }
+        return .installed(version: version)
+    }
+
+    /// The text between the start marker and the end marker after it, when it is one version.
+    static func version(in stdout: String, token: String) -> String? {
+        guard let start = stdout.range(of: startMarker(token)),
+              let end = stdout.range(of: endMarker(token), range: start.upperBound..<stdout.endIndex) else { return nil }
+        let line = stdout[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.count <= 64, line.range(of: versionPattern, options: .regularExpression) != nil else { return nil }
         return line
     }
 
