@@ -273,6 +273,37 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         XCTAssertNil(model.rows.first?.update, "the row offers what the install left")
     }
 
+    // The look after an install never ends (a folder that stays stalled): it is given up and the next look shows the
+    // install, so the row comes back; when every look stalls, the row stays disabled with its note, and Refresh still
+    // ends.
+    func testARowComesBackAfterAStalledLookIsGivenUpAndOtherwiseStaysDisabled() async throws {
+        let stuck = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: [2])
+        let (row, model) = await actions(finder: stuck)
+        model.scanStall = .milliseconds(200)
+        row.install("breaks")
+        try await waitFor { stuck.isWaiting }
+        await row.wait("breaks")
+        XCTAssertFalse(row.isBusy("breaks"))
+        XCTAssertEqual(model.installed["breaks"]?.first?.versionLabel, "0.1.0")
+        stuck.release()
+
+        let allStuck = GatedFinder(InstalledAppFinder(folders: folders, receipts: receipts), gatedCalls: Set(2...20))
+        let (later, laterModel) = await actions(finder: allStuck)
+        laterModel.scanStall = .milliseconds(100)
+        laterModel.refreshWait = .milliseconds(200)
+        later.listNoteDelay = .milliseconds(100)
+        later.moveToTrash("breaks")
+        try await waitFor { allStuck.isWaiting }
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertTrue(later.isBusy("breaks"), "no look begun after the operation was published")
+        guard case .succeeded(let text)? = later.activities["breaks"] else { return XCTFail("\(String(describing: later.activities["breaks"]))") }
+        XCTAssertTrue(text.hasSuffix(AppActions.listPending), text)
+        await laterModel.refresh(force: true)
+        XCTAssertFalse(laterModel.isRefreshing, "Refresh ends")
+        XCTAssertTrue(later.isBusy("breaks"))
+        for _ in 0..<20 { allStuck.release() }
+    }
+
     // Cancelled while the app quits, through either row action: no copy changed, so the row says it was not updated or
     // moved (not "only partly"), and that the app was asked to quit.
     func testAQuitOnlyCancelSaysNothingWasChanged() async throws {

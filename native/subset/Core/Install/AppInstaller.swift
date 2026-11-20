@@ -298,7 +298,7 @@ public struct AppInstaller: Sendable {
                 } catch {
                     // Whatever the Trash threw, the copy was not moved: it is put back, or where it is is said.
                     let why = (error as? InstallFailure)?.message ?? "\(copy.path) cannot be moved to the Trash (\(error.localizedDescription))"
-                    throw InstallFailure(.trash, why + Self.putBack(aside, bundle, notes))
+                    throw InstallFailure(.trash, why + Self.putBack(aside, bundle, notes, identity: identities[copy.path]))
                 }
             }
             // The receipt goes only when no copy that is or may be the app is in either folder any more, decided as
@@ -577,7 +577,7 @@ public struct AppInstaller: Sendable {
         let verified = Self.identity(staged)
         beforePlacing(target)
         guard renamex_np(staged.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
-            throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target, notes))")
+            throw InstallFailure(.install, "the new copy cannot be renamed into place (\(Self.errnoText()))\(Self.putBack(backup, target, notes, identity: identity))")
         }
         afterPlacing(target)
         // The new receipt is written aside first; nothing is changed by it until the copy in place is checked below.
@@ -860,9 +860,18 @@ public struct AppInstaller: Sendable {
         return FileIdentity(device: status.st_dev, inode: status.st_ino)
     }
 
-    /// Renames `from` back to `to` after a failed step; returns what to add to the message when that fails too, and then
-    /// counts the copy left aside as a change in `notes`.
-    static func putBack(_ from: URL, _ to: URL, _ notes: Notes) -> String {
+    /// Renames `from` back to `to` after a failed step (with `identity`, only while it is still that copy: something
+    /// else put there meanwhile is never renamed into place); returns what to add to the message when that fails, and
+    /// then counts the copy left aside as a change in `notes`.
+    static func putBack(_ from: URL, _ to: URL, _ notes: Notes, identity expected: FileIdentity? = nil) -> String {
+        if let expected {
+            if restorePrevious(from, identity: expected, to: to) { return "" }
+            notes.copyLeftAside()
+            guard identity(from) == expected else {
+                return ", and the copy is no longer at \(from.path), where it was set aside, so it was not put back; look for it in the Trash"
+            }
+            return ", and the previous copy could not be put back: it is at \(from.path); rename it to \(to.path)"
+        }
         if renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 { return "" }
         let why = errnoText()
         notes.copyLeftAside()

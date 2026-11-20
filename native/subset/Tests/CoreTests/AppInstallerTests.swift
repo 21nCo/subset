@@ -1462,6 +1462,24 @@ extension AppInstallerTests {
         }
     }
 
+    // Move to Trash: the Trash takes the copy from its hidden name, puts something else there and fails with an untyped
+    // error. That substitute is never renamed into the install path; the result says the copy is no longer where it
+    // was set aside, and the receipt stays.
+    func testMoveToTrashPutsBackOnlyTheCopyItSetAside() async throws {
+        try installOld()
+        let receiptBefore = try Data(contentsOf: receiptFile)
+        let substitute = SubstitutingTrash(inner: trash, target: target.path, refuses: true)
+        trash = substitute
+        let refused = await failure { try await $0.moveToTrash(Self.breaks, quitAllowed: false) }
+        let left = try XCTUnwrap(substitute.left.get())
+        XCTAssertEqual(refused?.step, .trash)
+        XCTAssertEqual(refused?.partial, true)
+        XCTAssertNil(AppInstaller.identity(target), "nothing is put at the install path")
+        XCTAssertEqual(InstalledAppFinder.infoPlist(left.path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the substitute stays")
+        XCTAssertTrue(refused?.message.hasSuffix("and the copy is no longer at \(left.path), where it was set aside, so it was not put back; look for it in the Trash") == true, refused?.message ?? "")
+        XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore)
+    }
+
     // Two copies of a running app are quit for one update, or only the first is and the second then adds its own notes:
     // the quit is said once, and last.
     func testTheQuitIsSaidOnceAndLastForAnUpdateOfSeveralCopies() async throws {
@@ -1650,7 +1668,7 @@ private final class SubstitutingTrash: Trashing, @unchecked Sendable {
         let place = refuses ? bundle : try inner.trash(bundle, appName: appName, at: date).url
         try FileManager.default.moveItem(at: place, to: place.deletingLastPathComponent().appendingPathComponent("moved-\(UUID().uuidString).app"))
         try makeBundle(place, bundleID: "dev.subset.other", version: "9.0")
-        try FileManager.default.removeItem(atPath: target)
+        try? FileManager.default.removeItem(atPath: target)
         left.update { $0 = place }
         if refuses { throw POSIXError(.EACCES) }
         return Trashed(url: place)

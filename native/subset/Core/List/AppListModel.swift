@@ -58,23 +58,29 @@ public final class AppListModel: ObservableObject {
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var refreshLoop: Task<Void, Never>?
-    /// Looks for installed apps run one at a time on `scanQueue`, a serial queue of their own, so a folder that stalls
-    /// holds one thread there and never a thread of Swift's shared pool. Looks asked for while one runs are merged into
-    /// a single look, begun once it ends, of every app asked for. Each look is published when it ends, so in the order
-    /// the looks began, app by app (`observed`, by what detection reads of an app: its ID, bundle ID and app name, so a
-    /// look at an app as an earlier catalog described it never stands for it as the catalog shown describes it): what is
-    /// shown never goes back to an older state, and an install that any later look saw is kept. `installed` is
-    /// `observed` for the apps of the catalog shown.
-    private let scanQueue = DispatchQueue(label: "dev.subset.installed-apps", qos: .userInitiated)
-    private var scanning = false
-    /// The apps of the look to begin once the running one ends, when one was asked for meanwhile.
+    /// Looks for installed apps run one at a time, each on a thread of its own from Dispatch, never Swift's shared pool
+    /// (which a stalled folder would hold). Looks asked for while one runs are merged into one look, begun once it ends,
+    /// of every description of an app asked for. Looks are published in the order they began, app description by app
+    /// description (`observed`, keyed by what detection reads: ID, bundle ID and app name), so what is shown never goes
+    /// back to an older state. A look still running after `scanStall` is given up and the next begins at once (with its
+    /// apps too); a given-up look is still published if it ends before a later one is. At most `maxStalled` given-up
+    /// looks may still hold a thread; beyond that nothing more begins until one ends. A refresh waits for its look
+    /// `refreshWait` at most, then shows the catalog anyway: an app whose description has no published look is not
+    /// known (`knowsInstalled`), and the window's actions for it wait.
+    private var current: (number: Int, apps: [CatalogApp])?
+    private var stalled: Set<Int> = []
+    var scanStall: Duration = .seconds(10)
+    var refreshWait: Duration = .seconds(15)
+    let maxStalled = 2
+    /// The apps of the look to begin once one may, when one was asked for meanwhile.
     private var pendingApps: [CatalogApp]?
     /// How many looks have begun, and the number of the last one published.
     private var begunScans = 0
     private var publishedScans = 0
-    private var observed: [String: [InstalledCopy]] = [:]
-    /// Callers waiting until the look of a given number is published.
-    private var scanWaiters: [(scan: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var observed: [String: (scan: Int, copies: [InstalledCopy])] = [:]
+    /// Callers waiting until the look of a given number, or a later one, is published.
+    private var scanWaiters: [Int: (scan: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
+    private var nextWaiter = 0
 
     public init(
         loader: any CatalogLoading, finder: any InstalledAppDetecting, defaults: UserDefaults = .standard,
@@ -164,9 +170,9 @@ public final class AppListModel: ObservableObject {
                 nextFetchedAt = nil
             }
         }
-        // The installed apps are looked for with the new catalog's apps before it is shown.
+        // The installed apps are looked for with the new catalog's apps before it is shown, for `refreshWait` at most.
         if let apps = nextCatalog?.apps {
-            await waitForScan(requestScan(apps))
+            await waitForScan(requestScan(apps), within: refreshWait)
             if Task.isCancelled { return }
         }
         catalog = nextCatalog
@@ -175,36 +181,48 @@ public final class AppListModel: ObservableObject {
         publishInstalled()
     }
 
+    /// Whether what is installed of the app is known: its description in the catalog shown has a published look.
+    public func knowsInstalled(_ appID: String) -> Bool {
+        guard let app = catalog?.apps.first(where: { $0.id == appID }) else { return false }
+        return observed[Self.key(app)] != nil
+    }
+
     /// Looks for the installed apps again (after an install, update or move to the Trash), keeping the catalog, and
-    /// returns once a look begun after this call is published, whoever asked for it (looks asked for while one runs are
-    /// one look); at once when no catalog is shown. It does not time out: a caller that must not wait does not call it.
+    /// returns once every app of the catalog shown then has a published look begun after this call, whoever asked for
+    /// it (looks asked for while one runs are one look), looking again when the catalog changed meanwhile; at once when
+    /// no catalog is shown, or when the caller's task is cancelled. It has no time limit: a row waits for it.
     public func reloadInstalled() async {
-        guard let apps = catalog?.apps else { return }
-        await waitForScan(requestScan(apps))
-    }
-
-    /// Asks for a look at `apps` begun after now and returns its number: begun at once when none runs, otherwise the
-    /// one that begins once the running look ends, which then covers these apps too.
-    private func requestScan(_ apps: [CatalogApp]) -> Int {
-        guard scanning else {
-            startScan(apps)
-            return begunScans
+        let after = begunScans
+        while !Task.isCancelled, let apps = catalog?.apps, apps.contains(where: { (observed[Self.key($0)]?.scan ?? 0) <= after }) {
+            await waitForScan(requestScan(apps))
         }
-        // Every description of an app asked for (two catalogs may describe one app ID differently).
-        var merged = pendingApps ?? []
-        for app in apps where !merged.contains(where: { Self.key($0) == Self.key(app) }) { merged.append(app) }
-        pendingApps = merged
-        return begunScans + 1
     }
 
-    private func startScan(_ apps: [CatalogApp]) {
-        scanning = true
+    /// Asks for a look at `apps` begun after now and returns its number: begun at once when one may begin, otherwise
+    /// the one that begins next, which then covers these apps too.
+    private func requestScan(_ apps: [CatalogApp]) -> Int {
+        pendingApps = Self.merging(pendingApps ?? [], apps)
+        startPendingIfIdle()
+        return pendingApps == nil ? begunScans : begunScans + 1
+    }
+
+    /// Every description in `first`, then those of `second` not in it (two catalogs may describe one app ID differently).
+    private static func merging(_ first: [CatalogApp], _ second: [CatalogApp]) -> [CatalogApp] {
+        var merged = first
+        for app in second where !merged.contains(where: { key($0) == key(app) }) { merged.append(app) }
+        return merged
+    }
+
+    private func startPendingIfIdle() {
+        guard current == nil, stalled.count < maxStalled, let apps = pendingApps else { return }
+        pendingApps = nil
         begunScans += 1
         let number = begunScans
+        current = (number, apps)
         let finder = finder
-        scanQueue.async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Detection reports by app ID, so descriptions sharing an ID are looked for in passes of their own.
-            var found: [String: [InstalledCopy]?] = [:]
+            var found: [String: [InstalledCopy]] = [:]
             var rest = apps
             while !rest.isEmpty {
                 var pass: [CatalogApp] = []
@@ -214,37 +232,76 @@ public final class AppListModel: ObservableObject {
                     return true
                 }
                 let copies = finder.detect(pass)
-                for app in pass { found[Self.key(app)] = .some(copies[app.id]) }
+                for app in pass { found[Self.key(app)] = copies[app.id] ?? [] }
             }
             Task { @MainActor [found] in self?.scanEnded(number, found) }
         }
+        scheduleGiveUp(number)
     }
 
-    /// Publishes look `number`, begins the merged look asked for meanwhile, if any, and resumes the callers waiting for
-    /// this look or an earlier one.
-    private func scanEnded(_ number: Int, _ found: [String: [InstalledCopy]?]) {
-        for (key, copies) in found { observed[key] = copies }
-        publishedScans = number
-        publishInstalled()
-        scanning = false
-        if let next = pendingApps {
-            pendingApps = nil
-            startScan(next)
+    private func scheduleGiveUp(_ number: Int) {
+        let stall = scanStall
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: stall)
+            self?.giveUp(number)
         }
-        let ready = scanWaiters.filter { $0.scan <= number }
-        scanWaiters.removeAll { $0.scan <= number }
-        for waiter in ready { waiter.continuation.resume() }
     }
 
-    private func waitForScan(_ number: Int) async {
-        guard publishedScans < number else { return }
-        await withCheckedContinuation { scanWaiters.append((number, $0)) }
+    /// Look `number` is still running after `scanStall`: given up, so the next look (with its apps) begins, unless
+    /// `maxStalled` looks already hold a thread; then it is tried again later.
+    private func giveUp(_ number: Int) {
+        guard let running = current, running.number == number else { return }
+        guard stalled.count < maxStalled else { return scheduleGiveUp(number) }
+        stalled.insert(number)
+        current = nil
+        pendingApps = Self.merging(running.apps, pendingApps ?? [])
+        startPendingIfIdle()
     }
 
-    /// `installed`: what the looks saw of the apps of the catalog shown (nothing without a catalog).
+    /// Publishes look `number` unless a later one was published first (then it is older), begins the merged look asked
+    /// for meanwhile, if any, and resumes the callers waiting for what is now published.
+    private func scanEnded(_ number: Int, _ found: [String: [InstalledCopy]]) {
+        if stalled.remove(number) == nil, current?.number == number { current = nil }
+        if number > publishedScans {
+            for (key, copies) in found { observed[key] = (number, copies) }
+            publishedScans = number
+            publishInstalled()
+        }
+        startPendingIfIdle()
+        for (id, waiter) in scanWaiters where waiter.scan <= publishedScans {
+            scanWaiters[id] = nil
+            waiter.continuation.resume()
+        }
+    }
+
+    /// Returns once look `number` or a later one is published, the caller's task is cancelled, or `limit` has passed.
+    private func waitForScan(_ number: Int, within limit: Duration? = nil) async {
+        guard publishedScans < number, !Task.isCancelled else { return }
+        let id = nextWaiter
+        nextWaiter += 1
+        if let limit {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: limit)
+                self?.endWait(id)
+            }
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume() } else { scanWaiters[id] = (number, continuation) }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.endWait(id) }
+        }
+    }
+
+    private func endWait(_ id: Int) {
+        scanWaiters.removeValue(forKey: id)?.continuation.resume()
+    }
+
+    /// `installed`: what the published looks saw of the apps of the catalog shown (nothing without a catalog).
     private func publishInstalled() {
         let apps = catalog?.apps ?? []
-        let shown = Dictionary(apps.compactMap { app in observed[Self.key(app)].map { (app.id, $0) } }, uniquingKeysWith: { first, _ in first })
+        let shown = Dictionary(apps.compactMap { app in observed[Self.key(app)].map { (app.id, $0.copies) } }, uniquingKeysWith: { first, _ in first })
         if shown != installed { installed = shown }
     }
 

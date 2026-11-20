@@ -50,8 +50,9 @@ public final class AppActions: ObservableObject {
         self.model = model
     }
 
-    /// Whether an operation on the app is running, or has ended and its app is being looked for again: its buttons wait.
-    public func isBusy(_ appID: String) -> Bool { tasks[appID] != nil }
+    /// Whether an operation on the app is running, or has ended and its app is being looked for again, or what is
+    /// installed of it is not known yet (its look is held up): its buttons wait.
+    public func isBusy(_ appID: String) -> Bool { tasks[appID] != nil || !model.knowsInstalled(appID) }
 
     /// Whether the app's install, update or move to the Trash itself still runs, so Cancel can stop it.
     public func canCancel(_ appID: String) -> Bool { operations[appID] != nil }
@@ -98,7 +99,7 @@ public final class AppActions: ObservableObject {
     public func wait(_ appID: String) async { await tasks[appID]?.value }
 
     private func start(_ appID: String, kind: QuitRequest.Kind?, quitAllowed: Bool) {
-        guard !closed, tasks[appID] == nil, let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
+        guard !closed, !isBusy(appID), let app = model.catalog?.apps.first(where: { $0.id == appID }) else { return }
         let copies = model.installed[appID] ?? []
         let release: ChosenRelease?
         switch kind {
