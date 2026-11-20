@@ -1050,14 +1050,19 @@ final class AppInstallerTests: XCTestCase {
         helper.arguments = ["60"]
         try helper.run()
         defer { helper.terminate() }
-        let churn = try (0..<4).map { _ in
+        // Each loop is stopped and reaped when the test ends, however it ends, a failed launch of a later one included.
+        var churn: [Process] = []
+        defer {
+            churn.forEach { $0.terminate() }
+            churn.forEach { $0.waitUntilExit() }
+        }
+        for _ in 0..<4 {
             let loop = Process()
             loop.executableURL = URL(fileURLWithPath: "/bin/sh")
             loop.arguments = ["-c", "while :; do /bin/sh -c :; done"]
             try loop.run()
-            return loop
+            churn.append(loop)
         }
-        defer { churn.forEach { $0.terminate() } }
         let other = folder.appendingPathComponent("Other.app")
         try makeBundle(other, bundleID: "dev.subset.other", version: "1.0")
         let until = Date().addingTimeInterval(6)
