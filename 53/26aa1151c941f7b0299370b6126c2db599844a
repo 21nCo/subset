@@ -1,0 +1,23 @@
+native/subset/Core/Install/AppActions.swift
+  s_4a13ff2fe09428::t_ebbc4cf1a40a2f 60-68,72-75,114-119,122-129,181-182,184,186-195,198-200,267-270,272,357-363,365-366,368
+native/subset/MacApp/MainWindowView.swift
+  s_4a13ff2fe09428::t_9f966919151008 14-22
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_4a13ff2fe09428::t_31d03a548acf60 334-336,555-561,563,567-572,607,612,695-780
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5326aa1151c941f7b0299370b6126c2db599844a",
+  "prompts": {},
+  "sessions": {
+    "s_4a13ff2fe09428": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_4a13ff2fe09428",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
