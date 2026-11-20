@@ -123,10 +123,12 @@ final class CommandLineTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellPath)
         setenv("SUBSET_UNSET_BY_LOGIN", "1", 1)
         defer { unsetenv("SUBSET_UNSET_BY_LOGIN") }
-        // A folder a crashed check left behind is deleted.
-        let stale = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: false)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: stale.path)
+        // An old folder of another program with a name the check once used is not the check's to remove.
+        let other = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: other.path)
+        defer { try? FileManager.default.removeItem(at: other) }
+        let before = Self.checkEntries()
         let found = Found()
         await LoginShell(path: shellPath).readEnvironment(timeout: 5) { found.paths.append($0) }
         XCTAssertEqual(found.paths.count, 1)
@@ -135,11 +137,31 @@ final class CommandLineTests: XCTestCase {
         XCTAssertNil(found.paths.first?.variables["SUBSET_UNSET_BY_LOGIN"])
         // The folder the shell is in, not the PWD it exported.
         XCTAssertEqual(found.paths.first?.directory, realpath(folder.path, nil).map { String(cString: $0) })
-        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path), "a stale environment snapshot was left")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path), "the check removed a folder it did not create")
+        XCTAssertEqual(Self.checkEntries(), before, "the check left something in the temporary folder")
         XCTAssertEqual(LoginShell.environment(Data("A=1\u{0}B=x=y\u{0}=bad\u{0}C\u{0}".utf8)), ["A": "1", "B": "x=y"])
         XCTAssertEqual(try String(contentsOfFile: folder.path + "/flags", encoding: .utf8), "-ic\n")
         await LoginShell(path: folder.path + "/no-such-shell").readEnvironment(timeout: 1) { found.paths.append($0) }
         XCTAssertEqual(found.paths.count, 1)
+    }
+
+    /// The environment counts only once the frame made up for the check is complete; what is printed around it does not.
+    func testOnlyACompleteFrameOfTheCheckCounts() {
+        let mark = "subset-check-test"
+        let frame = Data("Welcome\nsubset-check-other\n\(mark)\nPATH=/a:/b\u{0}NOTE=x\nsubset-check-test\u{0}/Users/me's\u{0}\(mark)\nbye".utf8)
+        XCTAssertEqual(
+            LoginShell.snapshot(in: frame, mark: mark),
+            LoginEnvironment(variables: ["PATH": "/a:/b", "NOTE": "x\nsubset-check-test"], directory: "/Users/me's")
+        )
+        for cut in [10, 30, frame.count - 10] { XCTAssertNil(LoginShell.snapshot(in: frame.prefix(cut), mark: mark), "\(cut)") }
+        XCTAssertNil(LoginShell.snapshot(in: Data("\(mark)\n/home\u{0}\(mark)\n".utf8), mark: mark), "no environment")
+        XCTAssertNil(LoginShell.snapshot(in: Data("\(mark)\nA=1\u{0}\u{0}\(mark)\n".utf8), mark: mark), "no folder")
+        XCTAssertFalse(LoginShell.script(mark: mark).contains("!"))
+    }
+
+    /// The temporary folder's entries named as the check once named its snapshots.
+    static func checkEntries() -> Set<String> {
+        Set(((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? []).filter { $0.hasPrefix("subset-check-") })
     }
 
     /// A real /bin/sh that prints before the command and, from an EXIT trap, after it and exits 3, with a `subset` on
@@ -293,6 +315,20 @@ final class CommandLineTests: XCTestCase {
             installed: ["timer": [local], "minutes": [local], "future": [local]]
         )
         XCTAssertEqual(onDisk.map(\.missingFromCopy), [false, false, false, true])
+        // As `subset` decides: an absent helper after a link to a folder inside Contents is missing; a link out of the
+        // app, a file where a folder should be, or a helper that is there is not.
+        let bundle = folder.appendingPathComponent("Y.app")
+        let contents = bundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents.appendingPathComponent("Real/Tools"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: contents.appendingPathComponent("Helpers").path, withDestinationPath: "Real")
+        try FileManager.default.createSymbolicLink(atPath: contents.appendingPathComponent("Outside").path, withDestinationPath: folder.path)
+        try Data().write(to: contents.appendingPathComponent("Real/present"))
+        try Data().write(to: contents.appendingPathComponent("File"))
+        let cases: [(String, Bool)] = [
+            ("Contents/Helpers/absent", true), ("Contents/Helpers/Tools/absent", true), ("Contents/Nothing/absent", true),
+            ("Contents/Helpers/present", false), ("Contents/Outside/absent", false), ("Contents/File/absent", false),
+        ]
+        for (path, missing) in cases { XCTAssertEqual(HelperExamples.isMissing(bundle.path, path), missing, path) }
         XCTAssertEqual(examples[0].guide.absoluteString, "https://github.com/21nCo/subset/blob/dev/packages/timer-cli/README.md#agent-skill")
         XCTAssertEqual(
             examples[1].guide.absoluteString,
@@ -300,6 +336,39 @@ final class CommandLineTests: XCTestCase {
         )
         XCTAssertEqual(HelperExamples.examples(apps: apps, installed: [:]), [])
         XCTAssertEqual(HelperExamples.setupCommand, "npm i -g subset.dev")
+    }
+
+    /// The examples show at once and whether a helper is missing once its lookup, off the main thread, ends; a stalled
+    /// lookup holds nothing up, and the newer installed apps are looked for again.
+    @MainActor
+    func testHelperAvailabilityIsLookedUpOffTheMainThread() async throws {
+        let release = DispatchSemaphore(value: 0)
+        let onMain = Found()
+        let model = HelperExamplesModel { bundle, _ in
+            if Thread.isMainThread { onMain.paths.append(LoginEnvironment(variables: [:], directory: bundle)) }
+            if bundle == "/Applications/Stalled.app" { release.wait() }
+            return bundle != "/Applications/New.app"
+        }
+        let apps = [app("timer", "Timer", helpers: [helper("timer", kind: "node")])]
+        func copy(_ name: String) -> InstalledCopy {
+            InstalledCopy(path: "/Applications/\(name).app", folder: "/Applications", version: "0.1.0", build: "1", channel: nil)
+        }
+        let started = Date()
+        model.update(apps: apps, installed: ["timer": [copy("Stalled")]])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        XCTAssertEqual(model.examples.map(\.example), ["subset timer list"])
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false], "shown as missing before the lookup ended")
+        model.update(apps: apps, installed: ["timer": [copy("Old")]])
+        for _ in 0..<100 where model.examples.first?.missingFromCopy != true { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [true], "a newer lookup waited for the stalled one")
+        // After an update the new copy has its helper; the stalled lookup, ending last, does not replace that.
+        model.update(apps: apps, installed: ["timer": [copy("New")]])
+        for _ in 0..<100 where model.examples.first?.missingFromCopy != false { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false])
+        release.signal()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.examples.map(\.missingFromCopy), [false])
+        XCTAssertEqual(onMain.paths.count, 0, "a helper was looked up on the main thread")
     }
 
     /// Only a `subset` older than `minimumLauncherVersion` is known to run no bundled command; the `subset.dev` in this
@@ -436,18 +505,22 @@ private final class FakeShell: CommandShell, @unchecked Sendable {
     }
 }
 
-/// The check with real zsh, bash and sh login shells run with no terminal (as `ToolRunner` runs them), a made-up home
-/// folder holding their startup files, and a stand-in `subset` on the PATH.
+/// The check with real login shells run with no terminal (as `ToolRunner` runs them), a made-up home folder (its path
+/// has a space and an apostrophe) whose login files set the whole PATH after the system's, a stand-in `subset` on it,
+/// and a decoy `subset` first on the PATH the shell inherits, so a `subset` installed on this Mac changes nothing.
 final class CommandLineLoginShellTests: XCTestCase {
     /// A complete answer counts at once even when an EXIT trap keeps the shell running past the limit; the shell is
     /// still tracked, and stopping the model ends it and the trap's work, also when a startup file turned job control on.
     @MainActor
     func testAnAnswerBeforeTheLimitDoesNotWaitForTheShellToEnd() async throws {
-        // zsh with no terminal cannot turn job control on (`set -m` fails and ends .zshrc).
+        // zsh with no terminal cannot turn job control on (`set -m` fails and ends .zshrc). A DEBUG trap turns it back on
+        // after the check's `set +m`, so the trap's work gets a process group of its own.
         let trap = "trap '\"$SUBSET_TEST_FOLDER/bin/subset\" --trap' EXIT\n"
-        let home = [".bash_profile": "set -m\n" + trap, ".zshrc": trap]
         let subset = "if [ \"$1\" = --trap ]; then echo $$ > \"$SUBSET_TEST_FOLDER/trap-pid\"; exec sleep 120; fi\necho 1.2.3\n"
-        for shell in ["/bin/bash", "/bin/zsh"] {
+        for (shell, home) in [
+            ("/bin/bash", [".bash_profile": "set -m\n" + trap]), ("/bin/bash", [".bash_profile": "trap 'set -m' DEBUG\n" + trap]),
+            ("/bin/zsh", [".zshrc": trap]),
+        ] {
             let fixture = try Fixture(home: home, subset: subset)
             var pid: pid_t = 0
             defer {
@@ -512,18 +585,63 @@ final class CommandLineLoginShellTests: XCTestCase {
         }
     }
 
-    /// Each login shell, csh and tcsh too, finds `subset` on the PATH only its login file sets, and nothing without it.
+    /// A startup file's job that stalls the shell is stopped at the time limit and on quitting, also when a DEBUG trap
+    /// gave it a process group of its own.
+    @MainActor
+    func testATimedOutCheckStopsAStartupJobInAProcessGroupOfItsOwn() async throws {
+        let job = "trap 'set -m' DEBUG\n\"$SUBSET_TEST_FOLDER/bin/subset\" --job\n"
+        let subset = "if [ \"$1\" = --job ]; then echo $$ > \"$SUBSET_TEST_FOLDER/job-pid\"; exec sleep 120; fi\necho 1.2.3\n"
+        for shell in ["/bin/bash", "/bin/sh"] {
+            let fixture = try Fixture(home: [".bash_profile": job, ".profile": job], subset: subset)
+            var pid: pid_t = 0
+            defer {
+                if pid > 0 { kill(pid, SIGKILL) }
+                fixture.remove()
+            }
+            let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: shell), timeLimit: 1.5))
+            await model.check()
+            XCTAssertEqual(model.status, .notInstalled, shell)
+            let recorded = (try? String(contentsOf: fixture.folder.appendingPathComponent("job-pid"), encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            pid = try XCTUnwrap(recorded.flatMap { pid_t($0) }, "\(shell): the startup job never ran")
+            await model.stop()
+            XCTAssertFalse(model.hasRunningShell, shell)
+            let ended = await Self.ends(pid)
+            XCTAssertTrue(ended, "\(shell): the startup job is still running after the check was stopped")
+        }
+    }
+
+    /// Each login shell, csh and tcsh too, finds `subset` on the PATH only its login file sets, and nothing without it,
+    /// and the check writes nothing to the temporary folder (an EXIT trap running after it sees nothing there either)
+    /// and removes nothing it did not create there.
     func testEachLoginShellFindsSubsetOnThePathItsLoginFileSets() async throws {
-        let posix = "PATH=\"$SUBSET_TEST_FOLDER/bin:$PATH\"; export PATH\n"
-        let home = [".profile": posix, ".zprofile": posix, ".login": "setenv PATH \"${SUBSET_TEST_FOLDER}/bin:${PATH}\"\n"]
+        let other = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: other.path)
+        defer { try? FileManager.default.removeItem(at: other) }
+        let before = CommandLineTests.checkEntries()
+        let seen = "trap '/bin/ls \"$SUBSET_TEST_TMP\" > \"$SUBSET_TEST_FOLDER/seen\"' EXIT\n"
+        setenv("SUBSET_TEST_TMP", FileManager.default.temporaryDirectory.path, 1)
+        defer { unsetenv("SUBSET_TEST_TMP") }
         for shell in shells {
-            for (files, status) in [(home, SubsetCommandStatus.installed(version: "1.2.3")), ([:], .notInstalled)] {
-                let fixture = try Fixture(home: files, subset: "echo 1.2.3\n", onPath: false)
+            for (onPath, status) in [(true, SubsetCommandStatus.installed(version: "1.2.3")), (false, .notInstalled)] {
+                let fixture = try Fixture(home: [".bash_profile": seen, ".zshrc": seen], subset: "echo 1.2.3\n", onPath: onPath)
                 defer { fixture.remove() }
                 let found = await SubsetCommandDetector(shell: LoginShell(path: shell)).detect()
-                XCTAssertEqual(found, status, "\(shell) with \(files.isEmpty ? "no" : "its") login file")
+                XCTAssertEqual(found, status, "\(shell) with\(onPath ? "" : "out") subset on its login PATH")
+                guard shell == "/bin/bash" || shell == "/bin/zsh" else { continue }
+                var listed: String?
+                // The listing has at least the other program's folder once it is complete.
+                for _ in 0..<100 where !(listed ?? "").hasSuffix("\n") {
+                    listed = try? String(contentsOf: fixture.folder.appendingPathComponent("seen"), encoding: .utf8)
+                    if !(listed ?? "").hasSuffix("\n") { try await Task.sleep(nanoseconds: 30_000_000) }
+                }
+                let entries = Set((listed ?? "").split(separator: "\n").map(String.init).filter { $0.hasPrefix("subset-check-") })
+                XCTAssertEqual(entries, before, "\(shell): the EXIT trap saw something the check wrote")
             }
         }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path), "the check removed a folder it did not create")
+        XCTAssertEqual(CommandLineTests.checkEntries(), before)
     }
 
     /// What the shell prints, here a DEBUG trap printing a version before each command, never counts as the answer.
@@ -549,24 +667,33 @@ final class CommandLineLoginShellTests: XCTestCase {
     private let shells = ["/bin/zsh", "/bin/bash", "/bin/sh", "/bin/ksh", "/bin/dash", "/bin/tcsh", "/bin/csh"]
         .filter { FileManager.default.isExecutableFile(atPath: $0) }
 
-    /// A folder with `home` (HOME for the test) and `bin/subset`, first on the PATH unless `onPath` is false; the
-    /// environment is restored by `remove()`.
+    /// A folder with `home` (HOME for the test) and `bin/subset`. Each login file (.profile, .bash_profile, .zprofile,
+    /// .login, which run after the system's path_helper) first sets the whole PATH, to `bin`, /usr/bin and /bin, or
+    /// without `bin` when `onPath` is false, then runs the test's lines for it. The inherited PATH starts with a decoy
+    /// `subset` printing 9.9.9, which no test may find. The environment is restored by `remove()`.
     private struct Fixture {
         let folder: URL
         let saved: [String: String?]
 
         init(home files: [String: String], subset: String, onPath: Bool = true) throws {
-            folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-command-\(UUID().uuidString)")
+            folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset command's \(UUID().uuidString)")
             let home = folder.appendingPathComponent("home")
             let bin = folder.appendingPathComponent("bin")
-            for directory in [home, bin] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+            let decoy = folder.appendingPathComponent("decoy")
+            for directory in [home, bin, decoy] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+            var files = files
+            for name in [".profile", ".bash_profile", ".zprofile"] { files[name] = "PATH=\"$SUBSET_TEST_PATH\"; export PATH\n" + (files[name] ?? "") }
+            files[".login"] = "setenv PATH \"${SUBSET_TEST_PATH}\"\n" + (files[".login"] ?? "")
             for (name, text) in files { try text.write(to: home.appendingPathComponent(name), atomically: true, encoding: .utf8) }
-            let fake = bin.appendingPathComponent("subset")
-            try ("#!/bin/sh\n" + subset).write(to: fake, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+            for (place, body) in [(bin, subset), (decoy, "echo 9.9.9\n")] {
+                let fake = place.appendingPathComponent("subset")
+                try ("#!/bin/sh\n" + body).write(to: fake, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+            }
             let environment = ProcessInfo.processInfo.environment
-            saved = ["PATH", "HOME", "ZDOTDIR", "SUBSET_TEST_FOLDER", "NODE_OPTIONS"].reduce(into: [:]) { $0[$1] = environment[$1] }
-            if onPath { setenv("PATH", "\(bin.path):\(environment["PATH"] ?? "/usr/bin:/bin")", 1) }
+            saved = ["PATH", "HOME", "ZDOTDIR", "SUBSET_TEST_FOLDER", "SUBSET_TEST_PATH", "NODE_OPTIONS"].reduce(into: [:]) { $0[$1] = environment[$1] }
+            setenv("SUBSET_TEST_PATH", (onPath ? "\(bin.path):" : "") + "/usr/bin:/bin", 1)
+            setenv("PATH", "\(decoy.path):\(environment["PATH"] ?? "/usr/bin:/bin")", 1)
             setenv("HOME", home.path, 1)
             setenv("SUBSET_TEST_FOLDER", folder.path, 1)
             unsetenv("ZDOTDIR")

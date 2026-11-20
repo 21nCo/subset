@@ -1,3 +1,4 @@
+import Combine
 import Darwin
 import Foundation
 
@@ -13,8 +14,8 @@ public struct HelperExample: Equatable, Identifiable, Sendable {
     /// Where the instructions for agents are, in the command's README.
     public var guide: URL
     /// Whether the copy `subset` runs (the first in /Applications, then ~/Applications) has nothing at the helper's path,
-    /// reached through real folders only, which `subset` takes for an older copy. A link on the way, or a helper that is
-    /// there, is checked by `subset` itself (a file inside the app, signed by Subset), which the section does not claim.
+    /// which `subset` takes for an older copy (`isMissing`). A helper that is there, or a path `subset` refuses, is
+    /// checked by `subset` itself (a file inside the app, signed by Subset), which the section does not claim.
     public var missingFromCopy: Bool
     /// Whether `subset` then runs the command's npm package instead (Timer, Minutes); otherwise it asks for an update.
     public var npmFallback: Bool
@@ -59,17 +60,30 @@ public enum HelperExamples {
         }
     }
 
-    /// Whether nothing is at `relative` in `bundle`, each folder before the first absent part being a real folder (not a
-    /// link), as `subset` decides an older copy.
+    /// Whether nothing is at `relative` in `bundle` as `subset` decides an older copy (`helperFile` in
+    /// packages/subset-dev/src/helpers.mjs): each part before the absent one leads, with its links resolved, to a folder
+    /// inside the bundle's Contents. A link that leads out of Contents or nowhere, a file where a folder should be, or a
+    /// part that cannot be read is refused by `subset`, not missing. It reads the file system: call it off the main thread.
     public static func isMissing(_ bundle: String, _ relative: String) -> Bool {
-        var path = bundle
-        for part in relative.split(separator: "/") {
-            path += "/\(part)"
+        guard var real = realPath(bundle) else { return false }
+        let contents = real + "/Contents/"
+        let parts = relative.split(separator: "/")
+        for (index, part) in parts.enumerated() {
+            let entry = real + "/" + part
             var status = stat()
-            guard lstat(path, &status) == 0 else { return errno == ENOENT }
-            guard status.st_mode & S_IFMT == S_IFDIR else { return false }
+            guard lstat(entry, &status) == 0 else { return errno == ENOENT }
+            guard let resolved = realPath(entry), (resolved + "/").hasPrefix(contents) else { return false }
+            real = resolved
+            guard index == parts.count - 1 || (stat(real, &status) == 0 && status.st_mode & S_IFMT == S_IFDIR) else { return false }
         }
         return false
+    }
+
+    /// `path` with its links resolved, or nil when it leads nowhere.
+    static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     /// Whether `subset` at `version` is older than `minimumLauncherVersion`, so it runs no bundled command. From that
@@ -80,4 +94,68 @@ public enum HelperExamples {
         }
         return core(version).lexicographicallyPrecedes(core(minimumLauncherVersion))
     }
+}
+
+/// The Command Line section's examples. They are shown at once; whether each helper is missing from its copy is looked
+/// up on a thread of its own, never the main thread (a stalled volume would freeze the window), and shown when known.
+/// `update` is called whenever the installed apps are looked for again (after an install, update or move to the Trash).
+/// At most `maxLookups` lookups run at once, so a stalled volume holds no more threads; the newest one asked for while
+/// they run starts when one ends, and an older lookup never replaces a newer one's result.
+@MainActor
+public final class HelperExamplesModel: ObservableObject {
+    public static let maxLookups = 2
+
+    @Published public private(set) var examples: [HelperExample] = []
+
+    private let isMissing: @Sendable (String, String) -> Bool
+    private var apps: [CatalogApp] = []
+    private var installed: [String: [InstalledCopy]] = [:]
+    /// Whether each helper path (bundle, NUL, relative path) is missing, from the newest lookup that ended.
+    private var missing: [String: Bool] = [:]
+    private var asked = 0
+    private var shown = 0
+    private var running = 0
+    private var pending: (number: Int, paths: [(String, String)])?
+
+    public init(isMissing: @escaping @Sendable (String, String) -> Bool = HelperExamples.isMissing) {
+        self.isMissing = isMissing
+    }
+
+    public func update(apps: [CatalogApp], installed: [String: [InstalledCopy]]) {
+        self.apps = apps
+        self.installed = installed
+        var paths: [(String, String)] = []
+        _ = HelperExamples.examples(apps: apps, installed: installed) { paths.append(($0, $1)); return false }
+        asked += 1
+        pending = (asked, paths)
+        publish()
+        startPending()
+    }
+
+    private func startPending() {
+        guard running < Self.maxLookups, let (number, paths) = pending else { return }
+        pending = nil
+        running += 1
+        let isMissing = isMissing
+        Thread {
+            let found = paths.map { (Self.key($0.0, $0.1), isMissing($0.0, $0.1)) }
+            Task { @MainActor [weak self] in self?.ended(number, found) }
+        }.start()
+    }
+
+    private func ended(_ number: Int, _ found: [(String, Bool)]) {
+        running -= 1
+        if number > shown {
+            shown = number
+            missing = Dictionary(found, uniquingKeysWith: { _, last in last })
+            publish()
+        }
+        startPending()
+    }
+
+    private func publish() {
+        examples = HelperExamples.examples(apps: apps, installed: installed) { missing[Self.key($0, $1)] ?? false }
+    }
+
+    private nonisolated static func key(_ bundle: String, _ relative: String) -> String { bundle + "\u{0}" + relative }
 }

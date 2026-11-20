@@ -19,11 +19,14 @@ struct ToolResult: Sendable {
 /// task is cancelled and `cancellable` is true, the group is sent SIGTERM, then SIGKILL 5 seconds later, and the result
 /// has no status. Past 1 MiB nothing more is kept and the output pipes are closed, so a writer that ignores SIGTERM ends
 /// on SIGPIPE. A stopped tool settles once its output has ended and its group is empty, or 5 seconds after the
-/// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
+/// SIGKILL, so nothing waits forever. A process the tool started in a group of its own (a job a shell with job control
+/// on started) is signalled with it, found among the tool's descendants at each signal and while it stops, and the
+/// tool settles only once they are gone too, or at that same bound. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
 /// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell; `environment`
-/// and `directory`, when given, replace this process's environment and working directory.
+/// and `directory`, when given, replace this process's environment and working directory. `onStdout` gets the standard
+/// output as it arrives, before the tool ends.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
@@ -31,10 +34,12 @@ enum ToolRunner {
 
     static func run(
         _ path: String, _ arguments: [String], argv0: String? = nil, environment: [String: String]? = nil, directory: String? = nil,
-        timeout: TimeInterval = 300, cancellable: Bool = true
+        timeout: TimeInterval = 300, cancellable: Bool = true, onStdout: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
-        let run = try ToolRun(path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout)
+        let run = try ToolRun(
+            path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout, onStdout: onStdout
+        )
         let result = await withTaskCancellationHandler {
             await run.result()
         } onCancel: {
@@ -69,8 +74,17 @@ private final class ToolRun: @unchecked Sendable {
     private var givenUp = false
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
+    private let onStdout: (@Sendable (Data) -> Void)?
+    /// The tool's descendants seen since it was first signalled, by pid and start time, so a reused pid is never signalled.
+    private var descendants: [pid_t: UInt64] = [:]
+    /// The last signal sent, which a descendant found later gets too.
+    private var lastSignal: Int32?
 
-    init(path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval) throws {
+    init(
+        path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval,
+        onStdout: (@Sendable (Data) -> Void)?
+    ) throws {
+        self.onStdout = onStdout
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -167,7 +181,12 @@ private final class ToolRun: @unchecked Sendable {
             return
         }
         let room = max(0, ToolRunner.maxOutputBytes - stdout.count - stderr.count)
-        if isOut { stdout.append(contentsOf: buffer[0..<min(count, room)]) } else { stderr.append(contentsOf: buffer[0..<min(count, room)]) }
+        if isOut {
+            stdout.append(contentsOf: buffer[0..<min(count, room)])
+            if room > 0 { onStdout?(Data(buffer[0..<min(count, room)])) }
+        } else {
+            stderr.append(contentsOf: buffer[0..<min(count, room)])
+        }
         guard count > room else { return }
         // Nothing more is kept: the pipes close (a process still writing gets SIGPIPE) and the group is stopped.
         stopOnQueue("it wrote more than \(ToolRunner.maxOutputBytes) bytes")
@@ -204,9 +223,41 @@ private final class ToolRun: @unchecked Sendable {
     }
 
     /// Signals the tool's group, even when the tool itself has exited; the tool alone when it left its group. Both stay
-    /// its own until it is reaped, which happens only once nothing more is signalled.
+    /// its own until it is reaped, which happens only once nothing more is signalled. Its descendants are found first
+    /// (a parent signalled first could end and leave them to launchd) and signalled too.
     private func signal(_ signal: Int32) {
+        lastSignal = signal
+        signalDescendants()
         if killpg(pid, signal) != 0, waitStatus == nil { kill(pid, signal) }
+    }
+
+    /// Adds the descendants the tool has now to those seen, and sends the last signal to each still running.
+    private func signalDescendants() {
+        guard let lastSignal else { return }
+        var parents = [pid]
+        while let parent = parents.popLast(), descendants.count < 512 {
+            var children = [pid_t](repeating: 0, count: 256)
+            let count = proc_listchildpids(parent, &children, Int32(children.count * MemoryLayout<pid_t>.size))
+            for child in children.prefix(Int(max(0, count))) where child > 0 && descendants[child] == nil {
+                guard let started = Self.startTime(child) else { continue }
+                descendants[child] = started
+                parents.append(child)
+            }
+        }
+        for (child, started) in descendants where Self.startTime(child) == started { kill(child, lastSignal) }
+    }
+
+    /// When the process started, or nil when there is no such process (a zombie counts as none).
+    private static func startTime(_ pid: pid_t) -> UInt64? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != UInt32(SZOMB) else { return nil }
+        return info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    }
+
+    /// Whether every descendant seen has ended.
+    private var descendantsGone: Bool {
+        descendants.allSatisfy { Self.startTime($0.key) != $0.value }
     }
 
     /// Whether no process is left in the tool's group besides the exited, unreaped tool (EPERM from killpg means one is,
@@ -227,6 +278,7 @@ private final class ToolRun: @unchecked Sendable {
     }
 
     private func poll() {
+        signalDescendants()
         finishIfDone()
         guard finished == nil else { return }
         queue.asyncAfter(deadline: .now() + 0.1) { [self] in poll() }
@@ -235,7 +287,7 @@ private final class ToolRun: @unchecked Sendable {
     private func finishIfDone() {
         guard finished == nil else { return }
         let settled: Bool
-        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 }
+        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone && descendantsGone } else { settled = waitStatus != nil && open == 0 }
         guard settled else { return }
         var text = String(decoding: stderr, as: UTF8.self)
         var status: Int32?
@@ -244,7 +296,7 @@ private final class ToolRun: @unchecked Sendable {
             if waitStatus & 0x7f == 0 { status = (waitStatus >> 8) & 0xff } else { text += "\nended by signal \(waitStatus & 0x7f)" }
         }
         if let stopping { text += "\nstopped: \(stopping)" }
-        if givenUp, !(open == 0 && groupGone) { text += "\nstopped: a process it started did not exit" }
+        if givenUp, !(open == 0 && groupGone && descendantsGone) { text += "\nstopped: a process it started did not exit" }
         let result = ToolResult(status: status, stdout: stdout, stderr: text)
         finished = result
         reap()

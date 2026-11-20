@@ -7,7 +7,13 @@ import SwiftUI
 /// instructions. The app never runs the setup itself.
 struct CommandLineSection: View {
     @ObservedObject var model: CommandLineModel
-    let examples: [HelperExample]
+    @ObservedObject var helpers: HelperExamplesModel
+
+    /// Whether the `subset` found predates the bundled commands, so it runs none of the examples from the app.
+    private var launcherPredatesCommands: Bool {
+        if case .installed(let version) = model.status { return HelperExamples.predatesBundledCommands(version) }
+        return false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -21,17 +27,18 @@ struct CommandLineSection: View {
                     .help("Look for subset in your login shell again")
             }
             copyLine("Set up:", HelperExamples.setupCommand, help: "Installs the subset command with npm (needs Node.js)")
-            if case .installed(let version) = model.status, !examples.isEmpty, HelperExamples.predatesBundledCommands(version) {
-                note("subset \(version) is older than \(HelperExamples.minimumLauncherVersion): it runs Timer and Minutes from npm, not from the app, and knows no other command below. Update it with the setup line")
+            if case .installed(let version) = model.status, !helpers.examples.isEmpty, launcherPredatesCommands {
+                note("The commands below need subset \(HelperExamples.minimumLauncherVersion) or later. subset \(version) runs Timer and Minutes from npm, not from the app, and knows no other command below")
             }
-            ForEach(examples) { example in
+            ForEach(helpers.examples) { example in
                 HStack(spacing: 8) {
                     copyLine("\(example.appName):", example.example, help: "subset runs the command \(example.appName) bundles once it has checked its signature")
                     Link("Agent instructions", destination: example.guide)
                         .font(.caption)
                         .help("Open the instructions for agents in the README")
                 }
-                if example.missingFromCopy {
+                // An older subset runs no command from the app, so what the app holds does not matter to it.
+                if example.missingFromCopy, !launcherPredatesCommands {
                     note(example.npmFallback
                         ? "This copy of \(example.appName) does not include it, so subset runs the npm package instead, downloading it if needed"
                         : "This copy of \(example.appName) does not include it: update \(example.appName) first")

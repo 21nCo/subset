@@ -25,8 +25,8 @@ public struct ShellOutput: Equatable, Sendable {
 /// The user's login shell, which only tells the environment its startup files set, and a runner for the version command.
 public protocol CommandShell: Sendable {
     /// Runs the login shell until it ends or is stopped (`timeout`, or the calling task cancelled). `found` gets its
-    /// exported environment and working directory as soon as they are known, which can be well before the shell ends
-    /// (an EXIT trap or a logout file still runs).
+    /// exported environment and working directory, at most once, as soon as they are known, which can be well before
+    /// the shell ends (an EXIT trap or a logout file still runs).
     func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable (LoginEnvironment) -> Void) async
     /// Runs a program as the app's own process with `environment`, in `directory` when given. Nil when it could not be
     /// started or was cancelled.
@@ -66,18 +66,33 @@ public struct LoginShell: CommandShell {
         [account, environment].compactMap { $0 }.first { $0.hasPrefix("/") && isExecutable($0) } ?? "/bin/zsh"
     }
 
-    /// The shell line writes the folder the shell is in (`pwd -P`: PWD can be unset or name another folder) and then the
-    /// environment to files in a private folder, renaming the second when complete, so what the shell prints does not
-    /// count and both are read as soon as it appears, not when the shell ends; they are deleted once read, and a folder
-    /// a crash left behind is deleted by the next check. `pwd`, `env` and `mv` by absolute path, `>`, `&&` and single
-    /// quotes mean the same in every shell above. It starts with
-    /// `set +m` (job control off), so a startup file that turns it on does not give the work of an EXIT trap or logout
-    /// file a process group of its own, which stopping the shell's group would miss; csh and tcsh only print an error.
-    static func script(folder: String) -> String {
-        "set +m; /bin/pwd -P > '\(folder)/directory' && /usr/bin/env -0 > '\(folder)/partial' && /bin/mv '\(folder)/partial' '\(folder)/environment'"
+    /// The shell line runs one process, awk, which prints its environment (the shell's exported variables) and the
+    /// folder the shell is in (`pwd -P`: PWD can be unset or name another folder) on the shell's standard output, framed
+    /// by a line made up for this check: `<mark>\n`, each NAME=value and the folder followed by NUL, `<mark>\n`. Nothing
+    /// is written to disk and no path is in the line; what the shell itself prints around the frame does not count, and
+    /// no shell command runs inside it. The line reads the same in every shell above (single quotes, no `!`). It starts
+    /// with `set +m` (job control off), so a startup file that turns it on does not give the work of an EXIT trap or
+    /// logout file a process group of its own; csh and tcsh only print an error. A job that still gets one is stopped
+    /// with the shell's descendants (`ToolRunner`).
+    static func script(mark: String) -> String {
+        "set +m; /usr/bin/awk 'BEGIN { \"/bin/pwd -P\" | getline folder; printf \"%s\\n\", \"\(mark)\"; "
+            + "for (name in ENVIRON) printf \"%s=%s%c\", name, ENVIRON[name], 0; printf \"%s%c%s\\n\", folder, 0, \"\(mark)\" }'"
     }
 
-    /// `env -0` output: NUL-separated NAME=value entries.
+    /// The environment and folder in a complete frame of `script(mark:)` in `output`, or nil until the frame is complete.
+    /// An empty environment or folder is no answer.
+    static func snapshot(in output: Data, mark: String) -> LoginEnvironment? {
+        let line = Data((mark + "\n").utf8)
+        guard let start = output.range(of: line), let end = output.range(of: Data([0]) + line, in: start.upperBound..<output.endIndex) else {
+            return nil
+        }
+        var entries = output[start.upperBound..<end.lowerBound].split(separator: 0, omittingEmptySubsequences: false)
+        guard let folder = entries.popLast().map({ String(decoding: $0, as: UTF8.self) }), !folder.isEmpty else { return nil }
+        let variables = environment(Data(entries.joined(separator: [0])))
+        return variables.isEmpty ? nil : LoginEnvironment(variables: variables, directory: folder)
+    }
+
+    /// NUL-separated NAME=value entries.
     static func environment(_ data: Data) -> [String: String] {
         let entries = data.split(separator: 0).compactMap { entry -> (String, String)? in
             let text = String(decoding: entry, as: UTF8.self)
@@ -88,38 +103,12 @@ public struct LoginShell: CommandShell {
     }
 
     public func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable (LoginEnvironment) -> Void) async {
-        let files = FileManager.default
-        let temporary = files.temporaryDirectory
-        for name in (try? files.contentsOfDirectory(atPath: temporary.path)) ?? [] where name.hasPrefix("subset-check-") {
-            let old = temporary.appendingPathComponent(name)
-            let modified = (try? files.attributesOfItem(atPath: old.path)[.modificationDate]) as? Date
-            if let modified, modified.timeIntervalSinceNow < -60 { try? files.removeItem(at: old) }
-        }
-        let folder = temporary.appendingPathComponent("subset-check-\(UUID().uuidString)")
-        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])) != nil else { return }
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let complete = folder.appendingPathComponent("environment")
-        let directory = folder.appendingPathComponent("directory")
-        // Looks every 50 ms, and once more after the shell has ended.
-        let watch = Task.detached {
-            while true {
-                if let data = try? Data(contentsOf: complete) {
-                    let variables = Self.environment(data)
-                    let place = (try? String(contentsOf: directory, encoding: .utf8))?.trimmingCharacters(in: .newlines)
-                    try? FileManager.default.removeItem(at: complete)
-                    try? FileManager.default.removeItem(at: directory)
-                    if !variables.isEmpty { found(LoginEnvironment(variables: variables, directory: place)) }
-                    return
-                }
-                if Task.isCancelled { return }
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
-        }
-        let line = Self.script(folder: folder.path)
+        let mark = "subset-check-" + UUID().uuidString
+        let output = Snapshot()
         let name = "-" + (path as NSString).lastPathComponent
-        _ = try? await ToolRunner.run(path, ["-ic", line], argv0: name, timeout: timeout)
-        watch.cancel()
-        await watch.value
+        _ = try? await ToolRunner.run(path, ["-ic", Self.script(mark: mark)], argv0: name, timeout: timeout) { chunk in
+            if let snapshot = output.add(chunk, mark: mark) { found(snapshot) }
+        }
     }
 
     public func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput? {
@@ -268,6 +257,24 @@ private final class Race<T: Sendable>: @unchecked Sendable {
         lock.unlock()
         if value == nil { work?.cancel() }
         continuation?.resume(returning: value)
+    }
+}
+
+/// The shell's standard output so far, until it holds a complete frame, which is told once.
+private final class Snapshot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output = Data()
+    private var told = false
+
+    func add(_ chunk: Data, mark: String) -> LoginEnvironment? {
+        lock.withLock {
+            guard !told else { return nil }
+            output.append(chunk)
+            guard let snapshot = LoginShell.snapshot(in: output, mark: mark) else { return nil }
+            told = true
+            output = Data()
+            return snapshot
+        }
     }
 }
 
