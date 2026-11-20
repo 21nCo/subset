@@ -1405,7 +1405,7 @@ extension AppInstallerTests {
                 XCTAssertEqual(AppInstaller.identity(target), old, "the previous copy is back")
                 XCTAssertEqual(names(trashFolder), [])
             } else {
-                XCTAssertEqual(failed?.message, "\(why), so it was left as it is and the previous copy was left in the Trash")
+                XCTAssertEqual(failed?.message, "\(why), so it was left as it is and the previous copy was not put back")
                 XCTAssertEqual(failed?.partial, true)
                 XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the replacement stays")
                 let trashed = trashFolder.appendingPathComponent(names(trashFolder).first ?? "")
@@ -1436,6 +1436,50 @@ extension AppInstallerTests {
         XCTAssertEqual([receipt.version, receipt.path], ["0.1.0", "/Applications/Breaks.app"], "the first copy's receipt")
         XCTAssertEqual(names(trashFolder).count, 1, "only the first copy's previous copy is in the Trash")
         assertNoLeftovers()
+    }
+
+    // The previous copy is put back only while it is that copy (device and inode): something else put where it was
+    // left (in the Trash, or under its hidden name after the Trash refused it) is never renamed into the install path;
+    // it stays where it is, and the result says the previous copy is no longer there.
+    func testOnlyThePreviousCopyItselfIsPutBack() async throws {
+        for trashRefuses in [false, true] {
+            try tearDownWithError()
+            try setUpWithError()
+            try installOld()
+            let receiptBefore = try Data(contentsOf: receiptFile)
+            let substitute = SubstitutingTrash(inner: trash, target: target.path, refuses: trashRefuses)
+            trash = substitute
+            let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: false) }
+            let label = trashRefuses ? "under its hidden name" : "in the Trash"
+            XCTAssertEqual(failed?.step, .install, label)
+            XCTAssertEqual(failed?.partial, true, label)
+            XCTAssertNil(AppInstaller.identity(target), "\(label): nothing is put at the install path")
+            let left = try XCTUnwrap(substitute.left.get(), label)
+            XCTAssertEqual(InstalledAppFinder.infoPlist(left.path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "\(label): the substitute stays")
+            XCTAssertTrue(failed?.notes.contains { $0.hasPrefix("The previous copy of Breaks is no longer at \(left.path), where it was left") } == true, "\(label): \(failed?.notes ?? [])")
+            XCTAssertTrue(failed?.message.hasSuffix("so it was left as it is and the previous copy was not put back") == true, failed?.message ?? "")
+            XCTAssertEqual(try Data(contentsOf: receiptFile), receiptBefore, "\(label): the receipt is put back")
+        }
+    }
+
+    // Two copies of a running app are quit for one update, or only the first is and the second then adds its own notes:
+    // the quit is said once, and last.
+    func testTheQuitIsSaidOnceAndLastForAnUpdateOfSeveralCopies() async throws {
+        for bothRun in [true, false] {
+            try tearDownWithError()
+            try setUpWithError()
+            try installOld()
+            let second = user.appendingPathComponent("Breaks.app")
+            try makeBundle(second, bundleID: "dev.subset.breaks", version: "0.0.8")
+            let paths = [target.path, second.path]
+            running.running.update { $0.formUnion(bothRun ? paths : [paths[0]]) }
+            if !bothRun { trash = ScriptedTrash(inner: trash, call: 2, error: POSIXError(.EPERM)) }
+            let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
+            XCTAssertEqual(running.quits.get(), bothRun ? paths : [paths[0]])
+            XCTAssertEqual(outcome.notes.filter { $0 == quitNote }.count, 1, "\(outcome.notes)")
+            XCTAssertEqual(outcome.notes.last, quitNote)
+            if !bothRun { XCTAssertTrue(outcome.notes.dropLast().last?.hasPrefix("The previous copy could not be moved to the Trash") == true, "\(outcome.notes)") }
+        }
     }
 
     // An update undone after its swap puts the receipt back as it was: none when there was none, and when it cannot be
@@ -1585,5 +1629,30 @@ private struct OccupyingThenFailingTrash: Trashing {
     func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
         occupy()
         throw error
+    }
+}
+
+/// After the previous copy goes to the Trash (or as the Trash refuses it, `refuses`), something else takes its place
+/// where it was left and the verified copy at `target` disappears; `left` is where the substitute is.
+private final class SubstitutingTrash: Trashing, @unchecked Sendable {
+    let inner: any Trashing
+    let target: String
+    let refuses: Bool
+    let left = Recorder<URL?>(nil)
+
+    init(inner: any Trashing, target: String, refuses: Bool) {
+        self.inner = inner
+        self.target = target
+        self.refuses = refuses
+    }
+
+    func trash(_ bundle: URL, appName: String, at date: Date) throws -> Trashed {
+        let place = refuses ? bundle : try inner.trash(bundle, appName: appName, at: date).url
+        try FileManager.default.moveItem(at: place, to: place.deletingLastPathComponent().appendingPathComponent("moved-\(UUID().uuidString).app"))
+        try makeBundle(place, bundleID: "dev.subset.other", version: "9.0")
+        try FileManager.default.removeItem(atPath: target)
+        left.update { $0 = place }
+        if refuses { throw POSIXError(.EACCES) }
+        return Trashed(url: place)
     }
 }

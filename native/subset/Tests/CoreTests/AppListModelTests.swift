@@ -593,6 +593,48 @@ final class AppListModelTests: XCTestCase {
         }
     }
 
+    // A refresh to a feed that describes an app differently (another app name) and a reload over the old feed are both
+    // asked for while a look is held, in either order: the merged look covers both descriptions, so the new feed is
+    // shown with what is installed as it describes the app, and the reload ends with the old description looked at.
+    func testLooksMergedAcrossFeedsCoverEachDescriptionOfAnApp() async throws {
+        for refreshFirst in [true, false] {
+            try install("Breaks", "dev.subset.breaks", version: "0.0.9")
+            try install("Breaks Renamed", "dev.subset.breaks", version: "0.1.0")
+            var renamed = AppInstallerTests.breaks
+            renamed.appName = "Breaks Renamed"
+            let url = CatalogLocation.defaultURL
+            let old = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [AppInstallerTests.breaks], tools: []), url: url, fetchedAt: clock.now, cached: false)
+            let new = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-13T00:00:00Z", apps: [renamed], tools: []), url: url, fetchedAt: clock.now, cached: false)
+            let counting = InFlightFinder(finder, gated: 2)
+            let model = AppListModel(loader: RecordedLoader([.success(old), .success(new)]), finder: counting, defaults: defaults)
+            await model.refresh()
+            XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.0.9"])
+            let held = Task { await model.reloadInstalled() }
+            let deadline = Date().addingTimeInterval(5)
+            while !counting.isHolding, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            var refresh: Task<Void, Never>?
+            var reload: Task<Void, Never>?
+            if refreshFirst {
+                refresh = Task { await model.refresh(force: true) }
+                try await Task.sleep(for: .milliseconds(50))
+                reload = Task { await model.reloadInstalled() }
+            } else {
+                reload = Task { await model.reloadInstalled() }
+                try await Task.sleep(for: .milliseconds(50))
+                refresh = Task { await model.refresh(force: true) }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            counting.release()
+            await held.value
+            await reload?.value
+            await refresh?.value
+            XCTAssertEqual(model.catalog?.apps.map(\.appName), ["Breaks Renamed"], "refresh first: \(refreshFirst)")
+            XCTAssertEqual(model.installed["breaks"]?.map(\.versionLabel), ["0.1.0"], "refresh first: \(refreshFirst): the new description's copy")
+            XCTAssertEqual(counting.peak, 1)
+            for name in ["Breaks", "Breaks Renamed"] { try FileManager.default.removeItem(at: root.appendingPathComponent("apps/\(name).app")) }
+        }
+    }
+
     // A refresh with a new feed and a reload over the old feed: the list shows the new feed with what is installed for it.
     func testARefreshWithANewFeedAndAReloadOverTheOldOneListTheNewFeedsApps() async throws {
         try install("Breaks", "dev.subset.breaks", version: "0.0.9")

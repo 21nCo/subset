@@ -190,12 +190,9 @@ public final class AppListModel: ObservableObject {
             startScan(apps)
             return begunScans
         }
-        // The latest description of each app asked for (detection reports by app ID).
+        // Every description of an app asked for (two catalogs may describe one app ID differently).
         var merged = pendingApps ?? []
-        for app in apps {
-            merged.removeAll { $0.id == app.id }
-            merged.append(app)
-        }
+        for app in apps where !merged.contains(where: { Self.key($0) == Self.key(app) }) { merged.append(app) }
         pendingApps = merged
         return begunScans + 1
     }
@@ -206,15 +203,27 @@ public final class AppListModel: ObservableObject {
         let number = begunScans
         let finder = finder
         scanQueue.async { [weak self] in
-            let found = finder.detect(apps)
-            Task { @MainActor in self?.scanEnded(number, apps, found) }
+            // Detection reports by app ID, so descriptions sharing an ID are looked for in passes of their own.
+            var found: [String: [InstalledCopy]?] = [:]
+            var rest = apps
+            while !rest.isEmpty {
+                var pass: [CatalogApp] = []
+                rest.removeAll { app in
+                    guard !pass.contains(where: { $0.id == app.id }) else { return false }
+                    pass.append(app)
+                    return true
+                }
+                let copies = finder.detect(pass)
+                for app in pass { found[Self.key(app)] = .some(copies[app.id]) }
+            }
+            Task { @MainActor [found] in self?.scanEnded(number, found) }
         }
     }
 
     /// Publishes look `number`, begins the merged look asked for meanwhile, if any, and resumes the callers waiting for
     /// this look or an earlier one.
-    private func scanEnded(_ number: Int, _ apps: [CatalogApp], _ found: [String: [InstalledCopy]]) {
-        for app in apps { observed[Self.key(app)] = found[app.id] }
+    private func scanEnded(_ number: Int, _ found: [String: [InstalledCopy]?]) {
+        for (key, copies) in found { observed[key] = copies }
         publishedScans = number
         publishInstalled()
         scanning = false
@@ -240,7 +249,7 @@ public final class AppListModel: ObservableObject {
     }
 
     /// What detection reads of an app (InstalledAppFinder.copies(of:)).
-    private static func key(_ app: CatalogApp) -> String { "\(app.id)\u{0}\(app.bundleID)\u{0}\(app.appName)" }
+    private nonisolated static func key(_ app: CatalogApp) -> String { "\(app.id)\u{0}\(app.bundleID)\u{0}\(app.appName)" }
 
     /// The newest release that is an update for some installed copy: from the live channel, or the live or beta channel
     /// when betas are shown.
