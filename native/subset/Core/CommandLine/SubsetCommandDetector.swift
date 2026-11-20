@@ -22,17 +22,19 @@ public struct ShellOutput: Equatable, Sendable {
     }
 }
 
-/// The user's login shell, which only tells the PATH its startup files set, and a runner for the version command.
+/// The user's login shell, which only tells the environment its startup files set, and a runner for the version command.
 public protocol CommandShell: Sendable {
-    /// Runs the login shell until it ends or is stopped (`timeout`, or the calling task cancelled). `found` gets the
-    /// PATH as soon as it is known, which can be well before the shell ends (an EXIT trap or a logout file still runs).
-    func readPath(timeout: TimeInterval, found: @escaping @Sendable (String) -> Void) async
-    /// Runs a program as the app's own process. Nil when it could not be started or was cancelled.
-    func run(_ path: String, _ arguments: [String], timeout: TimeInterval) async -> ShellOutput?
+    /// Runs the login shell until it ends or is stopped (`timeout`, or the calling task cancelled). `found` gets its
+    /// exported environment (with `PWD`, its working directory) as soon as it is known, which can be well before the
+    /// shell ends (an EXIT trap or a logout file still runs).
+    func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable ([String: String]) -> Void) async
+    /// Runs a program as the app's own process with `environment`, in `directory` when given. Nil when it could not be
+    /// started or was cancelled.
+    func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput?
 }
 
-/// The user's login shell, run as an interactive login shell, so the PATH set in its startup files (nvm, fnm, Homebrew)
-/// applies. It is started as login(1) starts one, with `-` before its name as argument zero, and `-ic`, which zsh, bash,
+/// The user's login shell, run as an interactive login shell, so the environment set in its startup files (a PATH from
+/// nvm, fnm or Homebrew, an unset NODE_OPTIONS) applies. It is started as login(1) starts one, with `-` before its name as argument zero, and `-ic`, which zsh, bash,
 /// sh, ksh, dash, fish, tcsh and csh all accept (tcsh and csh reject `-ilc`). It runs with nothing on its standard
 /// input, in its own process group, and is stopped with everything it started after `timeout` (`ToolRunner`).
 public struct LoginShell: CommandShell {
@@ -53,24 +55,36 @@ public struct LoginShell: CommandShell {
         [account, environment].compactMap { $0 }.first { $0.hasPrefix("/") && isExecutable($0) } ?? "/bin/zsh"
     }
 
-    /// The shell line writes the PATH to a file in a private folder and renames it when complete, so what the shell
-    /// prints does not count and the PATH is read as soon as the file appears, not when the shell ends. `printenv` and
-    /// `mv` by absolute path, `>`, `&&` and single quotes mean the same in every shell above.
+    /// The shell line writes the environment to a file in a private folder and renames it when complete, so what the
+    /// shell prints does not count and the environment is read as soon as the file appears, not when the shell ends.
+    /// `env` and `mv` by absolute path, `>`, `&&` and single quotes mean the same in every shell above. It starts with
+    /// `set +m` (job control off), so a startup file that turns it on does not give the work of an EXIT trap or logout
+    /// file a process group of its own, which stopping the shell's group would miss; csh and tcsh only print an error.
     static func script(partial: String, complete: String) -> String {
-        "/usr/bin/printenv PATH > '\(partial)' && /bin/mv '\(partial)' '\(complete)'"
+        "set +m; /usr/bin/env -0 > '\(partial)' && /bin/mv '\(partial)' '\(complete)'"
     }
 
-    public func readPath(timeout: TimeInterval, found: @escaping @Sendable (String) -> Void) async {
+    /// `env -0` output: NUL-separated NAME=value entries.
+    static func environment(_ data: Data) -> [String: String] {
+        let entries = data.split(separator: 0).compactMap { entry -> (String, String)? in
+            let text = String(decoding: entry, as: UTF8.self)
+            guard let equals = text.firstIndex(of: "="), equals != text.startIndex else { return nil }
+            return (String(text[..<equals]), String(text[text.index(after: equals)...]))
+        }
+        return Dictionary(entries, uniquingKeysWith: { _, last in last })
+    }
+
+    public func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable ([String: String]) -> Void) async {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-check-\(UUID().uuidString)")
         guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])) != nil else { return }
         defer { try? FileManager.default.removeItem(at: folder) }
-        let complete = folder.appendingPathComponent("path")
+        let complete = folder.appendingPathComponent("environment")
         // Looks every 50 ms, and once more after the shell has ended.
         let watch = Task.detached {
             while true {
-                if let text = try? String(contentsOf: complete, encoding: .utf8) {
-                    let path = text.trimmingCharacters(in: .newlines)
-                    if !path.isEmpty { found(path) }
+                if let data = try? Data(contentsOf: complete) {
+                    let environment = Self.environment(data)
+                    if !environment.isEmpty { found(environment) }
                     return
                 }
                 if Task.isCancelled { return }
@@ -84,37 +98,42 @@ public struct LoginShell: CommandShell {
         await watch.value
     }
 
-    public func run(_ path: String, _ arguments: [String], timeout: TimeInterval) async -> ShellOutput? {
-        guard let result = try? await ToolRunner.run(path, arguments, timeout: timeout) else { return nil }
+    public func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput? {
+        guard let result = try? await ToolRunner.run(path, arguments, environment: environment, directory: directory, timeout: timeout) else { return nil }
         return ShellOutput(status: result.status, stdout: String(decoding: result.stdout, as: UTF8.self))
     }
 }
 
-/// One check: the login shell telling its PATH, then the version command run with it. Both are the app's own processes
+/// One check: the login shell telling its environment, then the version command run with it, in its directory. Both are the app's own processes
 /// and may outlive the answer: a shell can still run its EXIT trap or logout files after the answer is shown, and a run
 /// stopped at the time limit takes a moment to end (`ToolRunner`: SIGTERM, then SIGKILL).
 public final class SubsetCommandProbe: Sendable {
     let shell: Task<Void, Never>
     let answer: Task<ShellOutput?, Never>
-    private let path: OneShot<String>
+    private let environment: OneShot<[String: String]>
 
     init(shell: any CommandShell, timeLimit: TimeInterval) {
-        let path = OneShot<String>()
+        let environment = OneShot<[String: String]>()
         let deadline = Date().addingTimeInterval(timeLimit)
-        self.path = path
+        self.environment = environment
         self.shell = Task.detached {
-            await shell.readPath(timeout: timeLimit) { path.set($0) }
-            path.set(nil)
+            await shell.readEnvironment(timeout: timeLimit) { environment.set($0) }
+            environment.set(nil)
         }
         answer = Task.detached {
-            guard let found = await path.value else { return nil }
-            return await shell.run("/usr/bin/env", ["PATH=\(found)"] + SubsetCommandDetector.arguments, timeout: max(0, deadline.timeIntervalSinceNow))
+            guard let found = await environment.value else { return nil }
+            var isFolder: ObjCBool = false
+            let directory = found["PWD"].flatMap { FileManager.default.fileExists(atPath: $0, isDirectory: &isFolder) && isFolder.boolValue ? $0 : nil }
+            return await shell.run(
+                "/usr/bin/env", SubsetCommandDetector.arguments, environment: found, directory: directory,
+                timeout: max(0, deadline.timeIntervalSinceNow)
+            )
         }
     }
 
     /// Stops the shell and the version command if they still run, and starts no version command.
     public func cancel() {
-        path.set(nil)
+        environment.set(nil)
         shell.cancel()
         answer.cancel()
     }
@@ -126,8 +145,8 @@ public final class SubsetCommandProbe: Sendable {
     }
 }
 
-/// Finds `subset` by running `/usr/bin/env subset --version` with the PATH of the user's login shell, for 5 seconds
-/// at most. Any failure is `notInstalled`; nothing is installed and no error is raised.
+/// Finds `subset` by running `/usr/bin/env subset --version` with the environment and working directory of the user's
+/// login shell, for 5 seconds at most. Any failure is `notInstalled`; nothing is installed and no error is raised.
 public struct SubsetCommandDetector: Sendable {
     public static let command = "/usr/bin/env subset --version"
     static let arguments = ["subset", "--version"]

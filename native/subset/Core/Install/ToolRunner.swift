@@ -22,17 +22,19 @@ struct ToolResult: Sendable {
 /// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
-/// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell.
+/// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell; `environment`
+/// and `directory`, when given, replace this process's environment and working directory.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
     static let drainAfterExit: TimeInterval = 2
 
     static func run(
-        _ path: String, _ arguments: [String], argv0: String? = nil, timeout: TimeInterval = 300, cancellable: Bool = true
+        _ path: String, _ arguments: [String], argv0: String? = nil, environment: [String: String]? = nil, directory: String? = nil,
+        timeout: TimeInterval = 300, cancellable: Bool = true
     ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
-        let run = try ToolRun(path: path, arguments: arguments, argv0: argv0, timeout: timeout)
+        let run = try ToolRun(path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout)
         let result = await withTaskCancellationHandler {
             await run.result()
         } onCancel: {
@@ -68,7 +70,7 @@ private final class ToolRun: @unchecked Sendable {
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
 
-    init(path: String, arguments: [String], argv0: String?, timeout: TimeInterval) throws {
+    init(path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval) throws {
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -85,6 +87,7 @@ private final class ToolRun: @unchecked Sendable {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, out[1], 1)
         posix_spawn_file_actions_adddup2(&actions, err[1], 2)
+        if let directory { posix_spawn_file_actions_addchdir_np(&actions, directory) }
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
@@ -99,7 +102,7 @@ private final class ToolRun: @unchecked Sendable {
         posix_spawnattr_setsigmask(&attributes, &none)
 
         let argv: [UnsafeMutablePointer<CChar>?] = ([argv0 ?? path] + arguments).map { strdup($0) } + [nil]
-        let envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        let envp: [UnsafeMutablePointer<CChar>?] = (environment ?? ProcessInfo.processInfo.environment).map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { (argv + envp).forEach { free($0) } }
         var child: pid_t = 0
         let code = posix_spawn(&child, path, &actions, &attributes, argv, envp)

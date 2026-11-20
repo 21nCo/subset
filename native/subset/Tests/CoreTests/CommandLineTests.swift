@@ -7,19 +7,20 @@ import XCTest
 final class CommandLineTests: XCTestCase {
     // MARK: Detection
 
-    func testFoundRunsTheVersionCommandWithTheLoginShellsPathAndShowsTheVersion() async {
-        let shell = FakeShell(path: .answer("/login/bin:/usr/bin"), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
+    func testFoundRunsTheVersionCommandWithTheLoginShellsEnvironmentAndShowsTheVersion() async {
+        let shell = FakeShell(login: .answer(["PATH": "/login/bin:/usr/bin"]), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
         let status = await detector(shell).detect()
         XCTAssertEqual(status, .installed(version: "0.2.0"))
         XCTAssertEqual(shell.pathTimeouts, [5])
-        XCTAssertEqual(shell.runs.map(\.command), [["/usr/bin/env", "PATH=/login/bin:/usr/bin", "subset", "--version"]])
+        XCTAssertEqual(shell.runs.map(\.command), [["/usr/bin/env", "subset", "--version"]])
+        XCTAssertEqual(shell.runs.first?.environment, ["PATH": "/login/bin:/usr/bin"])
         XCTAssertEqual(shell.runs.first?.timeout ?? 0, 5, accuracy: 0.5, "the version command gets what is left of the 5 seconds")
     }
 
     /// The shell's EXIT trap or logout files still run after it told its PATH; the answer does not wait for them.
     @MainActor
     func testFoundAsSoonAsTheVersionCommandAnswersWhileTheShellStillRuns() async {
-        let shell = FakeShell(path: .answer("/login/bin", thenRun: 1), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
+        let shell = FakeShell(login: .answer(["PATH": "/login/bin"], thenRun: 1), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
         let model = CommandLineModel(detector: detector(shell))
         let started = Date()
         await model.check()
@@ -34,7 +35,7 @@ final class CommandLineTests: XCTestCase {
     func testOnlyAVersionPrintedByASuccessfulVersionCommandIsInstalled() async {
         let found = ["  0.2.1-beta.1  \n": "0.2.1-beta.1", "0.2.0": "0.2.0"]
         for (stdout, version) in found {
-            let status = await detector(FakeShell(path: .answer("/bin"), version: .answer(ShellOutput(status: 0, stdout: stdout)))).detect()
+            let status = await detector(FakeShell(login: .answer(["PATH": "/bin"]), version: .answer(ShellOutput(status: 0, stdout: stdout)))).detect()
             XCTAssertEqual(status, .installed(version: version), stdout)
         }
         let outputs: [ShellOutput?] = [
@@ -48,19 +49,19 @@ final class CommandLineTests: XCTestCase {
             nil,  // could not be started
         ]
         for output in outputs {
-            let status = await detector(FakeShell(path: .answer("/bin"), version: .answer(output))).detect()
+            let status = await detector(FakeShell(login: .answer(["PATH": "/bin"]), version: .answer(output))).detect()
             XCTAssertEqual(status, .notInstalled, "\(String(describing: output))")
         }
-        // The shell ended, or could not be started, without telling its PATH: no version command runs.
-        let noPath = FakeShell(path: .answer(nil), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
+        // The shell ended, or could not be started, without telling its environment: no version command runs.
+        let noPath = FakeShell(login: .answer(nil), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
         let status = await detector(noPath).detect()
         XCTAssertEqual(status, .notInstalled)
         XCTAssertTrue(noPath.runs.isEmpty)
     }
 
     func testTimeoutIsNotInstalledAndStopsTheShellOrTheVersionCommand() async throws {
-        let silentShell = FakeShell(path: .hangUntilCancelled(stopping: 0), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
-        let stalledVersion = FakeShell(path: .answer("/bin"), version: .hangUntilCancelled(stopping: 0))
+        let silentShell = FakeShell(login: .hangUntilCancelled(stopping: 0), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
+        let stalledVersion = FakeShell(login: .answer(["PATH": "/bin"]), version: .hangUntilCancelled(stopping: 0))
         for (shell, step) in [(silentShell, "shell"), (stalledVersion, "version")] {
             let started = Date()
             let status = await detector(shell, timeLimit: 0.2).detect()
@@ -73,9 +74,9 @@ final class CommandLineTests: XCTestCase {
     }
 
     /// An interactive shell ignores SIGTERM, so stopping it can take longer than the limit; the answer does not wait,
-    /// and a PATH it tells after the limit starts no version command.
+    /// and an environment it tells after the limit starts no version command.
     func testTimeoutDoesNotWaitForAShellThatIsSlowToStop() async throws {
-        let shell = FakeShell(path: .answer("/bin", after: 0.6), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
+        let shell = FakeShell(login: .answer(["PATH": "/bin"], after: 0.6), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n")))
         let started = Date()
         let checker = detector(shell, timeLimit: 0.2)
         let probe = checker.start()
@@ -87,7 +88,7 @@ final class CommandLineTests: XCTestCase {
     }
 
     func testACancelledCheckEndsAtOnceAsNotInstalled() async {
-        let shell = FakeShell(path: .answer("/bin"), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n"), after: 3))
+        let shell = FakeShell(login: .answer(["PATH": "/bin"]), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n"), after: 3))
         let started = Date()
         let checker = detector(shell)
         let task = Task { await checker.detect() }
@@ -98,8 +99,8 @@ final class CommandLineTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
     }
 
-    /// The shell line, run by a stand-in login shell that prints around it, is given `-ic`; only the PATH counts.
-    func testTheLoginShellTellsThePathItsStartupFilesSet() async throws {
+    /// The shell line, run by a stand-in login shell that prints around it, is given `-ic`; only the environment counts.
+    func testTheLoginShellTellsTheEnvironmentItsStartupFilesSet() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-command-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -109,17 +110,25 @@ final class CommandLineTests: XCTestCase {
             echo "$1" > '\(folder.path)/flags'
             echo 'Welcome back'
             PATH=/login/bin:/usr/bin:/bin; export PATH
+            SUBSET_LOGIN='a b=c'; export SUBSET_LOGIN
+            unset SUBSET_UNSET_BY_LOGIN
             eval "$2"
             echo bye
             exit 3
 
             """.write(toFile: shellPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shellPath)
+        setenv("SUBSET_UNSET_BY_LOGIN", "1", 1)
+        defer { unsetenv("SUBSET_UNSET_BY_LOGIN") }
         let found = Found()
-        await LoginShell(path: shellPath).readPath(timeout: 5) { found.paths.append($0) }
-        XCTAssertEqual(found.paths, ["/login/bin:/usr/bin:/bin"])
+        await LoginShell(path: shellPath).readEnvironment(timeout: 5) { found.paths.append($0) }
+        XCTAssertEqual(found.paths.count, 1)
+        XCTAssertEqual(found.paths.first?["PATH"], "/login/bin:/usr/bin:/bin")
+        XCTAssertEqual(found.paths.first?["SUBSET_LOGIN"], "a b=c")
+        XCTAssertNil(found.paths.first?["SUBSET_UNSET_BY_LOGIN"])
+        XCTAssertEqual(LoginShell.environment(Data("A=1\u{0}B=x=y\u{0}=bad\u{0}C\u{0}".utf8)), ["A": "1", "B": "x=y"])
         XCTAssertEqual(try String(contentsOfFile: folder.path + "/flags", encoding: .utf8), "-ic\n")
-        await LoginShell(path: folder.path + "/no-such-shell").readPath(timeout: 1) { found.paths.append($0) }
+        await LoginShell(path: folder.path + "/no-such-shell").readEnvironment(timeout: 1) { found.paths.append($0) }
         XCTAssertEqual(found.paths.count, 1)
     }
 
@@ -167,7 +176,7 @@ final class CommandLineTests: XCTestCase {
 
     @MainActor
     func testTheModelShowsCheckingThenTheResultAndRunsOneCheckAtATime() async throws {
-        let shell = FakeShell(path: .answer("/bin"), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n"), after: 0.3))
+        let shell = FakeShell(login: .answer(["PATH": "/bin"]), version: .answer(ShellOutput(status: 0, stdout: "0.2.0\n"), after: 0.3))
         let model = CommandLineModel(detector: detector(shell))
         XCTAssertEqual(model.status, .checking)
         let first = Task { await model.check() }
@@ -179,7 +188,7 @@ final class CommandLineTests: XCTestCase {
         XCTAssertFalse(model.isChecking)
         XCTAssertEqual(shell.pathTimeouts.count, 1)
 
-        let missing = CommandLineModel(detector: detector(FakeShell(path: .answer("/bin"), version: .answer(ShellOutput(status: 127, stdout: "")))))
+        let missing = CommandLineModel(detector: detector(FakeShell(login: .answer(["PATH": "/bin"]), version: .answer(ShellOutput(status: 127, stdout: "")))))
         await missing.check()
         XCTAssertEqual(missing.status, .notInstalled)
     }
@@ -189,8 +198,8 @@ final class CommandLineTests: XCTestCase {
     @MainActor
     func testStoppingTheModelWaitsForAShellOrVersionCommandGivenUpAtTheTimeLimit() async throws {
         let shells = [
-            (FakeShell(path: .hangUntilCancelled(stopping: 0.5), version: .answer(nil)), "shell"),
-            (FakeShell(path: .answer("/bin"), version: .hangUntilCancelled(stopping: 0.5)), "version"),
+            (FakeShell(login: .hangUntilCancelled(stopping: 0.5), version: .answer(nil)), "shell"),
+            (FakeShell(login: .answer(["PATH": "/bin"]), version: .hangUntilCancelled(stopping: 0.5)), "version"),
         ]
         for (shell, step) in shells {
             let model = CommandLineModel(detector: detector(shell, timeLimit: 0.1))
@@ -207,7 +216,7 @@ final class CommandLineTests: XCTestCase {
     /// Quitting during a check stops its shell, waits for it, shows "not installed" and starts no new check.
     @MainActor
     func testStoppingTheModelStopsARunningCheckAndStartsNoOther() async throws {
-        let shell = FakeShell(path: .answer("/bin"), version: .hangUntilCancelled(stopping: 0.3))
+        let shell = FakeShell(login: .answer(["PATH": "/bin"]), version: .hangUntilCancelled(stopping: 0.3))
         let model = CommandLineModel(detector: detector(shell, timeLimit: 30))
         let check = Task { await model.check() }
         for _ in 0..<50 where shell.runs.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
@@ -227,7 +236,7 @@ final class CommandLineTests: XCTestCase {
     /// A shell that never ends does not hold quitting past the limit.
     @MainActor
     func testStoppingTheModelWaitsNoLongerThanItsLimit() async throws {
-        let shell = FakeShell(path: .answer("/bin", after: 5), version: .answer(nil))
+        let shell = FakeShell(login: .answer(["PATH": "/bin"], after: 5), version: .answer(nil))
         let model = CommandLineModel(detector: detector(shell, timeLimit: 0.1))
         await model.check()
         let started = Date()
@@ -250,13 +259,23 @@ final class CommandLineTests: XCTestCase {
         let older = InstalledCopy(path: "/Applications/Old.app", folder: "/Applications", version: "0.0.1", build: "1", channel: nil)
         let installed = ["timer": [copy], "breaks": [copy], "future": [older, copy], "system": [], "gone": [copy]]
         // The first copy, which `subset` runs, decides: here only X.app has the helpers.
-        let examples = HelperExamples.examples(apps: apps, installed: installed) { $0.hasPrefix("/Applications/X.app/Contents/") }
+        let examples = HelperExamples.examples(apps: apps, installed: installed) { !$0.hasPrefix("/Applications/X.app/Contents/") }
         XCTAssertEqual(examples.map(\.example), [
             "subset timer list", "subset future --help", "subset future-two --help",
         ])
         XCTAssertEqual(examples.map(\.appName), ["Timer", "Future", "Future"])
         XCTAssertEqual(examples.map(\.command), ["timer", "future", "future-two"])
-        XCTAssertEqual(examples.map(\.bundled), [true, false, false])
+        XCTAssertEqual(examples.map(\.missingFromCopy), [false, true, true])
+        XCTAssertEqual(examples.map(\.npmFallback), [true, false, false])
+        // Only nothing at the path is missing: a dangling link or a folder there is not (subset refuses those itself).
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("subset-helpers-\(UUID().uuidString)")
+        let helpers = folder.appendingPathComponent("X.app/Contents/Helpers")
+        try FileManager.default.createDirectory(at: helpers.appendingPathComponent("future"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: helpers.appendingPathComponent("timer").path, withDestinationPath: "/no/such/file")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let local = InstalledCopy(path: folder.appendingPathComponent("X.app").path, folder: "/Applications", version: "0.1.0", build: "1", channel: nil)
+        let onDisk = HelperExamples.examples(apps: [app("timer", "Timer", helpers: [helper("timer")]), apps[4]], installed: ["timer": [local], "future": [local]])
+        XCTAssertEqual(onDisk.map(\.missingFromCopy), [false, false, true])
         XCTAssertEqual(examples[0].guide.absoluteString, "https://github.com/21nCo/subset/blob/dev/packages/timer-cli/README.md#agent-skill")
         XCTAssertEqual(
             examples[1].guide.absoluteString,
@@ -266,18 +285,19 @@ final class CommandLineTests: XCTestCase {
         XCTAssertEqual(HelperExamples.setupCommand, "npm i -g subset.dev")
     }
 
-    /// `subset` runs bundled commands from `minimumLauncherVersion` on, which the `subset.dev` in this checkout meets.
-    func testOnlyALauncherFromTheMinimumVersionOnRunsBundledCommands() throws {
-        for version in ["0.2.0", "0.2.1-beta.1", "0.10.0", "1.0.0", "0.2.0+build.5"] {
-            XCTAssertTrue(HelperExamples.runsBundledCommands(version), version)
+    /// Only a `subset` older than `minimumLauncherVersion` is known to run no bundled command; the `subset.dev` in this
+    /// checkout is not older.
+    func testOnlyALauncherOlderThanTheMinimumVersionIsKnownToRunNoBundledCommand() throws {
+        for version in ["0.1.1", "0.1.99", "0.0.9", "0.1.1-beta.3"] {
+            XCTAssertTrue(HelperExamples.predatesBundledCommands(version), version)
         }
-        for version in ["0.1.1", "0.1.99", "0.2.0-beta.1", "0.0.9"] {
-            XCTAssertFalse(HelperExamples.runsBundledCommands(version), version)
+        for version in ["0.2.0", "0.2.0-beta.1", "0.2.1-beta.1", "0.10.0", "1.0.0", "0.2.0+build.5"] {
+            XCTAssertFalse(HelperExamples.predatesBundledCommands(version), version)
         }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../..").standardized
         let package = try Data(contentsOf: root.appendingPathComponent("packages/subset-dev/package.json"))
         let version = try XCTUnwrap((JSONSerialization.jsonObject(with: package) as? [String: Any])?["version"] as? String)
-        XCTAssertTrue(HelperExamples.runsBundledCommands(version), "subset.dev \(version) is older than minimumLauncherVersion")
+        XCTAssertFalse(HelperExamples.predatesBundledCommands(version), "subset.dev \(version) is older than minimumLauncherVersion")
     }
 
     /// Every command an app declares in its `macos-release.json` has its own example, and every guide is a heading of
@@ -323,11 +343,11 @@ final class CommandLineTests: XCTestCase {
     }
 }
 
-/// The PATHs a login shell told.
+/// The environments a login shell told.
 private final class Found: @unchecked Sendable {
     private let lock = NSLock()
-    private var told: [String] = []
-    var paths: [String] {
+    private var told: [[String: String]] = []
+    var paths: [[String: String]] {
         get { lock.withLock { told } }
         set { lock.withLock { told = newValue } }
     }
@@ -343,31 +363,31 @@ private final class FakeShell: CommandShell, @unchecked Sendable {
         case hangUntilCancelled(stopping: TimeInterval)
     }
 
-    private let path: Behavior<String?>
+    private let login: Behavior<[String: String]?>
     private let version: Behavior<ShellOutput?>
     private let lock = NSLock()
     private var timeouts: [TimeInterval] = []
-    private var recorded: [(command: [String], timeout: TimeInterval)] = []
+    private var recorded: [(command: [String], environment: [String: String], timeout: TimeInterval)] = []
     private var cancelled: Set<String> = []
     private var ended: Set<String> = []
 
-    init(path: Behavior<String?>, version: Behavior<ShellOutput?>) {
-        self.path = path
+    init(login: Behavior<[String: String]?>, version: Behavior<ShellOutput?>) {
+        self.login = login
         self.version = version
     }
 
     var pathTimeouts: [TimeInterval] { lock.withLock { timeouts } }
-    var runs: [(command: [String], timeout: TimeInterval)] { lock.withLock { recorded } }
+    var runs: [(command: [String], environment: [String: String], timeout: TimeInterval)] { lock.withLock { recorded } }
     func wasCancelled(_ step: String) -> Bool { lock.withLock { cancelled.contains(step) } }
     func hasEnded(_ step: String) -> Bool { lock.withLock { ended.contains(step) } }
 
-    func readPath(timeout: TimeInterval, found: @escaping @Sendable (String) -> Void) async {
+    func readEnvironment(timeout: TimeInterval, found: @escaping @Sendable ([String: String]) -> Void) async {
         lock.withLock { timeouts.append(timeout) }
-        _ = await act(path, step: "shell") { if let path = $0 { found(path) } }
+        _ = await act(login, step: "shell") { if let environment = $0 { found(environment) } }
     }
 
-    func run(_ path: String, _ arguments: [String], timeout: TimeInterval) async -> ShellOutput? {
-        lock.withLock { recorded.append(([path] + arguments, timeout)) }
+    func run(_ path: String, _ arguments: [String], environment: [String: String], directory: String?, timeout: TimeInterval) async -> ShellOutput? {
+        lock.withLock { recorded.append(([path] + arguments, environment, timeout)) }
         return await act(version, step: "version") { _ in } ?? nil
     }
 
@@ -397,23 +417,52 @@ private final class FakeShell: CommandShell, @unchecked Sendable {
 /// The check with real zsh, bash and sh login shells run with no terminal (as `ToolRunner` runs them), a made-up home
 /// folder holding their startup files, and a stand-in `subset` on the PATH.
 final class CommandLineLoginShellTests: XCTestCase {
-    /// A complete answer counts at once even when an EXIT trap or logout file keeps the shell running past the limit;
-    /// the shell is still tracked, and stopping the model ends it.
+    /// A complete answer counts at once even when an EXIT trap keeps the shell running past the limit; the shell is
+    /// still tracked, and stopping the model ends it and the trap's work, also when a startup file turned job control on.
     @MainActor
     func testAnAnswerBeforeTheLimitDoesNotWaitForTheShellToEnd() async throws {
-        let home = [".bash_profile": "trap 'sleep 6' EXIT\n", ".zshrc": "trap 'sleep 6' EXIT\n"]
+        // zsh with no terminal cannot turn job control on (`set -m` fails and ends .zshrc).
+        let trap = "trap '\"$SUBSET_TEST_FOLDER/bin/subset\" --trap' EXIT\n"
+        let home = [".bash_profile": "set -m\n" + trap, ".zshrc": trap]
+        let subset = "if [ \"$1\" = --trap ]; then echo $$ > \"$SUBSET_TEST_FOLDER/trap-pid\"; exec sleep 120; fi\necho 1.2.3\n"
         for shell in ["/bin/bash", "/bin/zsh"] {
-            let fixture = try Fixture(home: home, subset: "echo 1.2.3\n")
-            defer { fixture.remove() }
+            let fixture = try Fixture(home: home, subset: subset)
+            var pid: pid_t = 0
+            defer {
+                if pid > 0 { kill(pid, SIGKILL) }
+                fixture.remove()
+            }
             let model = CommandLineModel(detector: SubsetCommandDetector(shell: LoginShell(path: shell)))
             let started = Date()
             await model.check()
             XCTAssertEqual(model.status, .installed(version: "1.2.3"), shell)
             XCTAssertLessThan(Date().timeIntervalSince(started), 4, shell)
             XCTAssertTrue(model.hasRunningShell, "\(shell): the shell running its EXIT trap is no longer tracked")
+            let pidFile = fixture.folder.appendingPathComponent("trap-pid")
+            for _ in 0..<100 where pid == 0 {
+                pid = (try? String(contentsOf: pidFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+                if pid == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
+            }
+            XCTAssertGreaterThan(pid, 0, "\(shell): the EXIT trap never ran")
             await model.stop()
             XCTAssertFalse(model.hasRunningShell, shell)
+            let ended = await Self.ends(pid)
+            XCTAssertTrue(ended, "\(shell): the EXIT trap's work is still running after the model stopped")
         }
+    }
+
+    /// The version command gets what the login files set: an unset variable stays unset, an exported one is there, and a
+    /// relative PATH entry is found from the folder they changed to.
+    func testTheVersionCommandRunsInTheLoginShellsEnvironmentAndDirectory() async throws {
+        let profile = "unset NODE_OPTIONS\nSUBSET_LOGIN=yes; export SUBSET_LOGIN\ncd \"$SUBSET_TEST_FOLDER\"\nPATH=\"bin:$PATH\"; export PATH\n"
+        let fixture = try Fixture(
+            home: [".bash_profile": profile],
+            subset: "[ -z \"$NODE_OPTIONS\" ] && [ \"$SUBSET_LOGIN\" = yes ] && [ -d bin ] && echo 1.2.3\n", onPath: false
+        )
+        setenv("NODE_OPTIONS", "--require /no/such/preload.js", 1)
+        defer { fixture.remove() }
+        let found = await SubsetCommandDetector(shell: LoginShell(path: "/bin/bash")).detect()
+        XCTAssertEqual(found, .installed(version: "1.2.3"))
     }
 
     /// A stalled `subset` is stopped when the check times out and when the model stops, also when a startup file's
@@ -436,12 +485,8 @@ final class CommandLineLoginShellTests: XCTestCase {
             XCTAssertEqual(model.status, .notInstalled, shell)
             await model.stop()
             XCTAssertFalse(model.hasRunningShell, shell)
-            var gone = false
-            for _ in 0..<50 where !gone {
-                gone = kill(pid, 0) != 0
-                if !gone { try await Task.sleep(nanoseconds: 40_000_000) }
-            }
-            XCTAssertTrue(gone, "\(shell): the stalled subset command is still running after the check was stopped")
+            let ended = await Self.ends(pid)
+            XCTAssertTrue(ended, "\(shell): the stalled subset command is still running after the check was stopped")
         }
     }
 
@@ -470,6 +515,15 @@ final class CommandLineLoginShellTests: XCTestCase {
         }
     }
 
+    /// Whether process `pid` is gone within 2 seconds.
+    private static func ends(_ pid: pid_t) async -> Bool {
+        for _ in 0..<50 {
+            if kill(pid, 0) != 0 { return true }
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        return false
+    }
+
     private let shells = ["/bin/zsh", "/bin/bash", "/bin/sh", "/bin/ksh", "/bin/dash", "/bin/tcsh", "/bin/csh"]
         .filter { FileManager.default.isExecutableFile(atPath: $0) }
 
@@ -489,7 +543,7 @@ final class CommandLineLoginShellTests: XCTestCase {
             try ("#!/bin/sh\n" + subset).write(to: fake, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
             let environment = ProcessInfo.processInfo.environment
-            saved = ["PATH", "HOME", "ZDOTDIR", "SUBSET_TEST_FOLDER"].reduce(into: [:]) { $0[$1] = environment[$1] }
+            saved = ["PATH", "HOME", "ZDOTDIR", "SUBSET_TEST_FOLDER", "NODE_OPTIONS"].reduce(into: [:]) { $0[$1] = environment[$1] }
             if onPath { setenv("PATH", "\(bin.path):\(environment["PATH"] ?? "/usr/bin:/bin")", 1) }
             setenv("HOME", home.path, 1)
             setenv("SUBSET_TEST_FOLDER", folder.path, 1)

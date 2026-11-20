@@ -21,18 +21,20 @@ struct CommandLineSection: View {
                     .help("Look for subset in your login shell again")
             }
             copyLine("Set up:", HelperExamples.setupCommand, help: "Installs the subset command with npm (needs Node.js)")
-            if case .installed(let version) = model.status, !examples.isEmpty, !HelperExamples.runsBundledCommands(version) {
-                note("subset \(version) does not run the commands below: they need subset \(HelperExamples.minimumLauncherVersion) or later")
+            if case .installed(let version) = model.status, !examples.isEmpty, HelperExamples.predatesBundledCommands(version) {
+                note("subset \(version) is older than \(HelperExamples.minimumLauncherVersion) and runs none of the commands below: update it with the setup line")
             }
             ForEach(examples) { example in
                 HStack(spacing: 8) {
-                    copyLine("\(example.appName):", example.example, help: "Runs the command \(example.appName) bundles")
+                    copyLine("\(example.appName):", example.example, help: "subset runs the command \(example.appName) bundles once it has checked its signature")
                     Link("Agent instructions", destination: example.guide)
                         .font(.caption)
                         .help("Open the instructions for agents in the README")
                 }
-                if !example.bundled {
-                    note("This copy of \(example.appName) does not include subset \(example.command): update \(example.appName) first")
+                if example.missingFromCopy {
+                    note(example.npmFallback
+                        ? "This copy of \(example.appName) does not include it, so subset runs the npm package instead, downloading it if needed"
+                        : "This copy of \(example.appName) does not include it: update \(example.appName) first")
                 }
             }
         }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A command an installed app bundles, as the Command Line section shows it.
@@ -11,9 +12,12 @@ public struct HelperExample: Equatable, Identifiable, Sendable {
     public var example: String
     /// Where the instructions for agents are, in the command's README.
     public var guide: URL
-    /// Whether the copy `subset` runs (the first in /Applications, then ~/Applications) has the command; an older copy
-    /// needs an update first.
-    public var bundled: Bool
+    /// Whether the copy `subset` runs (the first in /Applications, then ~/Applications) has nothing at the helper's path,
+    /// which `subset` takes for an older copy. A helper that is there is still checked (a file inside the app, signed by
+    /// Subset) before it runs, which the section does not claim.
+    public var missingFromCopy: Bool
+    /// Whether `subset` then runs the command's npm package instead (Timer, Minutes); otherwise it asks for an update.
+    public var npmFallback: Bool
 }
 
 /// The examples for the bundled commands of installed apps, from the feed's `helpers`.
@@ -23,24 +27,27 @@ public enum HelperExamples {
     static let repository = "https://github.com/21nCo/subset/blob/dev/"
     /// Every bundled command's section in `packages/subset-dev/README.md`, for a command without a guide of its own.
     static let fallbackGuide = "packages/subset-dev/README.md#commands-bundled-in-mac-apps"
-    /// The first `subset` that runs the commands Mac apps bundle (SET-232); an older one runs none of the examples.
+    /// `subset` runs the commands Mac apps bundle (SET-232) from 0.2.0 on; every older release runs none of them.
     public static let minimumLauncherVersion = "0.2.0"
 
     /// The read-only example and the agent instructions of each command the apps bundle today (docs/macos-release.md).
-    /// `subset timer` lists the timers, since `status` needs a timer.
-    static let known: [String: (arguments: String, guide: String)] = [
-        "timer": ("list", "packages/timer-cli/README.md#agent-skill"),
-        "minutes": ("status", "packages/minutes-cli/README.md#json-output-for-agents-and-apps"),
-        "system": ("status", "native/system/README.md#agent-helper"),
-        "point-in-time": ("status", "native/point-in-time/README.md#command-line-status-for-agents"),
+    /// `subset timer` lists the timers, since `status` needs a timer. `npm`: the command also has an npm package.
+    static let known: [String: (arguments: String, guide: String, npm: Bool)] = [
+        "timer": ("list", "packages/timer-cli/README.md#agent-skill", true),
+        "minutes": ("status", "packages/minutes-cli/README.md#json-output-for-agents-and-apps", true),
+        "system": ("status", "native/system/README.md#agent-helper", false),
+        "point-in-time": ("status", "native/point-in-time/README.md#command-line-status-for-agents", false),
     ]
 
     /// One example per helper of each feed app with an installed copy, in feed order. A helper the table above does not
-    /// know shows `subset <command> --help` and the bundled commands' section of the `subset.dev` README. `isFile` tells
-    /// whether the first copy, which `subset` runs, has the helper at its feed path.
+    /// know shows `subset <command> --help` and the bundled commands' section of the `subset.dev` README. `isMissing`
+    /// tells whether nothing is at a path (not even a link) in the first copy, which `subset` runs.
     public static func examples(
         apps: [CatalogApp], installed: [String: [InstalledCopy]],
-        isFile: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        isMissing: (String) -> Bool = { path in
+            var status = stat()
+            return lstat(path, &status) != 0 && errno == ENOENT
+        }
     ) -> [HelperExample] {
         apps.compactMap { app in installed[app.id]?.first.map { (app, $0) } }.flatMap { app, copy in
             app.helpers.map { helper in
@@ -49,21 +56,18 @@ public enum HelperExamples {
                     appName: app.name, command: helper.command,
                     example: "subset \(helper.command) \(known?.arguments ?? "--help")",
                     guide: URL(string: repository + (known?.guide ?? fallbackGuide))!,
-                    bundled: isFile(copy.path + "/" + helper.path)
+                    missingFromCopy: isMissing(copy.path + "/" + helper.path), npmFallback: known?.npm ?? false
                 )
             }
         }
     }
 
-    /// Whether `subset` at `version` runs bundled commands: `minimumLauncherVersion` or later, a pre-release of it
-    /// being earlier.
-    public static func runsBundledCommands(_ version: String) -> Bool {
-        func parts(_ version: String) -> (core: [Int], preRelease: Bool) {
-            let core = version.split(separator: "+")[0].split(separator: "-", maxSplits: 1)
-            return (core[0].split(separator: ".").map { Int($0) ?? 0 }, core.count > 1)
+    /// Whether `subset` at `version` is older than `minimumLauncherVersion`, so it runs no bundled command. From that
+    /// version on, its betas included, the version alone does not tell which commands it knows, so nothing is claimed.
+    public static func predatesBundledCommands(_ version: String) -> Bool {
+        func core(_ version: String) -> [Int] {
+            version.prefix { $0 != "-" && $0 != "+" }.split(separator: ".").map { Int($0) ?? 0 }
         }
-        let (have, preRelease) = parts(version)
-        let need = parts(minimumLauncherVersion).core
-        return have == need ? !preRelease : !have.lexicographicallyPrecedes(need)
+        return core(version).lexicographicallyPrecedes(core(minimumLauncherVersion))
     }
 }
