@@ -1,0 +1,35 @@
+native/subset/Core/Install/AppActions.swift
+  s_9e1b1f008b58f1::t_f4d27c8f3b118e 23,45-46,169-173,178-188,193
+native/subset/Core/Install/AppInstaller.swift
+  s_9e1b1f008b58f1::t_8123782c934247 48-49,55-56,159-163,170-172,175-176,195-196,199-201,204,210-248,296-299,617-622,624-625,627,629-670,672,674-692,874-879
+native/subset/Core/Install/SystemServices.swift
+  s_9e1b1f008b58f1::t_b8a6cef09c4f0f 7-8,298-299
+native/subset/Core/List/AppListModel.swift
+  s_9e1b1f008b58f1::t_2fd9a9f9fe3ddc 61-77,142-144,167,169,175,179-191,193-197,199-200,203-210,214-223,225-227,230-232,235-239,242-244
+native/subset/README.md
+  s_9e1b1f008b58f1::t_9cf56b1ceb534f 59,61,65
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_9e1b1f008b58f1::t_191d53f9c49c04 339,352,354-355,366,370-373,384,396-397,548,557,1004,1029,1039-1040,1045,1059,1067,1069,1140-1142,1144-1147,1150-1152,1154,1180,1268,1293,1363,1365-1413,1415,1417-1557,1561-1578,1581-1583,1587
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_9e1b1f008b58f1::t_3b6e2eabc6ecf7 1,72,332-333,433-434,526-531,533-555,557-593,621,623-631,633-635,638-641,643-648,650-652,654-655
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_9e1b1f008b58f1::t_35db9ffa6f6eb3 123
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_9e1b1f008b58f1::t_dd4e8e7e4b7f78 110,126,239-244,246-248,250-267,269-273,290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c856921878bcd264b494bc53e32dfbbde8cd1eff",
+  "prompts": {},
+  "sessions": {
+    "s_9e1b1f008b58f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9c6734d-eb4b-433a-8401-a0b8e2871d06",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
