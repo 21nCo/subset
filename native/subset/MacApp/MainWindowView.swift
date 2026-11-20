@@ -28,16 +28,22 @@ struct MainWindowView: View {
         // Opening the window refreshes too; within 5 minutes of a fetch that uses the cache, and while another refresh
         // runs it is skipped. Unstructured, as Refresh is, so closing the window does not abandon the refresh.
         .onAppear { Task { await model.refresh() } }
-        // A running app is quit only after the user agrees.
+        // A running app is quit only after the user agrees. The alert's binding and its buttons each answer the request
+        // presented when it was drawn, so reporting one answer twice never dismisses the next question.
         .alert(
-            actions.quitRequest?.title ?? "", isPresented: Binding(get: { actions.quitRequest != nil }, set: { if !$0 { actions.quitRequest = nil } }),
+            actions.quitRequest?.title ?? "", isPresented: quitBinding(actions.quitRequest),
             presenting: actions.quitRequest
         ) { request in
             Button("Quit \(request.appName)") { actions.confirmQuit(request) }
-            Button("Cancel", role: .cancel) { actions.quitRequest = nil }
+            Button("Cancel", role: .cancel) { actions.dismissQuit(request) }
         } message: { request in
             Text(request.message)
         }
+    }
+
+    /// Whether the alert shows `presented`; dismissing it answers that request only.
+    private func quitBinding(_ presented: QuitRequest?) -> Binding<Bool> {
+        Binding(get: { actions.quitRequest != nil }, set: { if !$0, let presented { actions.dismissQuit(presented) } })
     }
 
     @ViewBuilder

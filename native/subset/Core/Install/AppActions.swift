@@ -46,12 +46,11 @@ public struct QuitRequest: Identifiable, Equatable, Sendable {
 @MainActor
 public final class AppActions: ObservableObject {
     @Published public private(set) var activities: [String: AppActivity] = [:]
-    /// Set when an update or move to the Trash needs the user to agree to quit the app. Once it is cleared (answered or
-    /// dismissed), the next waiting request is presented.
-    @Published public var quitRequest: QuitRequest? {
-        didSet { if quitRequest == nil, !waitingRequests.isEmpty { quitRequest = waitingRequests.removeFirst() } }
-    }
-    /// Requests of other rows that came while one was presented, in the order they came.
+    /// Set when an update or move to the Trash needs the user to agree to quit the app. It is cleared only by an answer
+    /// to that very request (`confirmQuit`, `dismissQuit`), so an alert that reports its answer twice clears it once.
+    @Published public private(set) var quitRequest: QuitRequest?
+    /// Requests of other rows that came while one was presented, in the order they came; the next is presented on a
+    /// later turn of the main actor once the presented one is answered, after its alert has gone.
     private var waitingRequests: [QuitRequest] = []
 
     private let installer: AppInstaller
@@ -90,8 +89,26 @@ public final class AppActions: ObservableObject {
     /// row still lists that app (its bundle ID and name). It does not read `quitRequest`, which the alert may already
     /// have cleared when it was dismissed.
     public func confirmQuit(_ request: QuitRequest) {
-        if quitRequest == request { quitRequest = nil }
+        dismissQuit(request)
         start(request.appID, kind: request.kind, consent: request)
+    }
+
+    /// The user declined `request`, or its alert went away: it is no longer presented and nothing is quit. Only the
+    /// request presented is cleared (any other, such as the next one already presented, stays), so this is safe to call
+    /// more than once for one alert.
+    public func dismissQuit(_ request: QuitRequest) {
+        guard quitRequest == request else { return }
+        quitRequest = nil
+        guard !waitingRequests.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.presentNextQuestion()
+        }
+    }
+
+    private func presentNextQuestion() {
+        guard !closed, quitRequest == nil, !waitingRequests.isEmpty else { return }
+        quitRequest = waitingRequests.removeFirst()
     }
 
     /// Stops a running operation; its message then says what it had already changed, if anything.
@@ -154,7 +171,11 @@ public final class AppActions: ObservableObject {
             do {
                 // When whether it runs cannot be read, the operation starts without leave to quit and refuses with that
                 // reason.
-                if check, try await Self.isRunning(installer, app) { return nil }
+                if check, try await Self.isRunning(installer, app) {
+                    // Cancel pressed once the answer was in still ends the attempt: nothing is asked.
+                    if Task.isCancelled { throw Self.cancelledCheck }
+                    return nil
+                }
                 switch kind {
                 case nil:
                     let outcome = try await installer.install(app, release!, progress: progress)
@@ -172,43 +193,48 @@ public final class AppActions: ObservableObject {
                 // What was already changed is said, not reported as nothing done; what an interrupted operation had
                 // left and was put back is said in the notes, and the update or move itself did not run.
                 let partly = failure.partial && !failure.onlyRecovered
-                let what: String
-                switch kind {
-                case nil: what = "\(app.name) was not installed"
-                case .update: what = "\(app.name) was \(partly ? "only partly" : "not") updated to \(release!.label)"
-                case .moveToTrash: what = "\(app.name) was \(partly ? "only partly" : "not") moved to the Trash"
-                }
-                message = .failed(Self.join("\(what): \(failure.explanation).", failure.notes))
+                message = .failed(Self.join("\(Self.notDone(kind, app, release, partly: partly)): \(failure.explanation).", failure.notes))
             }
             return message
         }
         operations[appID] = operation
         tasks[appID] = Task { [weak self] in
-            guard let message = await operation.value else {
-                if let kind { self?.ask(appID, app, kind) }
-                return
+            if let message = await operation.value {
+                await self?.finish(appID, message)
+            } else if let kind {
+                // The app runs. Cancel pressed after the attempt ended, before this, still asks nothing.
+                let cancelled = AppActivity.failed("\(Self.notDone(kind, app, release, partly: false)): \(Self.cancelledCheck.explanation).")
+                self?.endCheck(appID, asking: operation.isCancelled ? nil : QuitRequest(appID: appID, app, kind: kind),
+                               message: operation.isCancelled ? cancelled : nil)
             }
-            await self?.finish(appID, message)
         }
     }
 
-    /// The app runs and the user has not agreed to quit it: its row is free again, nothing was changed, and the user is
-    /// asked (unless Subset is quitting).
-    private func ask(_ appID: String, _ app: CatalogApp, _ kind: QuitRequest.Kind) {
+    private nonisolated static let cancelledCheck = InstallFailure(.interrupted, "it was cancelled before anything was changed")
+
+    /// What a row says an operation did not do (or did only partly).
+    private nonisolated static func notDone(_ kind: QuitRequest.Kind?, _ app: CatalogApp, _ release: ChosenRelease?, partly: Bool) -> String {
+        switch kind {
+        case nil: return "\(app.name) was not installed"
+        case .update: return "\(app.name) was \(partly ? "only partly" : "not") updated to \(release?.label ?? "")"
+        case .moveToTrash: return "\(app.name) was \(partly ? "only partly" : "not") moved to the Trash"
+        }
+    }
+
+    /// The read of whether the app runs ended the attempt with nothing changed: its row is free again and shows
+    /// `message`, and the user is asked `request` (unless Subset is quitting). One question at a time: another row's
+    /// waits its turn, and a row asked again replaces its own question.
+    private func endCheck(_ appID: String, asking request: QuitRequest?, message: AppActivity?) {
         operations[appID] = nil
         guard tasks[appID] != nil else { return }
         tasks[appID] = nil
-        activities[appID] = nil
-        guard !closed else { return }
-        let request = QuitRequest(appID: appID, app, kind: kind)
-        // One question at a time: another row's waits its turn, and a row asked again replaces its own waiting one.
-        if quitRequest == nil {
+        activities[appID] = message
+        guard let request, !closed else { return }
+        waitingRequests.removeAll { $0.appID == appID }
+        if quitRequest == nil || quitRequest?.appID == appID {
             quitRequest = request
-        } else if quitRequest?.appID != appID {
-            waitingRequests.removeAll { $0.appID == appID }
-            waitingRequests.append(request)
         } else {
-            quitRequest = request
+            waitingRequests.append(request)
         }
     }
 
@@ -225,7 +251,7 @@ public final class AppActions: ObservableObject {
                 }
             }
         } onCancel: {
-            answer.give(.failure(InstallFailure(.interrupted, "it was cancelled before anything was changed")))
+            answer.give(.failure(cancelledCheck))
         }
     }
 

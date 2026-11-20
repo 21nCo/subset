@@ -110,7 +110,8 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: .update))
         XCTAssertEqual(actions.quitRequest?.message, "Breaks is running. Subset asks it to quit before the new version is put in place; open it again once the update ends.")
         XCTAssertFalse(actions.isBusy("breaks"), "nothing starts before the user answers")
-        actions.quitRequest = nil
+        actions.dismissQuit(try XCTUnwrap(actions.quitRequest))
+        XCTAssertNil(actions.quitRequest)
         XCTAssertEqual(running.quits.get(), [])
 
         actions.update("breaks")
@@ -118,7 +119,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         // The alert's binding clears the request as it is dismissed, before its Quit button's action runs: the
         // operation it presented starts anyway.
         let presented = try XCTUnwrap(actions.quitRequest)
-        actions.quitRequest = nil
+        actions.dismissQuit(presented)
         actions.confirmQuit(presented)
         XCTAssertNil(actions.quitRequest)
         XCTAssertTrue(actions.isBusy("breaks"))
@@ -372,7 +373,7 @@ final class InstallReceiptAndActionsTests: XCTestCase {
                 let request = try XCTUnwrap(actions.quitRequest, label)
                 XCTAssertEqual([request.bundleID, request.bundleName], ["dev.subset.breaks", "Breaks"], label)
                 await model.refresh()
-                actions.quitRequest = nil
+                actions.dismissQuit(request)
                 actions.confirmQuit(request)
                 await actions.wait("breaks")
                 XCTAssertEqual(running.quits.get(), [], "\(label): nothing is quit")
@@ -388,26 +389,74 @@ final class InstallReceiptAndActionsTests: XCTestCase {
     }
 
     // Two rows whose running apps are found running one after the other each get their question, one at a time and in
-    // the order they came: dismissing the first presents the second, and none is lost.
+    // the order they came. The alert reports one answer to the first twice (its binding and its Cancel or Quit button,
+    // in either order): the second question is not dismissed by it, and comes next, once the first is gone.
     func testQuitQuestionsOfTwoRowsAreAskedInTurn() async throws {
-        let breaksPath = system.appendingPathComponent("Breaks.app").path
-        let otherPath = system.appendingPathComponent("Other.app").path
-        try makeBundle(URL(fileURLWithPath: breaksPath), bundleID: "dev.subset.breaks", version: "0.0.9")
-        try makeBundle(URL(fileURLWithPath: otherPath), bundleID: "dev.subset.other", version: "0.0.9")
-        let running = FakeRunning()
-        running.running.update { $0.formUnion([breaksPath, otherPath]) }
-        let other = CatalogApp(id: "other", name: "Other", summary: "s", appName: "Other", bundleID: "dev.subset.other", live: AppInstallerTests.breaks.live, beta: nil)
-        let (actions, _) = await actions(running: running, catalogs: [Self.catalog([AppInstallerTests.breaks, other])])
-        actions.moveToTrash("breaks")
-        await actions.wait("breaks")
-        actions.moveToTrash("other")
-        await actions.wait("other")
-        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: .moveToTrash))
-        actions.quitRequest = nil
-        XCTAssertEqual(actions.quitRequest, QuitRequest(appID: "other", other, kind: .moveToTrash), "the second question comes next")
-        actions.quitRequest = nil
-        XCTAssertNil(actions.quitRequest)
-        XCTAssertEqual(running.quits.get(), [])
+        for answer in ["cancel, then binding", "binding, then cancel", "quit, then binding", "binding, then quit"] {
+            try tearDownWithError()
+            try setUpWithError()
+            let breaksPath = system.appendingPathComponent("Breaks.app").path
+            let otherPath = system.appendingPathComponent("Other.app").path
+            try makeBundle(URL(fileURLWithPath: breaksPath), bundleID: "dev.subset.breaks", version: "0.0.9")
+            try makeBundle(URL(fileURLWithPath: otherPath), bundleID: "dev.subset.other", version: "0.0.9")
+            let running = FakeRunning()
+            running.running.update { $0.formUnion([breaksPath, otherPath]) }
+            let other = CatalogApp(id: "other", name: "Other", summary: "s", appName: "Other", bundleID: "dev.subset.other", live: AppInstallerTests.breaks.live, beta: nil)
+            let (actions, _) = await actions(running: running, catalogs: [Self.catalog([AppInstallerTests.breaks, other])])
+            actions.moveToTrash("breaks")
+            await actions.wait("breaks")
+            actions.moveToTrash("other")
+            await actions.wait("other")
+            let first = QuitRequest(appID: "breaks", AppInstallerTests.breaks, kind: .moveToTrash)
+            XCTAssertEqual(actions.quitRequest, first, answer)
+            let quits = answer.hasPrefix("quit") || answer.hasSuffix("quit")
+            for step in answer.components(separatedBy: ", then ") {
+                if step == "quit" { actions.confirmQuit(first) } else { actions.dismissQuit(first) }
+            }
+            XCTAssertNil(actions.quitRequest, "\(answer): the next question waits until the first alert has gone")
+            try await waitFor { actions.quitRequest != nil }
+            let second = QuitRequest(appID: "other", other, kind: .moveToTrash)
+            XCTAssertEqual(actions.quitRequest, second, "\(answer): the second question comes next")
+            actions.dismissQuit(first)
+            XCTAssertEqual(actions.quitRequest, second, "\(answer): a late answer to the first leaves it")
+            actions.dismissQuit(second)
+            actions.dismissQuit(second)
+            XCTAssertNil(actions.quitRequest, answer)
+            await actions.wait("breaks")
+            XCTAssertEqual(running.quits.get(), quits ? [breaksPath] : [], answer)
+        }
+    }
+
+    // Cancel pressed after the read found the app running, but before its question is asked, ends the attempt: no
+    // question, and the row says it was cancelled.
+    func testCancelAfterTheAppIsFoundRunningAsksNothing() async throws {
+        for kind in [QuitRequest.Kind.update, .moveToTrash] {
+            try tearDownWithError()
+            try setUpWithError()
+            let path = system.appendingPathComponent("Breaks.app").path
+            try makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.breaks", version: "0.0.9")
+            let running = FakeRunning()
+            running.running.update { $0.insert(path) }
+            let (actions, _) = await actions(running: running)
+            let gate = DispatchSemaphore(value: 0)
+            let held = Recorder(0)
+            running.hold = {
+                held.update { $0 += 1 }
+                gate.wait()
+            }
+            if kind == .update { actions.update("breaks") } else { actions.moveToTrash("breaks") }
+            try await waitFor { held.get() > 0 }
+            // The read answers while the main actor is held, so the answer is in before Cancel is pressed.
+            gate.signal()
+            usleep(300_000)
+            actions.cancel("breaks")
+            await actions.wait("breaks")
+            let what = kind == .update ? "updated to 0.1.0" : "moved to the Trash"
+            XCTAssertNil(actions.quitRequest, "\(kind)")
+            XCTAssertEqual(actions.activities["breaks"], .failed("Breaks was not \(what): it was cancelled before anything was changed."), "\(kind)")
+            XCTAssertFalse(actions.isBusy("breaks"), "\(kind)")
+            XCTAssertEqual(running.quits.get(), [], "\(kind)")
+        }
     }
 
     // Whether the app runs is read off the main actor: Update and Move to Trash return at once while that read is held
