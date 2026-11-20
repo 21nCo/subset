@@ -304,6 +304,19 @@ final class InstallReceiptAndActionsTests: XCTestCase {
         for _ in 0..<20 { allStuck.release() }
     }
 
+    // A row's buttons depend on what the model knows of its app, so a change of the model is a change of the actions,
+    // which the rows observe: an app that becomes known with no copy installed re-renders its row enabled.
+    func testTheActionsChangeWhenTheModelDoes() async throws {
+        let (actions, model) = await actions()
+        let changes = Recorder(0)
+        let watching = actions.objectWillChange.sink { _ in changes.update { $0 += 1 } }
+        try makeBundle(system.appendingPathComponent("Breaks.app"), bundleID: "dev.subset.breaks", version: "0.0.9")
+        await model.reloadInstalled()
+        watching.cancel()
+        XCTAssertGreaterThan(changes.get(), 0)
+        XCTAssertFalse(actions.isBusy("breaks"))
+    }
+
     // Cancelled while the app quits, through either row action: no copy changed, so the row says it was not updated or
     // moved (not "only partly"), and that the app was asked to quit.
     func testAQuitOnlyCancelSaysNothingWasChanged() async throws {

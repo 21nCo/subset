@@ -45,9 +45,13 @@ public final class AppActions: ObservableObject {
     /// How long after its operation a row still waiting for what is installed to be looked for again says so.
     var listNoteDelay: Duration = .seconds(10)
 
+    /// Forwards the model's changes: whether a row is busy also depends on what the model knows of its app.
+    private var modelChanges: AnyCancellable?
+
     public init(installer: AppInstaller, model: AppListModel) {
         self.installer = installer
         self.model = model
+        modelChanges = model.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// Whether an operation on the app is running, or has ended and its app is being looked for again, or what is

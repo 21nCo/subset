@@ -178,6 +178,9 @@ public final class AppListModel: ObservableObject {
         catalog = nextCatalog
         fetchedAt = nextFetchedAt
         status = nextStatus
+        // Looks of descriptions the catalog shown no longer has are dropped: one shown again needs a look of its own.
+        let shownKeys = Set((nextCatalog?.apps ?? []).map(Self.key))
+        observed = observed.filter { shownKeys.contains($0.key) }
         publishInstalled()
     }
 

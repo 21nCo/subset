@@ -676,6 +676,30 @@ final class AppListModelTests: XCTestCase {
         allStuck.releaseAll()
     }
 
+    // An app the catalog drops and later lists again is not known from a look made before it was dropped: when the
+    // look of the catalog listing it again is held past `refreshWait`, its actions wait for a look of their own.
+    func testAnAppListedAgainNeedsALookOfItsOwn() async throws {
+        var other = AppInstallerTests.breaks
+        (other.id, other.name, other.appName, other.bundleID) = ("other", "Other", "Other", "dev.subset.other")
+        let url = CatalogLocation.defaultURL
+        let withBreaks = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-12T00:00:00Z", apps: [AppInstallerTests.breaks], tools: []), url: url, fetchedAt: clock.now, cached: false)
+        let without = LoadedCatalog(catalog: Catalog(generatedAt: "2026-11-13T00:00:00Z", apps: [other], tools: []), url: url, fetchedAt: clock.now, cached: false)
+        let stuck = GatedFinder(finder, gatedCalls: [3])
+        let model = AppListModel(loader: RecordedLoader([.success(withBreaks), .success(without), .success(withBreaks)]), finder: stuck, defaults: defaults)
+        model.scanStall = .seconds(30)
+        model.refreshWait = .milliseconds(200)
+        await model.refresh()
+        XCTAssertTrue(model.knowsInstalled("breaks"))
+        await model.refresh(force: true)
+        XCTAssertFalse(model.knowsInstalled("breaks"), "not listed")
+        try install("Breaks", "dev.subset.breaks", version: "0.1.0")
+        await model.refresh(force: true)
+        XCTAssertEqual(model.catalog?.apps.map(\.id), ["breaks"])
+        XCTAssertFalse(model.knowsInstalled("breaks"), "the look from before it was dropped does not count")
+        XCTAssertNil(model.installed["breaks"])
+        stuck.release()
+    }
+
     // An operation's reload waits while a refresh changes how the catalog describes the app: it ends only once the
     // description now shown has a look begun after the reload, not with a look of the old description.
     func testAReloadEndsWithALookOfTheDescriptionShownNow() async throws {
