@@ -67,7 +67,11 @@ final class FakeImages: DiskImageAttaching, @unchecked Sendable {
         return ["/dev/disk99"]
     }
 
+    /// Runs as the image is detached (the cleanup after an update's swap), to change what is installed then.
+    var onDetach: (@Sendable () -> Void)?
+
     func detach(_ image: URL, devices: [String]) async -> Bool {
+        onDetach?()
         detached.update { $0 += 1 }
         for volume in attached.get() { try? FileManager.default.removeItem(at: volume) }
         attached.update { $0 = [] }

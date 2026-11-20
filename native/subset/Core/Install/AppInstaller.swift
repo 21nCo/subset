@@ -184,12 +184,16 @@ public struct AppInstaller: Sendable {
                     }) { staged in
                         (old, placed) = try swap(staged, target: target, identity: identity, appName: app.appName, receipt: receipt, notes: notes)
                     }
+                    // Cleanup ran after the swap: the verified copy must still be in place before the previous one goes.
+                    if let old, let placed, Self.identity(target) != placed {
+                        try keepPrevious(old, target: target, appName: app.appName, receipt: receipt, notes: notes)
+                    }
                 } catch {
                     if quit {
                         // Quitting is said even when the update then failed or was cancelled (it changed no copy). Only
                         // the copy that was quit is opened again, never something put at its path since.
                         if let why = await running.reopen(target, isExpected: { Self.identity(target) == identity }) {
-                            notes.add("\(app.name) was quit for the update and was not reopened (\(why)).", quit: true)
+                            notes.add("\(app.name) was quit for the update and was not reopened as the copy checked (\(why)).", quit: true)
                         } else {
                             notes.add("\(app.name) was asked to quit for the update and was reopened.", quit: true)
                         }
@@ -209,7 +213,7 @@ public struct AppInstaller: Sendable {
                 }
                 // Only the verified copy put in place is opened, never something put at its path since.
                 if quit, let why = await running.reopen(target, isExpected: { [placed] in placed != nil && Self.identity(target) == placed }) {
-                    notes.add("\(app.name) could not be reopened (\(why)).")
+                    notes.add("\(app.name) could not be reopened as the copy checked (\(why)).")
                 }
             }
             return updates.last.map(\.path)
@@ -580,6 +584,22 @@ public struct AppInstaller: Sendable {
         var old = AppLock.hiddenName(in: dir, appName: appName, kind: "old")
         if renamex_np(backup.path, old.path, UInt32(RENAME_EXCL)) != 0 { old = backup }
         return (old, verified)
+    }
+
+    /// After an update's swap, `target` no longer holds the verified copy (changed or removed while the image was
+    /// cleaned up): the receipt written for that copy is removed, and the previous copy, `old`, is put back when nothing
+    /// is at `target`, otherwise kept where it is and named. Always throws, saying what happened.
+    private func keepPrevious(_ old: URL, target: URL, appName: String, receipt: ReceiptDocument?, notes: Notes) throws {
+        let why = "\(target.path) was changed or removed after the new copy was put there (by the subset command?)"
+        if let receipt, unlink(receipt.file.path) == 0 {
+            notes.add("The receipt \(receipt.file.path), written for the new copy, was removed.", changed: true)
+        }
+        if Self.identity(target) == nil, renamex_np(old.path, target.path, UInt32(RENAME_EXCL)) == 0 {
+            notes.add("The previous copy of \(appName) was put back at \(target.path).", changed: true)
+            throw InstallFailure(.install, "\(why), so the previous copy was put back")
+        }
+        notes.add("The previous copy of \(appName) is kept at \(old.path); rename it to \(target.path) to use it again.", changed: true)
+        throw InstallFailure(.install, "\(why), so it was left as it is and the previous copy was kept")
     }
 
     /// What an interrupted update or move to the Trash (here or by `subset`) left beside `<appName>.app` under a hidden

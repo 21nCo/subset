@@ -229,11 +229,15 @@ public final class AppListModel: ObservableObject {
 
     /// Takes `observation` into what is shown unless it conflicts (then returns false, to look again): a newer one is
     /// shown; one that agrees with what is shown extends how late that was seen, so a look begun before then that
-    /// disagrees is settled by looking again rather than shown; an older one changes nothing.
+    /// disagrees is settled by looking again rather than shown, and it ends the waits it began after; an older one
+    /// changes nothing.
     private func settle(_ observation: Observation, _ apps: [CatalogApp]) -> Bool {
         switch judge(observation, apps) {
         case .newer: publish(observation, apps)
-        case .same: if let seen = shown?.ended, observation.ended > seen { shown?.ended = observation.ended }
+        case .same:
+            if let seen = shown?.ended, observation.ended > seen { shown?.ended = observation.ended }
+            // What is shown is confirmed by a look begun after these callers asked.
+            releaseWaiters { _, since in since < observation.began }
         case .older: break
         case .conflicting: return false
         }

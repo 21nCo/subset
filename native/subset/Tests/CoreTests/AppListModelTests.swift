@@ -692,4 +692,36 @@ final class AppListModelTests: XCTestCase {
         XCTAssertEqual(model.installed["breaks"], [], "the removal look 2 saw is not undone by what look 4 read before it")
         XCTAssertEqual(scripted.callCount, 5, "one more look settled the disagreement")
     }
+
+    // A reload's wait ends when a look begun after it was asked agrees with what is shown, not only when one is newer:
+    // look 2 (begun before the reload) is shown while refresh look 4, begun after the reload and overlapping look 2,
+    // agrees with it; the reload's own look 3 is still held.
+    func testAnAgreeingLookBegunAfterAReloadEndsItsWait() async throws {
+        let scripted = ScriptedFinder(finder, [2: .holdThenRead, 3: .holdThenRead, 4: .readThenHold])
+        let model = AppListModel(loader: RecordedLoader([try loaded("catalog-valid-live-only"), try loaded("catalog-valid-live-only")]), finder: scripted, defaults: defaults)
+        model.scanWait = .milliseconds(200)
+        await model.refresh()
+        let earlier = Task { _ = await model.reloadInstalled() }
+        try await waitUntil({ scripted.isHolding(2) }, stopping: earlier, release: { scripted.release(2) })
+        let ended = Recorder(false)
+        let reload = Task { () -> Bool in
+            let shown = await model.reloadInstalled()
+            ended.update { $0 = true }
+            return shown
+        }
+        try await waitUntil({ scripted.isHolding(3) }, stopping: earlier, release: { scripted.release(2); scripted.release(3) })
+        let refresh = Task { await model.refresh(force: true) }
+        try await waitUntil({ scripted.isHolding(4) }, stopping: refresh, release: { scripted.release(2); scripted.release(3); scripted.release(4) })
+        scripted.release(2)
+        await earlier.value
+        XCTAssertFalse(ended.get(), "look 2 began before the reload")
+        scripted.release(4)
+        await refresh.value
+        let deadline = Date().addingTimeInterval(2)
+        while !ended.get(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(ended.get(), "the agreeing refresh look, begun after the reload, ends its wait")
+        scripted.release(3)
+        let shown = await reload.value
+        XCTAssertTrue(shown)
+    }
 }

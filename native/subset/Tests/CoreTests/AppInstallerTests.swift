@@ -379,7 +379,7 @@ final class AppInstallerTests: XCTestCase {
         let failed = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(failed?.step, .install)
         XCTAssertEqual(failed?.partial, false, "asking the app to quit changed no copy")
-        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened (\(quitPath) is not the copy expected there)."])
+        XCTAssertEqual(failed?.notes, ["Breaks was quit for the update and was not reopened as the copy checked (\(quitPath) is not the copy expected there)."])
         XCTAssertEqual(running.reopened.get(), [])
         XCTAssertEqual(version(target), "0.3.0", "what was put there stays")
         assertNoLeftovers()
@@ -397,7 +397,7 @@ final class AppInstallerTests: XCTestCase {
         }
         let refused = await failure { try await $0.update(Self.breaks, Self.live, quitAllowed: true) }
         XCTAssertEqual(refused?.step, .running)
-        XCTAssertEqual(refused?.notes, ["Breaks was quit for the update and was not reopened (\(stubbornPath) is not the copy expected there)."])
+        XCTAssertEqual(refused?.notes, ["Breaks was quit for the update and was not reopened as the copy checked (\(stubbornPath) is not the copy expected there)."])
         XCTAssertEqual(running.reopened.get(), [])
 
         try tearDownWithError()
@@ -407,7 +407,7 @@ final class AppInstallerTests: XCTestCase {
         running.running.update { $0.insert(updatedPath) }
         trash = ReplacingTrash(inner: trash, path: updatedPath)
         let outcome = try await installer().update(Self.breaks, Self.live, quitAllowed: true)
-        XCTAssertEqual(outcome.notes.last, "Breaks could not be reopened (\(updatedPath) is not the copy expected there).")
+        XCTAssertEqual(outcome.notes.last, "Breaks could not be reopened as the copy checked (\(updatedPath) is not the copy expected there).")
         XCTAssertEqual(running.reopened.get(), [])
     }
 
@@ -919,6 +919,8 @@ final class AppInstallerTests: XCTestCase {
             // The same with `..` inside the bundle in the saved path: Helpers was a folder when it started.
             case 21: return .started(bundle.path + "/Contents/Helpers/Child/../Helper")
             case 22: return .path(folder.path + "/Moved/Helper", started: bundle.path + "/Contents/Helpers/Child/../Helper")
+            // Leaving the bundle and entering it again through folders that are not links.
+            case 23: return .started(bundle.path + "/Contents/Helpers/../../../Breaks.app/Contents/Helpers/Helper")
             default: return .unknown(EPERM)
             }
         }
@@ -928,7 +930,7 @@ final class AppInstallerTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("Route").path, withDestinationPath: folder.appendingPathComponent("Tools/Child").path)
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("Moved"), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: bundle.appendingPathComponent("Contents/Helpers").path, withDestinationPath: folder.appendingPathComponent("Moved").path)
-        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22], look: look), [10, 14, 18, 19, 21, 22])
+        XCTAssertEqual(try WorkspaceRunningApps.processes(inside: bundle, among: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23], look: look), [10, 14, 18, 19, 21, 22, 23])
         XCTAssertThrowsError(try WorkspaceRunningApps.processes(inside: bundle, among: [11, 16], look: look), "a live process of this user that cannot be named")
         for (path, inside) in [(real + "/Contents/MacOS/Breaks", true), (bundle.path + "/Contents/MacOS/Breaks", true), (real + "x/MacOS/Breaks", false)] {
             XCTAssertEqual(BundleMatcher(bundle).contains(path), inside, path)
@@ -1288,6 +1290,47 @@ extension AppInstallerTests {
             XCTAssertEqual(names(temporary), [], label)
             XCTAssertEqual(names(receipts), ["dev.subset.breaks.json"], "\(label): no temporary receipt is left")
             XCTAssertEqual(images.attached.get(), [], label)
+        }
+    }
+
+    // The image is detached after the swap; if the verified copy is changed or removed meanwhile, the previous copy does
+    // not go to the Trash and the update is not reported as done: the receipt written for the new copy is removed, the
+    // previous copy is put back when nothing is there (and reopened, as the copy quit), otherwise kept and named.
+    func testAnUpdateWhoseNewCopyChangesDuringCleanupKeepsThePreviousCopy() async throws {
+        for disappears in [true, false] {
+            try tearDownWithError()
+            try setUpWithError()
+            let old = try installOld()
+            let path = target.path
+            running.running.update { $0.insert(path) }
+            let armed = Recorder(false)
+            images.onDetach = {
+                guard armed.get() else { return }
+                armed.update { $0 = false }
+                try? FileManager.default.removeItem(atPath: path)
+                if !disappears { try? makeBundle(URL(fileURLWithPath: path), bundleID: "dev.subset.other", version: "9.0") }
+            }
+            var installer = installer()
+            installer.afterPlacing = { _ in armed.update { $0 = true } }
+            var failure: InstallFailure?
+            do { _ = try await installer.update(Self.breaks, Self.live, quitAllowed: true) } catch { failure = error as? InstallFailure }
+            let label = disappears ? "disappears" : "replaced"
+            XCTAssertEqual(failure?.step, .install, label)
+            XCTAssertEqual(failure?.partial, true, label)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: receiptFile.path), "\(label): no receipt describes a copy that is not there")
+            XCTAssertEqual(names(trashFolder), [], "\(label): the previous copy is not moved to the Trash")
+            let hidden = names(system).filter { $0.hasPrefix(".Breaks.app.subset-") }
+            if disappears {
+                XCTAssertEqual(failure?.message, "\(path) was changed or removed after the new copy was put there (by the subset command?), so the previous copy was put back")
+                XCTAssertEqual(AppInstaller.identity(target), old)
+                XCTAssertEqual(hidden, [])
+                XCTAssertEqual(running.reopened.get(), [path], "the copy quit is reopened")
+            } else {
+                XCTAssertEqual(InstalledAppFinder.infoPlist(path)?["CFBundleIdentifier"] as? String, "dev.subset.other", "the replacement stays")
+                XCTAssertEqual(hidden.count, 1)
+                XCTAssertEqual(AppInstaller.identity(system.appendingPathComponent(hidden.first ?? "")), old, "the previous copy is kept")
+                XCTAssertEqual(running.reopened.get(), [])
+            }
         }
     }
 

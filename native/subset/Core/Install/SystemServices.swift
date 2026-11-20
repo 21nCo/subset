@@ -342,10 +342,9 @@ struct BundleMatcher: Sendable {
 
     /// Whether a process started with `path` (absolute, as saved) may run from inside the bundle: fully resolved, and
     /// with its first 0, 1, 2, ... folders resolved as they are now and the rest as saved, so a folder of the bundle that
-    /// became a link elsewhere since (or was moved) does not hide it. In the part as saved, a `..` is taken as leaving a
-    /// folder only inside the bundle (one there may have been a folder when it started); one leaving a folder outside it
-    /// is not judged as saved (the kernel resolved it after any link before it), only in a resolved prefix. `resolved`
-    /// keeps the real paths already read (nil when a path does not exist).
+    /// became a link elsewhere since (or was moved) does not hide it, even on a path that leaves the bundle and enters it
+    /// again. A `..` after a link outside the bundle is not judged as saved (the kernel resolved it after the link), only
+    /// in a resolved prefix. `resolved` keeps the real paths already read (nil when a path does not exist).
     func startedInside(_ path: String, resolved: inout [String: String?]) -> Bool {
         if contains(Self.canonical(path)) { return true }
         let parts = path.split(separator: "/")
@@ -362,15 +361,20 @@ struct BundleMatcher: Sendable {
         return false
     }
 
-    /// `head` followed by `rest` as saved, with `.` and repeated slashes removed and each `..` leaving a folder inside the
-    /// bundle; nil when a `..` would leave a folder outside it.
+    /// `head` followed by `rest` as saved, with `.` and repeated slashes removed and each `..` taken as leaving its
+    /// folder: one inside the bundle (which may have been a folder when it started, whatever it is now) or one outside
+    /// it that is not a link now; nil when a `..` would leave a link outside the bundle (taken as it resolves instead).
     private func confined(_ head: [Substring], _ rest: ArraySlice<Substring>) -> String? {
         var result = head
         for part in rest {
             switch part {
             case ".": continue
             case "..":
-                guard contains("/" + result.joined(separator: "/")), !result.isEmpty else { return nil }
+                guard !result.isEmpty else { continue }
+                let folder = "/" + result.joined(separator: "/")
+                var status = stat()
+                let isLink = lstat(folder, &status) == 0 && status.st_mode & S_IFMT == S_IFLNK
+                guard contains(folder) || !isLink else { return nil }
                 result.removeLast()
             default: result.append(part)
             }
