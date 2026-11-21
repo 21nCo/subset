@@ -174,6 +174,7 @@ export async function runMeetingSession(options: RunSessionOptions): Promise<Ses
       throw new MinutesError('output_unwritable', `Cannot write to the output folder ${options.outputDirectory}: ${errorDetails(error).message}`);
     }
 
+    if (stop.aborted) throw new Aborted();
     const opening = driver.open({ platform: link.platform, profileDirectory: options.profileDirectory, log: status });
     try {
       page = await raceAbort(opening, stop);

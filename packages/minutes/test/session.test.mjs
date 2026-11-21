@@ -97,6 +97,21 @@ async function run(t, script, extra = {}) {
 
 const states = (events) => events.filter((event) => event.type === 'state').map((event) => event.state);
 
+test('an already-aborted session ends without opening the browser or leaving a recording', async (t) => {
+  const { root, events, records, driver, result } = await run(t, {}, { signal: AbortSignal.abort() });
+  assert.deepEqual(driver.calls, []);
+  assert.deepEqual(result, { id: '20261009T100000Z-abc123', state: 'ended', reason: 'stopped', path: null, bytes: null, error: null });
+  assert.deepEqual(states(events), ['launching', 'stopping', 'ended']);
+  assert.equal(events.filter((event) => event.type === 'ended').length, 1);
+  assert.deepEqual(events.at(-1), { v: 1, at: events.at(-1).at, session: result.id, type: 'ended', reason: 'stopped', path: null, bytes: null });
+  assert.ok(events.every(isMinutesEvent));
+  assert.ok(records.every(isSessionRecord));
+  assert.equal(records.at(-1).state, 'ended');
+  assert.equal(records.at(-1).endReason, 'stopped');
+  assert.equal(records.at(-1).outputPath, null);
+  assert.deepEqual(await readdir(path.join(root, 'out')), []);
+});
+
 test('a meeting that ends on its own finalizes the recording', async (t) => {
   const { root, events, records, driver, result } = await run(t, { end: 'meeting_ended' });
   for (const event of events) assert.equal(isMinutesEvent(event), true, JSON.stringify(event));
