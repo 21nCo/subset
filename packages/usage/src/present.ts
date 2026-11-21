@@ -157,11 +157,10 @@ export function summarize(status: UsageStatus, now: number): UsageSummary {
   }
   const upcoming = status.accounts.flatMap((account) => {
     const groups = windowGroups(account);
-    return account.windows.filter((window) => window.resetsAt && Date.parse(window.resetsAt) > now).map((window) => {
-      const group = groups?.find((item) => item.windows.includes(window));
-      return { accountId: account.id, key: `${account.id}\u0000${historyWindowKey(window)}`, account: accountName(account), provider: providerMeta[account.provider].name,
-        window: group ? `${group.label} · ${windowTitle(account, window)}` : windowTitle(account, window), at: window.resetsAt! };
-    });
+    return account.windows.filter((window) => window.resetsAt && Date.parse(window.resetsAt) > now).map((window) => ({
+      accountId: account.id, key: `${account.id}\u0000${historyWindowKey(window)}`, account: accountName(account), provider: providerMeta[account.provider].name,
+      window: groupedWindowTitle(account, window, groups), at: window.resetsAt!,
+    }));
   }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(0, 3);
   return { total: status.accounts.length, attention: status.accounts.filter((account) => needsAttention(account, now)).length, nextReset, nextResets: upcoming, highest };
 }
@@ -376,6 +375,12 @@ export function windowGroups(account: UsageAccount): WindowGroup[] | null {
   return [...groups].sort((a, b) => (order.has(b[0]) ? 1 : 0) - (order.has(a[0]) ? 1 : 0)).map(([id, windows]) => ({ id, label: GROUP_LABELS[id] ?? `${id.charAt(0).toUpperCase()}${id.slice(1)}`, windows }));
 }
 
+export function groupedWindowTitle(account: UsageAccount, window: UsageWindow, groups: WindowGroup[] | null): string {
+  const title = windowTitle(account, window);
+  const group = groups?.find((item) => item.windows.includes(window));
+  return group ? `${group.label} · ${title}` : title;
+}
+
 export interface LimitItem { accountId: string; key: string; account: string; provider: string; window: string; used: number; resetsAt: string | null; providerId: UsageProvider }
 
 /** Windows with no quota left, and windows at 85% or more, across the given accounts. */
@@ -387,9 +392,8 @@ export function limitAlerts(accounts: UsageAccount[]): { exhausted: LimitItem[];
     for (const window of account.windows) {
       const used = usedOf(window);
       if (used === null) continue;
-      const group = groups?.find((item) => item.windows.includes(window));
       const item = { accountId: account.id, key: historyWindowKey(window), providerId: account.provider, account: accountName(account), provider: providerMeta[account.provider].name,
-        window: group ? `${group.label} · ${windowTitle(account, window)}` : windowTitle(account, window), used, resetsAt: window.resetsAt };
+        window: groupedWindowTitle(account, window, groups), used, resetsAt: window.resetsAt };
       if (used >= 100) exhausted.push(item); else if (used >= 85) low.push(item);
     }
   }

@@ -144,6 +144,22 @@ test('groups Antigravity buckets and Factory limits into tabs and lists exhauste
   assert.deepEqual(low.map((item) => [item.account, item.window, item.used]), [['Google', 'Gemini · Weekly usage', 90]]);
 });
 
+test('distinguishes equal-length Antigravity quota windows when both groups are shown', async () => {
+  const { groupedWindowTitle, windowGroups } = await import('../dist/present.js');
+  const windows = ['gemini-5h', 'gemini-weekly', '3p-5h', '3p-weekly'].map((limitId) =>
+    window({ limitId, label: limitId, durationMinutes: limitId.endsWith('5h') ? 300 : 10080 }));
+  const google = account({ provider: 'antigravity', windows });
+  const groups = windowGroups(google);
+  assert.deepEqual(windows.map((entry) => groupedWindowTitle(google, entry, groups)), [
+    'Gemini · 5-hour usage', 'Gemini · Weekly usage',
+    'Third-party · 5-hour usage', 'Third-party · Weekly usage',
+  ]);
+  const geminiOnly = { ...google, windows: windows.slice(0, 2) };
+  assert.deepEqual(geminiOnly.windows.map((entry) => groupedWindowTitle(geminiOnly, entry, windowGroups(geminiOnly))), [
+    '5-hour usage', 'Weekly usage',
+  ]);
+});
+
 test('orders Gemini before third-party groups and lists the next three resets', async () => {
   const { windowGroups, summarize } = await import('../dist/present.js');
   const { createUsageStatus } = await import('../dist/index.js');
