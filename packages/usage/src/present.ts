@@ -329,8 +329,8 @@ export function activityGrid(history: UsageHistory | undefined, accounts: UsageA
   const dayStarts = Array.from({ length: days }, (_, index) => midnight(index - (days - 1)));
   const dayEnds = [...dayStarts.slice(1), midnight(1)];
   const totals = DAY_PARTS.map(() => dayStarts.map(() => new Map<string, number>()));
+  const names = new Map(accounts.map((account) => [account.id, accountName(account)]));
   for (const account of accounts) {
-    const name = accountName(account);
     for (const points of Object.values(history?.series[account.id] ?? {})) {
       for (let index = 1; index < points.length; index++) {
         const increase = points[index][1] - points[index - 1][1];
@@ -340,13 +340,13 @@ export function activityGrid(history: UsageHistory | undefined, accounts: UsageA
         const hour = new Date(time).getHours();
         const part = DAY_PARTS.findIndex((item) => hour >= item.from && hour < item.to);
         if (day < 0 || part < 0) continue;
-        totals[part][day].set(name, (totals[part][day].get(name) ?? 0) + increase);
+        totals[part][day].set(account.id, (totals[part][day].get(account.id) ?? 0) + increase);
       }
     }
   }
   const cells = totals.map((row) => row.map((byAccount) => ({
     value: Math.round([...byAccount.values()].reduce((sum, value) => sum + value, 0) * 10) / 10,
-    top: [...byAccount].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([account, points]) => ({ account, points: Math.round(points * 10) / 10 })),
+    top: [...byAccount].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, points]) => ({ account: names.get(id)!, points: Math.round(points * 10) / 10 })),
   })));
   return { cells, max: Math.max(0, ...cells.flat().map((cell) => cell.value)), dayStarts };
 }

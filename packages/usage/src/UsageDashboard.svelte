@@ -365,7 +365,7 @@
               <strong>{dayLong(activity.dayStarts[hovered.day])} · {DAY_PARTS[hovered.part].label} ({hourLabel(DAY_PARTS[hovered.part].from)}–{hourLabel(DAY_PARTS[hovered.part].to)})</strong>
               {#if cell.value > 0}
                 <span>{cell.value} points of usage added across {cell.top.length === 1 ? '1 account' : `${cell.top.length}${cell.top.length === 3 ? '+' : ''} accounts`}</span>
-                {#each cell.top as item (item.account)}<span class="hm-row"><em>{item.account}</em>+{item.points}</span>{/each}
+                {#each cell.top as item}<span class="hm-row"><em>{item.account}</em>+{item.points}</span>{/each}
               {:else}<span>No recorded usage</span>{/if}
             </span>
           {:else if activity.max === 0}
