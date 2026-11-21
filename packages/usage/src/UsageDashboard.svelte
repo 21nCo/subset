@@ -157,7 +157,7 @@
   function jumpTo(accountId: string) {
     alertDialog?.close();
     const card = document.getElementById(`card-${accountId}`);
-    card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
     card?.classList.add('flash');
     setTimeout(() => card?.classList.remove('flash'), 1600);
   }
