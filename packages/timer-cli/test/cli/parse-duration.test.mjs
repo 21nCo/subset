@@ -53,6 +53,32 @@ test('invalid durations are refused with a DurationError', () => {
   }
 });
 
+test('--until chooses the next occurrence across daylight saving transitions', () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    const cases = [
+      ['2026-11-01T01:30:00-04:00', '01:15', '2026-11-01T06:15:00.000Z'],
+      ['2026-11-01T01:30:00-04:00', '01:45', '2026-11-01T05:45:00.000Z'],
+      ['2026-11-01T01:30:00-05:00', '01:45', '2026-11-01T06:45:00.000Z'],
+      ['2026-11-01T01:15:00-04:00', '01:15', '2026-11-01T06:15:00.000Z'],
+      ['2026-11-01T01:15:00-05:00', '01:15', '2026-11-02T06:15:00.000Z'],
+      ['2026-11-01T01:30:00-05:00', '01:15', '2026-11-02T06:15:00.000Z'],
+      ['2026-11-01T01:30:00-04:00', '01:15:30', '2026-11-01T06:15:30.000Z'],
+      ['2026-10-31T01:30:00-04:00', '01:15', '2026-11-01T05:15:00.000Z'],
+      ['2026-11-02T01:00:00-05:00', '01:15', '2026-11-02T06:15:00.000Z'],
+      ['2026-03-08T01:30:00-05:00', '02:15', '2026-03-08T07:15:00.000Z'],
+      ['2026-03-08T03:30:00-04:00', '02:15', '2026-03-09T06:15:00.000Z']
+    ];
+    for (const [now, time, expected] of cases) {
+      assert.equal(parseUntil(time, Date.parse(now)), expected, `${now} until ${time}`);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
 test('--until is the next such local time, today or tomorrow', () => {
   const previous = process.env.TZ;
   process.env.TZ = 'UTC';
