@@ -21,7 +21,7 @@
   import { createUsageStatus, usageFreshness, type UsageAccount, type UsageProvider, type UsageStatus, type UsageWindow } from './index.js';
   import {
     accountBadge, accountName, accountService, activityGrid, agoText, DAY_PARTS, limitAlerts, windowGroups, type LimitItem, compactDuration, displayPercent, planName, providerMeta, resetDetails, spanLabel, summarize,
-    paceText, sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
+    groupedWindowTitle, paceText, sortAccounts, usedTone, windowPace, windowResetText, windowTitle, type PercentMode, type SortMode,
     clipSeries, DEFAULT_TREND_RANGE, TREND_RANGES, trendRange, trendReady, trendSpanText, type TrendRange, type TrendRangeId,
   } from './present.js';
 
@@ -582,6 +582,7 @@
   <dialog bind:this={resetDialog} class="resets" aria-labelledby="reset-title" onclose={() => { resetFocus = null; confirmReset = false; resetMessage = ''; }}
     onclick={(event) => { if (event.target === resetDialog) resetDialog?.close(); }}>
     {#if resetAccount}
+      {@const groups = resetAccount.provider === 'antigravity' ? windowGroups(resetAccount) : null}
       <div class="sheet">
         <header>
           <ProviderIcon provider={resetAccount.provider} size={34} />
@@ -595,7 +596,7 @@
           {@const details = resetDetails(window, now)}
           {@const pace = windowPace(window, now)}
           <section class="reset-window" class:focus={resetFocus?.key === historyWindowKey(window)}>
-            <h3>{windowTitle(resetAccount, window)}</h3>
+            <h3>{groupedWindowTitle(resetAccount, window, groups)}</h3>
             <dl>
               <div><dt>Resets</dt><dd>{exactTime(details.resetsAt)}{details.remainingMs !== null ? ` · ${details.remainingMs > 0 ? `in ${compactDuration(details.remainingMs)}` : 'due'}` : ''}</dd></div>
               <div><dt>Window started</dt><dd>{details.windowStart ? exactTime(details.windowStart) : 'Unavailable'}</dd></div>
