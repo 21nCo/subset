@@ -137,6 +137,7 @@
 
 <style>
   .create {
+    container-type: inline-size;
     border-top: 1px solid var(--timer-border);
     padding-top: 8px;
   }
@@ -184,6 +185,22 @@
   .options {
     display: flex;
     gap: var(--ui-space-3, 12px);
+  }
+  @container (max-width: 30rem) {
+    .modes {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--ui-space-2, 8px) var(--ui-space-3, 12px);
+    }
+    .row > .field {
+      flex-basis: 100%;
+      min-width: 0;
+    }
+    .row input[type='text'] {
+      box-sizing: border-box;
+      width: 100%;
+      min-width: 0;
+    }
   }
   input[type='text'],
   select,
