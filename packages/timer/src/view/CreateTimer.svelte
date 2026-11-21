@@ -121,8 +121,10 @@
             />
             {#if errors.duration}<span class="error" id="{uid}-duration-error">{errors.duration}</span>{/if}
           </label>
-          <label class="check"><input type="checkbox" bind:checked={countdown.lapsEnabled} />Laps</label>
-          <label class="check"><input type="checkbox" bind:checked={countdown.sound} />Sound</label>
+          <div class="options">
+            <label class="check"><input type="checkbox" bind:checked={countdown.lapsEnabled} />Laps</label>
+            <label class="check"><input type="checkbox" bind:checked={countdown.sound} />Sound</label>
+          </div>
         </div>
       {:else if mode === 'interval'}
         <IntervalEditor bind:draft={interval} {errors} />
@@ -172,8 +174,16 @@
   }
   .row {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: var(--ui-space-3, 12px);
     align-items: flex-end;
+  }
+  .row > .field {
+    flex-shrink: 0;
+  }
+  .options {
+    display: flex;
+    gap: var(--ui-space-3, 12px);
   }
   input[type='text'],
   select,
