@@ -851,7 +851,7 @@
   .empty { text-align: center; padding: 64px 24px; margin-top: 20px; border: 1px dashed var(--line-strong); border-radius: var(--radius); display: grid; justify-items: center; gap: 12px; }
   .empty h2 { font-size: 1.3rem; font-weight: 600; }
   .empty p { color: var(--text-2); max-width: 440px; line-height: 1.5; }
-  .footnote { margin-top: 24px; font-size: .78rem; color: var(--text-3); line-height: 1.5; }
+  .footnote { margin-top: 24px; font-size: .78rem; color: var(--text-2); line-height: 1.5; }
 
   .resets { width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgb(0 0 0 / .22); }
   .trend-dialog { width: min(880px, calc(100vw - 24px)); }
