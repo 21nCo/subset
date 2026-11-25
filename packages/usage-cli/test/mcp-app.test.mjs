@@ -770,7 +770,7 @@ test('the dashboard offers the usage settings link only on Claude Code cards', (
   const cards = Object.fromEntries([...markup.matchAll(/<article\b[^>]*\bid="card-([^"]+)"[^>]*>([\s\S]*?)<\/article>/g)]
     .map(([, id, body]) => [id, body]));
   for (const id of ['claude_work', 'claude_waiting']) {
-    assert.match(cards[id], /<a\b[^>]*href="https:\/\/claude\.ai\/settings\/usage"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Limit resets on claude\.ai/);
+    assert.match(cards[id], /<a\b[^>]*href="https:\/\/claude\.ai\/settings\/usage"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Limit resets on claude\.ai \(browser sign-in\)/);
   }
   for (const id of ['chatgpt_main', 'amp_cli', 'pi_claude']) assert.doesNotMatch(cards[id], /Limit resets on claude\.ai/);
 });
