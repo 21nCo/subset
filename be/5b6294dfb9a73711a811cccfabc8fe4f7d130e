@@ -1,0 +1,19 @@
+native/subset/Core/Install/AppActions.swift
+  s_7afc0d0d49de5b::t_1aa6a3e08412e6 16-18,22-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "be5b6294dfb9a73711a811cccfabc8fe4f7d130e",
+  "prompts": {},
+  "sessions": {
+    "s_7afc0d0d49de5b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4cb6667f-3500-41c8-b90c-148b7290da57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

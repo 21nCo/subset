@@ -1,0 +1,19 @@
+native/subset/README.md
+  s_65f5d4f10d694e::t_8e709f6f6552c0 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0aa6a7b33cbfb41a954c31b81027a74a05a3d4f5",
+  "prompts": {},
+  "sessions": {
+    "s_65f5d4f10d694e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_65f5d4f10d694e",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

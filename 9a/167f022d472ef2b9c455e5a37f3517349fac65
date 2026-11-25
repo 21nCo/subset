@@ -1,0 +1,49 @@
+native/subset/Core/Install/AppActions.swift
+  s_b66d0e9dd4fae0::t_15a2af95bfcd33 40-41,73-74,76-79,86,148,150
+native/subset/Core/Install/AppLock.swift
+  s_b66d0e9dd4fae0::t_1c6ef09714e848 39-41,65-68
+native/subset/Core/Install/DiskImage.swift
+  s_b66d0e9dd4fae0::t_1d3e93d9aa9f56 49,54-60,62-63,77
+native/subset/MacApp/MainWindowView.swift
+  s_b66d0e9dd4fae0::t_e72cffebfa8b61 173
+.github/workflows/subset-macos.yml
+  s_b66d0e9dd4fae0::t_b310d3d2383671 44-49,53,60
+native/subset/Core/Install/AppInstaller.swift
+  s_b66d0e9dd4fae0::t_eb9afb0895565d 172-173,175-178,198-199,229-230,232,234-235,253-254,564-568,674-677,703-712
+native/subset/Core/Install/SystemServices.swift
+  s_b66d0e9dd4fae0::t_1013bea91d046d 8-19,27,35-45,58-59,79-80,83-85,95-96,98-113,144,146,148-150,152,155-157
+native/subset/Core/Install/ToolRunner.swift
+  s_b66d0e9dd4fae0::t_fc8f2ce1625979 20-21,58,60-61,125-126,128-132,149,152-155,160-174,203-204,206,226
+native/subset/Core/List/AppListModel.swift
+  s_b66d0e9dd4fae0::t_8b8ca767a97a76 61-64,154-155,164-167,173-174,177-180
+native/subset/README.md
+  s_b66d0e9dd4fae0::t_b7f639895690c4 59,65
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_b66d0e9dd4fae0::t_726bd51acc5d5f 340-341,343-344,346-349,352-353,421,447-452,755-907,924,934,939-949
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_b66d0e9dd4fae0::t_4555b854ceb573 484-499
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_b66d0e9dd4fae0::t_dea358eeb4de01 110-111,115,118-120,125
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_b66d0e9dd4fae0::t_92679187fa885d 1,175-203
+native/subset/Tests/CoreTests/RealInstallTests.swift
+  s_b66d0e9dd4fae0::t_6912688d64e5e3 37,39-42,47,57,67,70,85-107,111,139-140
+native/subset/Tests/CoreTests/ToolRunnerTests.swift
+  s_b66d0e9dd4fae0::t_34280c9289ea2e 54-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a167f022d472ef2b9c455e5a37f3517349fac65",
+  "prompts": {},
+  "sessions": {
+    "s_b66d0e9dd4fae0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9c393cf-f180-42b3-b545-a1dbf02818e0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

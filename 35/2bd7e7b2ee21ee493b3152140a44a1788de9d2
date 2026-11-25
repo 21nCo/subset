@@ -1,0 +1,25 @@
+packages/subset-dev/README.md
+  s_0d85e5b70dc887::t_993a534bca088f 62-63
+packages/subset-dev/src/commands/list.mjs
+  s_0d85e5b70dc887::t_fda89fb73dc505 5,53-54
+packages/subset-dev/src/feed.mjs
+  s_0d85e5b70dc887::t_1cf4e1ac7c3f56 25-36,87,236,245-246
+packages/subset-dev/test/list.test.mjs
+  s_0d85e5b70dc887::t_4255f3581e8646 161-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "352bd7e7b2ee21ee493b3152140a44a1788de9d2",
+  "prompts": {},
+  "sessions": {
+    "s_0d85e5b70dc887": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "37e3656b-fb3d-4769-b9a9-5d99c965fb6b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

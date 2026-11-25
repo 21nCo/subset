@@ -1,0 +1,37 @@
+packages/subset-dev/README.md
+  s_c719faa707762b::t_a8b026f1411ad7 38,139,162,165-167,171,188,190
+packages/subset-dev/src/commands/install.mjs
+  s_c719faa707762b::t_b7f9f510d14fc4 11,163-179
+packages/subset-dev/src/commands/uninstall.mjs
+  s_c719faa707762b::t_307dbeda1450b0 3-5,11,31-38,41-43,73-90,93-95,98-104,112-122,126,130-131,154
+packages/subset-dev/src/commands/update.mjs
+  s_c719faa707762b::t_7ba448de41cba9 4-5,12,114-135,137-138,170,176,249
+packages/subset-dev/src/macos/lock.mjs
+  s_c719faa707762b::t_a8f199ca259342 1-64
+packages/subset-dev/src/macos/trash.mjs
+  s_c719faa707762b::t_60dba4b068764e 2-10,20,34-35,37-38,58,74-83,85-87,92,104-106,108-112,115,117-122,124,128-130,133,137-143,145,147-148,161,163-164,172-183
+packages/subset-dev/src/macos/update.mjs
+  s_c719faa707762b::t_ca7e44d8bfb78c 9,19-20,27,115-116,121-124,126,133-143,188,190,203,283-287
+packages/subset-dev/test/cli.test.mjs
+  s_c719faa707762b::t_36be9eb338b060 147-154,158
+packages/subset-dev/test/install.test.mjs
+  s_c719faa707762b::t_e53ddc93e0a7c3 731,737-745
+packages/subset-dev/test/update.test.mjs
+  s_c719faa707762b::t_bb721f1b97f973 12,20,36,89,150,299-302,305-307,438,649-653,657-679,682,685,687-688,690-701,984-1193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bdd81a3c09393b35e8107e8ec1bd52d426dc3512",
+  "prompts": {},
+  "sessions": {
+    "s_c719faa707762b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0d229937-ba84-4ae8-ba85-eced28f5d576",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+native/subset/Core/Install/DiskImage.swift
+  s_c9ec2f4157d8ae::t_9a6e2fb323d5ff 49,54,59-69
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_c9ec2f4157d8ae::t_04b707bb555d5f 630-655
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5e8313bfcd8bd66ebba4980de445a8519d7181a",
+  "prompts": {},
+  "sessions": {
+    "s_c9ec2f4157d8ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_c9ec2f4157d8ae",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

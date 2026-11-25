@@ -1,0 +1,35 @@
+native/subset/Core/CommandLine/HelperExamples.swift
+  s_b15184ae60b291::t_1785eca74ceda0 104-106,116,144,162
+native/subset/Core/Install/ToolRunner.swift
+  s_48c1acd7c570fe::t_2d18ad3b4b0ba0 26,29-31,39,44,84,90,92,95,100,127,133,136,174,184-185,199-200,202-203,267
+native/subset/Core/CommandLine/SubsetCommandDetector.swift
+  s_48c1acd7c570fe::t_dc7bbf3429745c 50,70-79,108-110,112-127,130-144,146-150,308,311
+native/subset/README.md
+  s_48c1acd7c570fe::t_e765a8ef4b41c1 73,77
+native/subset/Tests/CoreTests/CommandLineTests.swift
+  s_48c1acd7c570fe::t_eb07d000652fb5 159,162,164-166,344-345,348-350,352-353,356,360,363-369,371-372,375,467-494,635,639,661-662,720-721,725-751
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "686835788aa130462f97644b7285cdd534a862e2",
+  "prompts": {},
+  "sessions": {
+    "s_48c1acd7c570fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "11d4ac07-f5b2-49f0-a97f-1dfcac7d900b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_b15184ae60b291": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dd21c743-8ca1-4896-ad7b-a3b81c2516fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_b15184ae60b291::t_bc45e45adb2179 1053-1059,1064
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "934a98b2e698ca3a64068b131b2e6b819765fdc6",
+  "prompts": {},
+  "sessions": {
+    "s_b15184ae60b291": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dd21c743-8ca1-4896-ad7b-a3b81c2516fb",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

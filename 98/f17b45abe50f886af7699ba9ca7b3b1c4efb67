@@ -1,0 +1,33 @@
+.github/workflows/verify.yml
+  s_dc85232e24b85a::t_02eb81b79927e9 68-70
+packages/subset-dev/README.md
+  s_dc85232e24b85a::t_d369c275617a55 24-29,216-239,242
+packages/subset-dev/src/cli.mjs
+  s_dc85232e24b85a::t_8796437f9ec7c5 6,9,14-15,17,28,34-35,40-41,86-87,90-98,102-134,136-153,168
+packages/subset-dev/src/helpers.mjs
+  s_dc85232e24b85a::t_bf0aab7cedb2b1 1-149
+packages/subset-dev/src/tools.mjs
+  s_dc85232e24b85a::t_be737c3b195abf 3-10,12-31,35-40,47-49,59-64
+packages/subset-dev/test/app-helpers.test.mjs
+  s_dc85232e24b85a::t_19854190a2235c 1-324
+packages/subset-dev/test/cli.test.mjs
+  s_dc85232e24b85a::t_62613a3f423965 13,59-67,83,122-133,138
+scripts/check-workspaces.mjs
+  s_dc85232e24b85a::t_06ad9fb9fd3e90 123-125,128,167-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "98f17b45abe50f886af7699ba9ca7b3b1c4efb67",
+  "prompts": {},
+  "sessions": {
+    "s_dc85232e24b85a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_dc85232e24b85a",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

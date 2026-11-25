@@ -1,0 +1,27 @@
+packages/subset-dev/README.md
+  s_588a995e62a101::t_3830874ef6e4f9 171,188
+packages/subset-dev/src/commands/uninstall.mjs
+  s_588a995e62a101::t_19a2fdb3b923c5 5,154-163
+packages/subset-dev/src/commands/update.mjs
+  s_588a995e62a101::t_126c62851a4c89 201-206
+packages/subset-dev/test/install.test.mjs
+  s_588a995e62a101::t_5d2a284bfa8e15 664-665,754-755
+packages/subset-dev/test/update.test.mjs
+  s_588a995e62a101::t_ca81481d4663e3 1366-1413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7b325f1a191223d013446e005578f53d9f291cce",
+  "prompts": {},
+  "sessions": {
+    "s_588a995e62a101": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_588a995e62a101",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

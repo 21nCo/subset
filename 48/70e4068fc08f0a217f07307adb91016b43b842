@@ -1,0 +1,19 @@
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_84d6ffda2b7882::t_84a67540fc2f67 104-121,289,293-294,303,332,344-346,348,354-356,363-377,381,383,385-387,389-405,407-433
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4870e4068fc08f0a217f07307adb91016b43b842",
+  "prompts": {},
+  "sessions": {
+    "s_84d6ffda2b7882": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "77735be9-a2fb-4025-bf5a-0bc02b6d23f6",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

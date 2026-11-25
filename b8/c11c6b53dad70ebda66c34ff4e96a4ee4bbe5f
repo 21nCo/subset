@@ -1,0 +1,43 @@
+native/subset/Core/Install/AppActions.swift
+  s_00549ca011f50e::t_e19887f93b2ffb 53-56,60,93-94,119,123-124,126
+native/subset/Core/Install/AppInstaller.swift
+  s_00549ca011f50e::t_ef4a17e8f1bf00 87-90,134,143,151,159-161,164,169,192,199-201,210,222,227-228,230-232,246,248,257-266,270-285,607,609-622
+native/subset/Core/Install/InstallFailure.swift
+  s_00549ca011f50e::t_e1359464f6db33 19-22
+native/subset/Core/Install/SystemServices.swift
+  s_00549ca011f50e::t_0c92f9847a22af 58-60,63,72,75,82-99,107
+native/subset/Core/Install/ToolRunner.swift
+  s_00549ca011f50e::t_c35ca4b4f9de6d 4,17-23,27,31-33,35,42,44-46,49-56,58-67,69-109,111-112,114,116-127,129-146,148-162,166-178,180-205,207-213
+native/subset/MacApp/MainWindowView.swift
+  s_00549ca011f50e::t_6ce9b9f25c14bd 36
+native/subset/README.md
+  s_00549ca011f50e::t_cd8c904b6c6361 49,59,61,65
+native/subset/Subset.xcodeproj/project.pbxproj
+  s_00549ca011f50e::t_b77ae8fcdf092e 12-13,18-19,21,23,31,33,35,40,42,45,48,60,70-74,82,87,89,93,100,105,109,133,137,172-191,268,285-302,347,372,378,433-451,461,465,497,503,505-506,514,529,531,548,550,555,557,559-560,562,741-749
+native/subset/Subset.xcodeproj/xcshareddata/xcschemes/Subset.xcscheme
+  s_00549ca011f50e::t_851bbbace4dc2e 31,58
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_00549ca011f50e::t_15c0bcda80155c 422-541,563-572
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_00549ca011f50e::t_356798396c0199 104-105,109-111,114,118
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_00549ca011f50e::t_526e91bf9b6bb1 59,69,111-115,117,126-154
+native/subset/Tests/CoreTests/ToolRunnerTests.swift
+  s_00549ca011f50e::t_bedbebf841ec00 1-62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8c11c6b53dad70ebda66c34ff4e96a4ee4bbe5f",
+  "prompts": {},
+  "sessions": {
+    "s_00549ca011f50e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_00549ca011f50e",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

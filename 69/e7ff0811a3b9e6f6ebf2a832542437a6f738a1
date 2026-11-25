@@ -1,0 +1,37 @@
+package-lock.json
+  s_c72ea921fae04c::t_059fda6e23d9ee 7023
+packages/minutes-cli/src/main.mjs
+  s_c72ea921fae04c::t_220eb11dc7e420 25-35,62-64,128,130,142,386
+packages/minutes-cli/test/command-name.test.mjs
+  s_c72ea921fae04c::t_77573e92b041ec 1-53
+packages/timer-cli/src/commands/index.mjs
+  s_c72ea921fae04c::t_c6ac86cb10262e 10,15-16,69-74,80-82,86-87,94,106,125-126,154,156,164,170,176,195,203
+packages/timer-cli/src/commands/shared.mjs
+  s_c72ea921fae04c::t_f6fd6e20436fb0 29-37
+packages/timer-cli/src/commands/timers.mjs
+  s_c72ea921fae04c::t_0cd5a9acfcf0d1 46-47,53,84,99,136-137
+packages/timer-cli/test/cli/command-name.test.mjs
+  s_c72ea921fae04c::t_65c551fb97f6a7 1-78
+packages/usage-cli/package.json
+  s_c72ea921fae04c::t_aa94e3ad6773f1 3
+packages/usage-cli/src/server.mjs
+  s_c72ea921fae04c::t_9b96feb56c0c3b 400-404
+packages/usage-cli/test/command-name.test.mjs
+  s_c72ea921fae04c::t_831220b1103851 1-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "69e7ff0811a3b9e6f6ebf2a832542437a6f738a1",
+  "prompts": {},
+  "sessions": {
+    "s_c72ea921fae04c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_c72ea921fae04c",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

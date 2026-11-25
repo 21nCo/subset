@@ -1,0 +1,59 @@
+AGENTS.md
+  s_a50b04b1575717::t_7eae9fd3b9ba7f 34-35,110
+README.md
+  s_a50b04b1575717::t_afbdf104bb18b0 21,54-65,87
+apps/timer/README.md
+  s_a50b04b1575717::t_e9e4e8dbaea585 3
+docs/macos-release.md
+  s_a50b04b1575717::t_2f1aeebc9bfa25 85
+native/minutes/README.md
+  s_a50b04b1575717::t_bbea3b7f93f1a0 3-5,25,30
+native/point-in-time/README.md
+  s_a50b04b1575717::t_23ee3a4a24230c 5,100,121,124-125,132-139,146,184
+native/system/README.md
+  s_a50b04b1575717::t_a7026480fbb346 5,47-48,321-328,364,401
+native/timer/README.md
+  s_a50b04b1575717::t_65e7200f451961 3
+package.json
+  s_a50b04b1575717::t_f02ee969bf737c 11
+packages/minutes-cli/README.md
+  s_a50b04b1575717::t_bff998fff73d40 3,13-18,22-23,45,71
+packages/minutes/README.md
+  s_a50b04b1575717::t_353ab89d14f3aa 3,14
+packages/subset-dev/README.md
+  s_a50b04b1575717::t_141bbc123ad934 13
+packages/timer-cli/README.md
+  s_a50b04b1575717::t_9c6fa93bb50206 3,12-14,17-23,68,72,82,104,107,113,135,211
+packages/timer-cli/skills/subset-timer/SKILL.md
+  s_a50b04b1575717::t_62e6def63b8496 3,8,22,28-33,41,60,74-78,84-91,101,113,121-124
+packages/timer-cli/test/cli/commands.test.mjs
+  s_a50b04b1575717::t_3bd44408260fdc 477-481,494
+packages/timer/README.md
+  s_a50b04b1575717::t_2c1a11362d7a0c 3
+packages/usage-cli/README.md
+  s_a50b04b1575717::t_ccecff0b7cf7c8 11-16,20-21,36-42,88
+packages/usage/README.md
+  s_a50b04b1575717::t_6374a2e5350d25 3,66,129
+scripts/check-workspaces.mjs
+  s_a50b04b1575717::t_208db39ee5dba0 5,140-143
+scripts/docs-commands.mjs
+  s_a50b04b1575717::t_4dd72b67a1a666 1-78
+scripts/docs-commands.test.mjs
+  s_a50b04b1575717::t_471c83773202ee 1-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dec85f945c221dbc014a3c9f5cd4d0e1988a2ca1",
+  "prompts": {},
+  "sessions": {
+    "s_a50b04b1575717": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_a50b04b1575717",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

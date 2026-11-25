@@ -1,0 +1,33 @@
+packages/subset-dev/src/commands/list.mjs
+  s_0d85e5b70dc887::t_dd166b0f596d9a 15
+packages/subset-dev/src/feed.mjs
+  s_0d85e5b70dc887::t_2249d0b2694876 175-176,183-184
+packages/subset-dev/test/feed.test.mjs
+  s_c526956d1a78e4::t_f69373ce628400 239-251
+packages/subset-dev/test/list.test.mjs
+  s_0d85e5b70dc887::t_596473687bbae5 63-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "084926673bde1aff7025d2af5e5e843372267507",
+  "prompts": {},
+  "sessions": {
+    "s_0d85e5b70dc887": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "37e3656b-fb3d-4769-b9a9-5d99c965fb6b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_c526956d1a78e4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "572d349b-4e62-431f-b319-5d8a63ad4c22",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

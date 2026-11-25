@@ -1,0 +1,19 @@
+packages/subset-dev/test/install.test.mjs
+  s_e444caf5c3f1e5::t_91de27f1d84a6a 375-380,382,386-387,390-398,406-407,411,418-420,464-485
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "892f75f0e08e23ac718ec1609a09cc73ea7c094d",
+  "prompts": {},
+  "sessions": {
+    "s_e444caf5c3f1e5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_e444caf5c3f1e5",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

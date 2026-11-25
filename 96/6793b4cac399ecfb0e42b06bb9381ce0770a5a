@@ -1,0 +1,25 @@
+docs/macos-release.md
+  s_0b02b7eae75484::t_4648614f072a26 23
+packages/subset-dev/README.md
+  s_0b02b7eae75484::t_8f96044c30d844 107,198,202,236,238
+packages/subset-dev/src/helpers.mjs
+  s_0b02b7eae75484::t_a8033434ba1eb5 5-7,19-26,48-50,60-61
+packages/subset-dev/test/app-helpers.test.mjs
+  s_0b02b7eae75484::t_c8ed90bfeeec50 4-6,15,43-51,70-76,146,164,217-221,331-333,338-343,346-359
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "966793b4cac399ecfb0e42b06bb9381ce0770a5a",
+  "prompts": {},
+  "sessions": {
+    "s_0b02b7eae75484": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0b02b7eae75484",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

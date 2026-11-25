@@ -1,0 +1,25 @@
+native/subset/Core/Installed/InstalledApps.swift
+  s_6783fc31221d59::t_492a1db0bd9d25 40-43,46-59
+native/subset/Core/List/AppListModel.swift
+  s_6783fc31221d59::t_07a173a1fc022d 98-104,111
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_6783fc31221d59::t_f44bac99379556 23-25,27-29,31-33,37-49,52-53,55,60-68,101-103,274,284,312-313,325-331,333-337,342-371,385-386,394-409
+native/subset/Tests/CoreTests/InstalledAppsTests.swift
+  s_6783fc31221d59::t_1303ea5f716265 94-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13c2f69b4281b47b0b2a86dbf4c250bb7bdc2eaf",
+  "prompts": {},
+  "sessions": {
+    "s_6783fc31221d59": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_6783fc31221d59",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

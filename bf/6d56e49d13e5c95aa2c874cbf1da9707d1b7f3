@@ -1,0 +1,19 @@
+.github/workflows/subset-macos.yml
+  s_c30d7fb997108e::t_fe364be5c77be7 9,15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bf6d56e49d13e5c95aa2c874cbf1da9707d1b7f3",
+  "prompts": {},
+  "sessions": {
+    "s_c30d7fb997108e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "72c61b5b-f4f7-4e64-9d5b-43ad0195113f",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

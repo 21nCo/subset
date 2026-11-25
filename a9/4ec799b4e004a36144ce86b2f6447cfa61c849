@@ -1,0 +1,31 @@
+native/subset/Core/Install/ToolRunner.swift
+  s_c2d6ef2e96fafa::t_03a5beac7533d9 22-24,28-29,37,40-42,77-81,83-87,184-189,226-227,229-230,234-262,281,290,299
+native/subset/Core/CommandLine/HelperExamples.swift
+  s_c2d6ef2e96fafa::t_0b9244bd33a375 1,17-18,63-66,68-72,74-77,82-88,98-161
+native/subset/Core/CommandLine/SubsetCommandDetector.swift
+  s_c2d6ef2e96fafa::t_f042c56a3d990a 28-29,69-79,82-95,106-107,109-111,263-280
+native/subset/MacApp/CommandLineSection.swift
+  s_c2d6ef2e96fafa::t_903e758bd135f9 10-16,30-31,33,40-41
+native/subset/MacApp/MainWindowView.swift
+  s_c2d6ef2e96fafa::t_b1323c8098f5bf 12,28-32
+native/subset/README.md
+  s_c2d6ef2e96fafa::t_3bfc4d11010e76 73,75,77
+native/subset/Tests/CoreTests/CommandLineTests.swift
+  s_c2d6ef2e96fafa::t_a3583e82d2a8fc 126-131,140-141,148-166,318-331,341-373,508-510,516-517,520-523,588-616,618-625,627-628,631-640,643-644,670-673,679,682-686,688-692,694-696
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a94ec799b4e004a36144ce86b2f6447cfa61c849",
+  "prompts": {},
+  "sessions": {
+    "s_c2d6ef2e96fafa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "06fe544c-d9eb-46b8-b581-824711a616bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

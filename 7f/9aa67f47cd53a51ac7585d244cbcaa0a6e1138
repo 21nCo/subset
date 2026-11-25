@@ -1,0 +1,31 @@
+native/subset/Core/Install/AppInstaller.swift
+  s_255cc75f75f836::t_b476083672ce98 176,188-189,207-209,238-239
+native/subset/Core/Install/SystemServices.swift
+  s_255cc75f75f836::t_967684430b16dc 91-96,133-137,213-214,219,268-269,310
+native/subset/Core/List/AppListModel.swift
+  s_255cc75f75f836::t_f13ac7bfe34107 3,65-66,69,201,203,210-225
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_255cc75f75f836::t_462c704bcea34a 381,386-401,409,413-448,911-912,917-920
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_255cc75f75f836::t_7b77a374593da5 523-539
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_255cc75f75f836::t_6944767c0932b1 120-126,137-139
+native/subset/README.md
+  s_255cc75f75f836::t_4f2d8885db812b 61,65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f9aa67f47cd53a51ac7585d244cbcaa0a6e1138",
+  "prompts": {},
+  "sessions": {
+    "s_255cc75f75f836": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ffa88c36-7bd8-4086-90af-73923dd6a087",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+native/subset/Core/Install/AppActions.swift
+  s_255cc75f75f836::t_f0924f83146aa3 40,42,51,54-56,73,135-137,141-142,155,167-169,173
+native/subset/Core/Install/AppInstaller.swift
+  s_255cc75f75f836::t_ad3f4f8eb07b61 301,309-310,313-315,541-542,546,751-752,761,764
+native/subset/Core/Install/InstallFailure.swift
+  s_255cc75f75f836::t_826cf1b87edc8e 19-20,22-24
+native/subset/Core/Install/SystemServices.swift
+  s_255cc75f75f836::t_5a790a64f360bd 104-107,114,116-117,130-131,133-134,142-153,157-166,194,208-211,213-217,237-244,247-248,290,296,299-311,314
+native/subset/MacApp/MainWindowView.swift
+  s_255cc75f75f836::t_82bafeaa72d596 129,146-147
+native/subset/README.md
+  s_255cc75f75f836::t_e575678e999c4a 61,65
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_255cc75f75f836::t_274131792b8b2b 416,752-761,856-858,862-864,871-872,880,883-888
+native/subset/Tests/CoreTests/InstallFakes.swift
+  s_255cc75f75f836::t_92647f9cc62101 116
+native/subset/Tests/CoreTests/InstallReceiptAndActionsTests.swift
+  s_255cc75f75f836::t_69c47d8d775449 138,202-206,208-215,217-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "785c5c3fedcb78cda2f7ba46915f5aaca47ed0e1",
+  "prompts": {},
+  "sessions": {
+    "s_255cc75f75f836": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ffa88c36-7bd8-4086-90af-73923dd6a087",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

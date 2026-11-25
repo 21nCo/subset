@@ -1,0 +1,35 @@
+packages/subset-dev/README.md
+  s_43c51ce4b18d3a::t_4bc965efd218b5 164-166,185
+packages/subset-dev/src/commands/install.mjs
+  s_43c51ce4b18d3a::t_d8d5edacd0218b 11,162-163
+packages/subset-dev/src/commands/list.mjs
+  s_43c51ce4b18d3a::t_c7ff484c6bab4f 5,106-107
+packages/subset-dev/src/commands/uninstall.mjs
+  s_43c51ce4b18d3a::t_37a67c7ffc80e7 10,61-62,90-91
+packages/subset-dev/src/commands/update.mjs
+  s_43c51ce4b18d3a::t_05a776fc7d9d20 6,12,113-119,136-140
+packages/subset-dev/src/macos/trash.mjs
+  s_43c51ce4b18d3a::t_3fd36d41ac55c1 3-7,10,19-22,25-31,82-83,114-117,120-145
+packages/subset-dev/src/macos/update.mjs
+  s_43c51ce4b18d3a::t_5514240e59f12f 12-13,18,23,156,216,221-284
+packages/subset-dev/test/helpers.mjs
+  s_43c51ce4b18d3a::t_8e27ba1459b4ae 49-51,71-79
+packages/subset-dev/test/update.test.mjs
+  s_43c51ce4b18d3a::t_7aa9487caf5b50 5,8,13-14,19,665-786
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0ea3974a112203acf30c9cbe832442121d37d30",
+  "prompts": {},
+  "sessions": {
+    "s_43c51ce4b18d3a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_43c51ce4b18d3a",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

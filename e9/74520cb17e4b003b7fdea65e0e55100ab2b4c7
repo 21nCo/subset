@@ -1,0 +1,27 @@
+packages/subset-dev/README.md
+  s_e493b62ac1660b::t_2fc5524c445c55 120,126,135,169
+packages/subset-dev/src/commands/install.mjs
+  s_e493b62ac1660b::t_1bb732685741f1 90-93,95,101,103-104,116-117,119,166
+packages/subset-dev/src/macos/install.mjs
+  s_e493b62ac1660b::t_d8c8679bdf7358 4-5,12-15,26-33,41-42,188-207,211-232,234,237,242-245,291-294,313,357
+packages/subset-dev/test/install-stubs.mjs
+  s_e493b62ac1660b::t_93d710f8fb9f27 1-2,122-132,155-158
+packages/subset-dev/test/install.test.mjs
+  s_e493b62ac1660b::t_1fd53990cdcffc 2,5,70,82,144-150,154-155,160,163-165,167,169,171,175-176,392-393,505-601
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e974520cb17e4b003b7fdea65e0e55100ab2b4c7",
+  "prompts": {},
+  "sessions": {
+    "s_e493b62ac1660b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_e493b62ac1660b",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+native/subset/Core/Feed/BoundedFile.swift
+  s_2abff397bfd8b8::t_406da9ac0a2d19 1-38
+native/subset/Core/Feed/Catalog.swift
+  s_2abff397bfd8b8::t_720440d6ea692b 1-236
+native/subset/Core/Feed/CatalogLoader.swift
+  s_2abff397bfd8b8::t_59eadd1165e23b 1-222
+native/subset/Core/Feed/JSONChecker.swift
+  s_2abff397bfd8b8::t_87771f3e0524ad 1-158
+native/subset/Core/Feed/URLSessionFeedTransport.swift
+  s_2abff397bfd8b8::t_d4f3b80f86b0a4 1-73
+native/subset/Core/Installed/InstalledApps.swift
+  s_2abff397bfd8b8::t_84e6f5d9546a3d 1-121
+native/subset/Core/Installed/Receipt.swift
+  s_2abff397bfd8b8::t_7111bb5e8af884 1-54
+native/subset/Core/List/AppListModel.swift
+  s_2abff397bfd8b8::t_98c36cc462eaa0 1-158
+native/subset/Core/List/UpdateRule.swift
+  s_2abff397bfd8b8::t_b53d01b44e5a33 1-60
+native/subset/MacApp/MainWindowView.swift
+  s_2abff397bfd8b8::t_7e1a0aa04c62d9 1-2,5-6,8-9,11-126
+native/subset/MacApp/SubsetApp.swift
+  s_2abff397bfd8b8::t_e86e3b61414d14 6-7,16,21,29-31,37-41,44-45,47,51-53
+native/subset/ProjectGenerator.rb
+  s_2abff397bfd8b8::t_57b6ce9fe43faf 90-96,100-102
+native/subset/README.md
+  s_2abff397bfd8b8::t_035fc4baf31499 5,11,23,26-44,64,77,93,99
+native/subset/Subset.xcodeproj/project.pbxproj
+  s_2abff397bfd8b8::t_7f6a053903ca7a 13-18,20-25,27-33,37,41,44,48,54-59,61-62,64-65,68-70,72,74-75,78,80,94,101,105,112-124,135,138-142,144-145,148,151-152,154-155,158,161-162,164-174,189-203,209,211,218,228,230,232-234,239,257,264-280,290,313,315,321,328,338,342-348,352,356-357,361,365-375,382,385-386,388,391-392,424,443,514-532,621-637,641,644-645,650,653-654,659,662-663,668,671-672
+native/subset/Subset.xcodeproj/xcshareddata/xcschemes/Subset.xcscheme
+  s_2abff397bfd8b8::t_9cb4b1decc631c 31,58
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_2abff397bfd8b8::t_f568f4b82afdea 1-210
+native/subset/Tests/CoreTests/CatalogFeedTests.swift
+  s_2abff397bfd8b8::t_75e2142cfc1781 1-163
+native/subset/Tests/CoreTests/CatalogLoaderTests.swift
+  s_2abff397bfd8b8::t_b6abfb1b2d8f72 1-239
+native/subset/Tests/CoreTests/FeedTransportTests.swift
+  s_2abff397bfd8b8::t_114b2ff10e2557 1-87
+native/subset/Tests/CoreTests/InstalledAppsTests.swift
+  s_2abff397bfd8b8::t_7c782d1cf2015b 1-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "339c54630a5abd1822406da67438edca15fb9c84",
+  "prompts": {},
+  "sessions": {
+    "s_2abff397bfd8b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_2abff397bfd8b8",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

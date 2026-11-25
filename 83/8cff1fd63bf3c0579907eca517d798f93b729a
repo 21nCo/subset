@@ -1,0 +1,21 @@
+native/subset/Core/Install/SystemServices.swift
+  s_0246d4bcd0e03c::t_90333232f38255 99-128,136,140,154-171,198-205,207,268-270,272,277-278,296
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_0246d4bcd0e03c::t_d1e2921986d77b 951-1072
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "838cff1fd63bf3c0579907eca517d798f93b729a",
+  "prompts": {},
+  "sessions": {
+    "s_0246d4bcd0e03c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "639f1a53-fd3b-41d5-b921-e36b4242116a",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

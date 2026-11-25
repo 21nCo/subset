@@ -1,0 +1,19 @@
+native/subset/Core/CommandLine/CommandLineModel.swift
+  s_168078b9d6d0b1::t_c1efad878852bb 36,45-46,48-50,53-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c4609b212a7dba1528160c27cd1aaa2a94333901",
+  "prompts": {},
+  "sessions": {
+    "s_168078b9d6d0b1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "91280e83-63b8-4d95-926a-491c2db9001f",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+.github/workflows/verify.yml
+  s_2409648105d207::t_ee475f66015f77 66-68,86-87,89-102
+packages/subset-dev/README.md
+  s_2409648105d207::t_fdc2041f8f9686 36,42,107-142,169
+packages/subset-dev/src/cli.mjs
+  s_2409648105d207::t_c72e9bcab7ca5a 5-6,119-128
+packages/subset-dev/src/commands.mjs
+  s_2409648105d207::t_d16a61b9e93b49 3,11,13
+packages/subset-dev/src/commands/install.mjs
+  s_2409648105d207::t_2a416591e3dd78 1-190
+packages/subset-dev/src/macos/apps.mjs
+  s_2409648105d207::t_036badce7d0537 63-68
+packages/subset-dev/src/macos/install.mjs
+  s_2409648105d207::t_78cabcc330ae67 1-260
+packages/subset-dev/src/macos/verify.mjs
+  s_2409648105d207::t_de4bc487707d4f 1-112
+packages/subset-dev/test/cli.test.mjs
+  s_2409648105d207::t_e056e20367850d 136-138,174,196-197
+packages/subset-dev/test/install-preload.mjs
+  s_2409648105d207::t_948bfbc97484e5 1-47
+packages/subset-dev/test/install-stubs.mjs
+  s_2409648105d207::t_c421bc4d5038ec 1-131
+packages/subset-dev/test/install.test.mjs
+  s_2409648105d207::t_8f47b9cc42ff31 1-414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1f961106dcf953ceccd109a15ba878066791f130",
+  "prompts": {},
+  "sessions": {
+    "s_2409648105d207": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d70d3597-81a1-4d05-8bd3-05ad69afb585",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

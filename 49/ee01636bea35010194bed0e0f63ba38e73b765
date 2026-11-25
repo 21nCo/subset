@@ -1,0 +1,25 @@
+packages/subset-dev/README.md
+  s_7c8451a527b0b8::t_19a616d488b9a6 141
+packages/subset-dev/src/macos/install.mjs
+  s_7c8451a527b0b8::t_26ec8628922d02 11-12
+packages/subset-dev/src/macos/verify.mjs
+  s_7c8451a527b0b8::t_3e1f98914e165d 25,38,42-48,58-62,67-68,71-98,100,103,107,110,125-129
+packages/subset-dev/test/install.test.mjs
+  s_7c8451a527b0b8::t_ff76fb669bd73d 375-413,415-419,422-481,487-491,494,497-502,505-506,508-527
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "49ee01636bea35010194bed0e0f63ba38e73b765",
+  "prompts": {},
+  "sessions": {
+    "s_7c8451a527b0b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_7c8451a527b0b8",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

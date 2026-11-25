@@ -1,0 +1,27 @@
+native/subset/Core/CommandLine/CommandLineModel.swift
+  s_fa6e926849ce30::t_5babeb4a83d01c 7-10,15-18,24-27,29,32-40,43-53
+native/subset/Core/CommandLine/SubsetCommandDetector.swift
+  s_fa6e926849ce30::t_d445db7b99ecef 57-73,84,86-90,93,100-110,112-116,118,120-132,135-140
+native/subset/MacApp/SubsetApp.swift
+  s_fa6e926849ce30::t_06559e9f3c3c69 44-45,47,49-51
+native/subset/README.md
+  s_fa6e926849ce30::t_5894c054f1a7c9 73,77
+native/subset/Tests/CoreTests/CommandLineTests.swift
+  s_fa6e926849ce30::t_e8b0419096d06c 11-12,14-16,20-31,35-36,38-47,51,57,59,68,70,76,78-79,101-134,145-146,157,162-208,263-272,285,290-291,300,308,312,318,321,324,328-332
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95d393732fa47e621e3da7393eaf00139b93a4d5",
+  "prompts": {},
+  "sessions": {
+    "s_fa6e926849ce30": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5b1633f-474f-415f-8bbb-49e9bddd1f5b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

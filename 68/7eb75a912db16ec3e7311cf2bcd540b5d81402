@@ -1,0 +1,21 @@
+native/subset/README.md
+  s_84f85123f3e554::t_0c7b28a083b7c2 42
+native/subset/Tests/CoreTests/AppListModelTests.swift
+  s_84f85123f3e554::t_3e3a5f32b0c9b7 249-250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "687eb75a912db16ec3e7311cf2bcd540b5d81402",
+  "prompts": {},
+  "sessions": {
+    "s_84f85123f3e554": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "53b9301f-e1f8-4827-b302-7d562d4f4ad3",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

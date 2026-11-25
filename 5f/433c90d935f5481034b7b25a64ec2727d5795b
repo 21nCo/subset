@@ -1,0 +1,47 @@
+.github/workflows/verify.yml
+  s_c719faa707762b::t_969c674ffb062c 63-87
+packages/subset-dev/README.md
+  s_c719faa707762b::t_8e435cc0a539b4 35,42-103,131
+packages/subset-dev/src/cli.mjs
+  s_c719faa707762b::t_e5f7ae3bbed86b 5,8,117-123
+packages/subset-dev/src/commands.mjs
+  s_c719faa707762b::t_ebe4ab2bf1cde3 3,8,59,81-82
+packages/subset-dev/src/commands/list.mjs
+  s_c719faa707762b::t_63943423d47f3d 1-106
+packages/subset-dev/src/feed.mjs
+  s_c719faa707762b::t_acc7a9016a3d0c 1-221
+packages/subset-dev/src/macos/apps.mjs
+  s_c719faa707762b::t_3de5e09eefc66f 1-100
+packages/subset-dev/src/schema.mjs
+  s_c719faa707762b::t_9918afb22ea43c 1-111
+packages/subset-dev/src/schemas/catalog.schema.json
+  s_c719faa707762b::t_356ee4e1833773 1-133
+packages/subset-dev/src/schemas/receipt.schema.json
+  s_c719faa707762b::t_61fb001f0be273 1-38
+packages/subset-dev/test/apps.test.mjs
+  s_c719faa707762b::t_d7d1a119d7206b 1-135
+packages/subset-dev/test/cli.test.mjs
+  s_c719faa707762b::t_606e1711db29c1 136-137,193-195
+packages/subset-dev/test/feed.test.mjs
+  s_c719faa707762b::t_a135babb5e909a 1-280
+packages/subset-dev/test/helpers.mjs
+  s_c719faa707762b::t_8ae12aef569578 1-66
+packages/subset-dev/test/list.test.mjs
+  s_c719faa707762b::t_d9248c43cc42dd 1-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f433c90d935f5481034b7b25a64ec2727d5795b",
+  "prompts": {},
+  "sessions": {
+    "s_c719faa707762b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0d229937-ba84-4ae8-ba85-eced28f5d576",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

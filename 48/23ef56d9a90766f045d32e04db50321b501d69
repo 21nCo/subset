@@ -1,0 +1,23 @@
+packages/subset-dev/README.md
+  s_e8f7eaaf6bf0f7::t_e25879fef6d90d 167,188
+packages/subset-dev/src/commands/uninstall.mjs
+  s_e8f7eaaf6bf0f7::t_bb583307799399 136-138
+packages/subset-dev/src/macos/trash.mjs
+  s_e8f7eaaf6bf0f7::t_8293ed82c18df7 2-6,34,136-138,156-168,185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4823ef56d9a90766f045d32e04db50321b501d69",
+  "prompts": {},
+  "sessions": {
+    "s_e8f7eaaf6bf0f7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_e8f7eaaf6bf0f7",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

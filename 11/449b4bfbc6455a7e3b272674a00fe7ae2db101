@@ -1,0 +1,29 @@
+packages/minutes-cli/src/main.mjs
+  s_5a624545c06938::t_15dc3adbf366e1 25-27,29-31,35,67,146-149,175-176,181
+packages/minutes-cli/test/command-name.test.mjs
+  s_5a624545c06938::t_cbc10004e94bfd 2,45-63
+packages/timer-cli/src/commands/index.mjs
+  s_5a624545c06938::t_0fdbbb2893183d 10,81,86,94,106,125,127,171,177
+packages/timer-cli/src/commands/shared.mjs
+  s_5a624545c06938::t_c0a06b70814142 29-31,33-35,39-49
+packages/timer-cli/src/commands/timers.mjs
+  s_5a624545c06938::t_8564b0367ce81f 4,46,53,84
+packages/timer-cli/test/cli/command-name.test.mjs
+  s_5a624545c06938::t_5437c2916e209e 2,55-70,83-95,97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "11449b4bfbc6455a7e3b272674a00fe7ae2db101",
+  "prompts": {},
+  "sessions": {
+    "s_5a624545c06938": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_5a624545c06938",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}

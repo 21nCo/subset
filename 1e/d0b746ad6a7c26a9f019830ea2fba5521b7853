@@ -1,0 +1,25 @@
+native/subset/Core/Install/AppInstaller.swift
+  s_75e2816556422d::t_85b0a660fbdff0 68-70,76-77,87,93,95-111,147,152,210-211,250-251,253-256,258-259,295-305,308-326,329-364,369-370,382,678-684
+native/subset/Core/Install/SystemServices.swift
+  s_75e2816556422d::t_3a99737cf84670 72,76,81-91,111-112
+native/subset/README.md
+  s_75e2816556422d::t_eb41d9914af075 59,61,65
+native/subset/Tests/CoreTests/AppInstallerTests.swift
+  s_75e2816556422d::t_3bd054ee338440 42-43,59,83,427-428,431-434,449-450,452,463-539,590-592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ed0b746ad6a7c26a9f019830ea2fba5521b7853",
+  "prompts": {},
+  "sessions": {
+    "s_75e2816556422d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_75e2816556422d",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
