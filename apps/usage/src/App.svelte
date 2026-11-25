@@ -525,7 +525,7 @@
     </header>
     </div>
     {#if page === 'usage'}
-      <UsageDashboard {status} {busy} header={false} loading={!loaded && !statusError} {redeemReset} {percentMode} {openAccount} {notice} {emptyAction} history={usageHistory} {accountHint} {accountTag} {showTrends} {pinned} {togglePin} {sortMode} {setSortMode} {setShowTrends} {showCredits} {setShowCredits} />
+      <UsageDashboard {status} {busy} header={false} loading={!loaded && !statusError} {redeemReset} claudeUsageUrl="https://claude.ai/settings/usage" {percentMode} {openAccount} {notice} {emptyAction} history={usageHistory} {accountHint} {accountTag} {showTrends} {pinned} {togglePin} {sortMode} {setSortMode} {setShowTrends} {showCredits} {setShowCredits} />
     {:else}
       <section class="settings" aria-labelledby="settings-title">
         <h1 id="settings-title">Settings</h1>
