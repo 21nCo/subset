@@ -569,8 +569,9 @@
                 {#if account.resetCredits}
                   <button type="button" class="reset" onclick={() => showResets(account)}>{account.resetCredits.availableCount} banked reset{account.resetCredits.availableCount === 1 ? '' : 's'}</button>
                 {/if}
-                {#if claudeUsageUrl && accountService(account) === 'claude-code'}
-                  <a class="reset" href={claudeUsageUrl} target="_blank" rel="noopener noreferrer">Limit resets on claude.ai <ArrowSquareOutIcon size={12} weight="bold" aria-hidden="true" /></a>
+                {#if claudeUsageUrl && account.provider === 'claude-code'}
+                  <a class="reset" href={claudeUsageUrl} target="_blank" rel="noopener noreferrer"
+                    title="Opens usage for the Claude account signed in to your browser">Limit resets on claude.ai <ArrowSquareOutIcon size={12} weight="bold" aria-hidden="true" /></a>
                 {/if}
               </span>
               <time class:stale datetime={account.observedAt ?? undefined} title={account.observedAt ? `Refreshed ${exactTime(account.observedAt)} (${agoText(account.observedAt, now)}${stale ? ', older than 5 minutes' : ''})` : 'Not refreshed yet'}>

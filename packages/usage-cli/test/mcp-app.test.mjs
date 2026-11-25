@@ -759,7 +759,7 @@ test('an error or unreadable tool result shows in place of the dashboard until a
   assert.equal(bridge.state().toolError, null);
 });
 
-test('the dashboard offers the usage settings link only on Claude subscription cards', () => {
+test('the dashboard offers the usage settings link only on Claude Code cards', () => {
   const claudeUsageUrl = 'https://claude.ai/settings/usage';
   const status = createUsageStatus([
     ...fixtureStatus().accounts,
@@ -769,10 +769,10 @@ test('the dashboard offers the usage settings link only on Claude subscription c
   const markup = view.render(view.UsageDashboard, { props: { status, claudeUsageUrl } }).body;
   const cards = Object.fromEntries([...markup.matchAll(/<article\b[^>]*\bid="card-([^"]+)"[^>]*>([\s\S]*?)<\/article>/g)]
     .map(([, id, body]) => [id, body]));
-  for (const id of ['claude_work', 'claude_waiting', 'pi_claude']) {
+  for (const id of ['claude_work', 'claude_waiting']) {
     assert.match(cards[id], /<a\b[^>]*href="https:\/\/claude\.ai\/settings\/usage"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Limit resets on claude\.ai/);
   }
-  for (const id of ['chatgpt_main', 'amp_cli']) assert.doesNotMatch(cards[id], /Limit resets on claude\.ai/);
+  for (const id of ['chatgpt_main', 'amp_cli', 'pi_claude']) assert.doesNotMatch(cards[id], /Limit resets on claude\.ai/);
 });
 
 test('the view renders no write control: the page passes the dashboard none of its write props', async (t) => {
