@@ -1,0 +1,21 @@
+packages/usage-cli/test/mcp-app.test.mjs
+  s_9892411a0e6ceb::t_696ff5506d6d90 762,772,775
+packages/usage/src/UsageDashboard.svelte
+  s_9892411a0e6ceb::t_696ff5506d6d90 572-574
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "341ba983bad31cfdd71296c694a55c67fb3caf7f",
+  "prompts": {},
+  "sessions": {
+    "s_9892411a0e6ceb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a212dc-e229-77a3-82aa-1e5c1489684c",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
