@@ -2,6 +2,7 @@
   import { onMount, tick, type Snippet } from 'svelte';
   import ArrowClockwiseIcon from 'phosphor-svelte/lib/ArrowClockwiseIcon';
   import ArrowRightIcon from 'phosphor-svelte/lib/ArrowRightIcon';
+  import ArrowSquareOutIcon from 'phosphor-svelte/lib/ArrowSquareOutIcon';
   import ArrowsOutSimpleIcon from 'phosphor-svelte/lib/ArrowsOutSimpleIcon';
   import ClockIcon from 'phosphor-svelte/lib/ClockIcon';
   import ClockCountdownIcon from 'phosphor-svelte/lib/ClockCountdownIcon';
@@ -57,6 +58,8 @@
     loading?: boolean;
     /** Redeems a banked reset for an account; resolves to a message for the user. */
     redeemReset?: (accountId: string) => Promise<string>;
+    /** Claude usage settings URL, supplied by hosts that can open external links. */
+    claudeUsageUrl?: string;
     /** Pinned account IDs, shown under the Pinned filter. */
     pinned?: string[];
     togglePin?: (accountId: string) => void;
@@ -70,7 +73,7 @@
 
   let {
     status, busy = false, refresh, header = true, percentMode = 'used', openAccount, manageAccounts, toolbar, notice, emptyAction, history, accountHint,
-    accountTag, showTrends = true, loading = false, redeemReset, pinned = [], togglePin, sortMode = 'default', setSortMode,
+    accountTag, showTrends = true, loading = false, redeemReset, claudeUsageUrl, pinned = [], togglePin, sortMode = 'default', setSortMode,
     setShowTrends, showCredits = true, setShowCredits,
   }: Props = $props();
 
@@ -566,6 +569,9 @@
                 {#if account.resetCredits}
                   <button type="button" class="reset" onclick={() => showResets(account)}>{account.resetCredits.availableCount} banked reset{account.resetCredits.availableCount === 1 ? '' : 's'}</button>
                 {/if}
+                {#if claudeUsageUrl && account.provider === 'claude-code'}
+                  <a class="reset" href={claudeUsageUrl} target="_blank" rel="noopener noreferrer">Limit resets on claude.ai (browser sign-in) <ArrowSquareOutIcon size={12} weight="bold" aria-hidden="true" /></a>
+                {/if}
               </span>
               <time class:stale datetime={account.observedAt ?? undefined} title={account.observedAt ? `Refreshed ${exactTime(account.observedAt)} (${agoText(account.observedAt, now)}${stale ? ', older than 5 minutes' : ''})` : 'Not refreshed yet'}>
                 <ClockCountdownIcon size={13} weight="bold" />{stamp(account.observedAt)}
@@ -739,7 +745,7 @@
   ul { list-style: none; }
   button { font: inherit; color: inherit; cursor: pointer; }
   button:disabled { cursor: progress; opacity: .65; }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 6px 0 18px; border-bottom: 1px solid var(--line); }
   .brand { display: flex; align-items: center; gap: 10px; }
@@ -803,6 +809,7 @@
   .pace { display: inline-flex; align-items: center; gap: 4px; color: var(--text-3); }
   .pace.tone-bad { color: var(--bad); }
   .reset { border: 0; background: none; padding: 0; color: var(--text-3); font-size: .78rem; text-decoration: underline dotted; text-underline-offset: 3px; }
+  a.reset { color: var(--text-2); }
   .reset:hover { color: var(--text); }
   .trend-block { display: grid; gap: 2px; }
   .trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
