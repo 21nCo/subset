@@ -33,6 +33,7 @@
   type Connection = { id: string; authUrl: string | null; state: string; error?: string | null };
 
   const embedded = new URLSearchParams(window.location.search).get('embedded') === '1';
+  const claudeUsageUrl = 'https://claude.ai/settings/usage';
   // usage.subset.dev is not deployed yet; per AGENTS.md it stays plain text until the site works.
   const USAGE_SITE_LIVE = false;
   const providers: Array<{ id: UsageProvider; title: string; detail: string }> = [
@@ -504,7 +505,7 @@
 
 <main>
   {#if embedded}
-    <UsageDashboard {status} notice={statusError ? notice : undefined} />
+    <UsageDashboard {status} {claudeUsageUrl} notice={statusError ? notice : undefined} />
   {:else}
     <div class="appbar-wrap">
     <header class="appbar">
@@ -525,7 +526,7 @@
     </header>
     </div>
     {#if page === 'usage'}
-      <UsageDashboard {status} {busy} header={false} loading={!loaded && !statusError} {redeemReset} claudeUsageUrl="https://claude.ai/settings/usage" {percentMode} {openAccount} {notice} {emptyAction} history={usageHistory} {accountHint} {accountTag} {showTrends} {pinned} {togglePin} {sortMode} {setSortMode} {setShowTrends} {showCredits} {setShowCredits} />
+      <UsageDashboard {status} {busy} header={false} loading={!loaded && !statusError} {redeemReset} {claudeUsageUrl} {percentMode} {openAccount} {notice} {emptyAction} history={usageHistory} {accountHint} {accountTag} {showTrends} {pinned} {togglePin} {sortMode} {setSortMode} {setShowTrends} {showCredits} {setShowCredits} />
     {:else}
       <section class="settings" aria-labelledby="settings-title">
         <h1 id="settings-title">Settings</h1>
