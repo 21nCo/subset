@@ -1,0 +1,19 @@
+apps/usage/src/App.svelte
+  s_9892411a0e6ceb::t_8061083c42436b 36,508,529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b717e54077822dffa96ab1a25e79164dc948acfa",
+  "prompts": {},
+  "sessions": {
+    "s_9892411a0e6ceb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a212dc-e229-77a3-82aa-1e5c1489684c",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
