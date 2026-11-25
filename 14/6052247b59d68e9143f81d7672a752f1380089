@@ -1,0 +1,23 @@
+apps/usage/src/App.svelte
+  s_9892411a0e6ceb::t_dde337933d5497 528
+packages/usage-cli/test/mcp-app.test.mjs
+  s_9892411a0e6ceb::t_43949641c50e5e 762-777,783
+packages/usage/src/UsageDashboard.svelte
+  s_9892411a0e6ceb::t_dde337933d5497 5,61-62,76,572-574,748,812
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "146052247b59d68e9143f81d7672a752f1380089",
+  "prompts": {},
+  "sessions": {
+    "s_9892411a0e6ceb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a212dc-e229-77a3-82aa-1e5c1489684c",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
