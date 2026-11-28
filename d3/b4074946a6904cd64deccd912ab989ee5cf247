@@ -1,0 +1,33 @@
+apps/timer/package.json
+  s_5c73d4f3a924a7::t_36ec22100cecb3 13
+package-lock.json
+  s_5c73d4f3a924a7::t_ad090d5bf96a40 51,4177-4179,6622-6624,6879,6893,6951,7029,7038-7095
+packages/mgraph-contracts/package.json
+  s_5c73d4f3a924a7::t_2a1f97e910a655 20
+packages/mgraph-store/package.json
+  s_5c73d4f3a924a7::t_e3864a1a305af3 20
+packages/timer/package.json
+  s_5c73d4f3a924a7::t_aba0193de337ba 26
+packages/usage-cli/package.json
+  s_5c73d4f3a924a7::t_4dc94cdead0b96 37
+packages/usage-cli/scripts/notices.mjs
+  s_5c73d4f3a924a7::t_e1efb9bdff4161 48,50
+packages/usage-cli/test/notices.test.mjs
+  s_5c73d4f3a924a7::t_17077950395814 34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d3b4074946a6904cd64deccd912ab989ee5cf247",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
