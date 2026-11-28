@@ -1,0 +1,20 @@
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_e801318bef3701 3
+  s_5c73d4f3a924a7::t_2a0a92b5b72300 185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1c71cdc85d70dd25e97c91b4e2f3cf83a09acf46",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
