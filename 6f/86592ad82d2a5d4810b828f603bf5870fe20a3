@@ -1,0 +1,35 @@
+packages/usage-cli/src/server.mjs
+  s_5c73d4f3a924a7::t_007de040e2755b 111-115,118,129-130,133-134,270-273
+apps/directory/src/App.svelte
+  s_5c73d4f3a924a7::t_fb6c1087e92013 14-16,60,62
+native/screenshot/MacApp/AppDelegate.swift
+  s_5c73d4f3a924a7::t_26afd521b5a670 289,298-299,301,305-306
+  s_5c73d4f3a924a7::t_e1207427b9e0d9 307-308
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_3b206147a492fb 175-178,180,182-193,198,201-202
+  s_5c73d4f3a924a7::t_cc050d3f65eba5 203
+packages/minutes/test/capture.test.mjs
+  s_5c73d4f3a924a7::t_3b206147a492fb 178-199
+native/dictate/Shared/Services/WhisperModelManager.swift
+  s_5c73d4f3a924a7::t_4121d23265588a 130,133
+native/dictate/Tests/DictateTests.swift
+  s_5c73d4f3a924a7::t_4121d23265588a 201-206
+packages/usage-cli/test/server.test.mjs
+  s_5c73d4f3a924a7::t_a95d6252c45daa 265-267,321-323,334-340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6f86592ad82d2a5d4810b828f603bf5870fe20a3",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
