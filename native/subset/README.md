@@ -107,7 +107,7 @@ xcodebuild -project Subset.xcodeproj -scheme Subset -destination 'platform=macOS
 
 `.github/workflows/subset-macos.yml` runs on macOS 26 for changes here and in `packages/catalog/feed` (the fixtures and schemas both feed readers are tested against): package tests (with the ad-hoc signed app refused at the team requirement), the Breaks 0.1.0 install with the real tools, the generated-project check, an unsigned Debug `xcodebuild build test`, an unsigned Release build, and the check of the built app's `Info.plist`.
 
-`macos-release.json` describes the app for `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)), so the **Beta builds** workflow builds `macos/subset` betas, tagged `macos/subset/v<version>-beta.<n>`. Locally, from the repository root, `node scripts/release-macos.mjs subset --archive-only --archive-out /tmp/Subset.xcarchive.tar.gz` archives the app without signing credentials and writes the archive outside the repository.
+`macos-release.json` describes the app for `scripts/release-macos.mjs` (see [docs/macos-release.md](../../docs/macos-release.md)), so the **Beta builds** workflow plans `macos/subset` betas, which the beta handoff builds, tagged `macos/subset/v<version>-beta.<n>`. Locally, from the repository root, `node scripts/release-macos.mjs subset --archive-only --archive-out /tmp/Subset.xcarchive.tar.gz` archives the app without signing credentials and writes the archive outside the repository.
 
 ## Superfunctions evaluated
 

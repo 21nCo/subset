@@ -14,7 +14,8 @@
 // tested again instead (the plan names it as `reuse`). A named target still gets no beta when it is ineligible: its
 // version is already released live, an npm package has never been released live, its manifest is invalid, or it is
 // opted out (betaOptOuts). Prints the plan as JSON and, in CI, writes it to the `plan` output. It creates no tags and
-// starts nothing; beta-builds.yml does that.
+// starts nothing: beta-builds.yml uploads the plan, and the beta handoff (thyaravind/automations) creates the tags and
+// starts the release workflows.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
