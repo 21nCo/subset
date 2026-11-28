@@ -1,0 +1,29 @@
+native/point-in-time/Core/Activity.swift
+  s_5c73d4f3a924a7::t_3a8d72fc0bed20 29-56,174-176,179
+native/point-in-time/Core/StatusCommand.swift
+  s_5c73d4f3a924a7::t_383bf6cc76b498 331-334,337-338
+native/point-in-time/README.md
+  s_5c73d4f3a924a7::t_23fb60cbac92e7 131
+native/point-in-time/Tests/CoreTests/CaptureTests.swift
+  s_5c73d4f3a924a7::t_d390537d338c2b 104-118
+native/point-in-time/Tests/CoreTests/StatusTests.swift
+  s_5c73d4f3a924a7::t_599a34f9b546b3 2,275-308
+native/point-in-time/Tests/CoreTests/StoreTests.swift
+  s_5c73d4f3a924a7::t_4b14e28942a0bc 63-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3e231eed19b9895030253eaacd1c88f87c9c065b",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
