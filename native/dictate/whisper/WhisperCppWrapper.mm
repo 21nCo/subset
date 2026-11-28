@@ -46,6 +46,70 @@ struct whisper_full_params {
     BOOL isUsingCoreML;
 }
 
+/// The length of the well-formed UTF-8 sequence at `bytes` (Unicode Table 3-7), or, when it is ill-formed, the
+/// negated length of its maximal invalid subpart (at least 1), which is replaced by one U+FFFD.
+static long DictateUTF8SequenceLength(const unsigned char *bytes, size_t remaining) {
+    const unsigned char lead = bytes[0];
+    if (lead < 0x80) return 1;
+    size_t length;
+    unsigned char low = 0x80, high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) { length = 2; }
+    else if (lead == 0xE0) { length = 3; low = 0xA0; }
+    else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) { length = 3; }
+    else if (lead == 0xED) { length = 3; high = 0x9F; }
+    else if (lead == 0xF0) { length = 4; low = 0x90; }
+    else if (lead >= 0xF1 && lead <= 0xF3) { length = 4; }
+    else if (lead == 0xF4) { length = 4; high = 0x8F; }
+    else { return -1; }
+    for (size_t index = 1; index < length; ++index) {
+        if (index >= remaining) return -(long)index;
+        const unsigned char byte = bytes[index];
+        const unsigned char min = index == 1 ? low : 0x80;
+        const unsigned char max = index == 1 ? high : 0xBF;
+        if (byte < min || byte > max) return -(long)index;
+    }
+    return (long)length;
+}
+
++ (NSString *)stringFromSegmentText:(const char *)text {
+    if (text == NULL) {
+        return @"";
+    }
+    // Decoded by hand into UTF-16, not with Foundation's UTF-8 conversions: those strip a U+FEFF at the start of
+    // what they decode, and a token boundary can split a multi-byte character. Each ill-formed part becomes one
+    // U+FFFD and every valid character around it is kept, as Swift's String(decoding:as: UTF8.self) does.
+    const unsigned char *bytes = (const unsigned char *)text;
+    const size_t count = strlen(text);
+    std::vector<unichar> units;
+    units.reserve(count);
+    size_t index = 0;
+    while (index < count) {
+        const long length = DictateUTF8SequenceLength(bytes + index, count - index);
+        if (length <= 0) {
+            units.push_back(0xFFFD);
+            index += (size_t)(-length);
+            continue;
+        }
+        uint32_t scalar;
+        switch (length) {
+            case 1: scalar = bytes[index]; break;
+            case 2: scalar = ((uint32_t)(bytes[index] & 0x1F) << 6) | (bytes[index + 1] & 0x3F); break;
+            case 3: scalar = ((uint32_t)(bytes[index] & 0x0F) << 12) | ((uint32_t)(bytes[index + 1] & 0x3F) << 6) | (bytes[index + 2] & 0x3F); break;
+            default: scalar = ((uint32_t)(bytes[index] & 0x07) << 18) | ((uint32_t)(bytes[index + 1] & 0x3F) << 12)
+                | ((uint32_t)(bytes[index + 2] & 0x3F) << 6) | (bytes[index + 3] & 0x3F); break;
+        }
+        if (scalar >= 0x10000) {
+            scalar -= 0x10000;
+            units.push_back((unichar)(0xD800 + (scalar >> 10)));
+            units.push_back((unichar)(0xDC00 + (scalar & 0x3FF)));
+        } else {
+            units.push_back((unichar)scalar);
+        }
+        index += (size_t)length;
+    }
+    return [NSString stringWithCharacters:units.data() length:units.size()];
+}
+
 - (instancetype)initWithModelPath:(NSString *)modelPath {
     return [self initWithModelPath:modelPath coreMLModelPath:nil];
 }
@@ -368,12 +432,13 @@ struct whisper_full_params {
             const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
             const char *segmentText = whisper_full_get_segment_text(ctx, i);
 
-            [transcription appendFormat:@"[%.2f - %.2f] %s ", t0 / 100.0, t1 / 100.0, segmentText];
+            [transcription appendFormat:@"[%.2f - %.2f] %@ ", t0 / 100.0, t1 / 100.0, [WhisperCppWrapper stringFromSegmentText:segmentText]];
         }
     } else {
         for (int i = 0; i < nSegments; ++i) {
             const char *segmentText = whisper_full_get_segment_text(ctx, i);
-            [transcription appendFormat:@"%s ", segmentText];
+            // %s would read the bytes in the system encoding and garble anything outside ASCII.
+            [transcription appendFormat:@"%@ ", [WhisperCppWrapper stringFromSegmentText:segmentText]];
         }
     }
 
