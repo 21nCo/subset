@@ -1,0 +1,31 @@
+packages/minutes/README.md
+  s_5c73d4f3a924a7::t_bacbb0b5984f98 71
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_2388ec19e37719 8,23-26,121,125,127-128,138-142,149-162,165-166,171-215,217,221,232-244,248-263,268-269,275-287,299-308,310-318,320-330,346
+packages/minutes/src/chrome.ts
+  s_5c73d4f3a924a7::t_21e0eb325034ed 9,120,142-143,151,161-163,171,176-177
+packages/minutes/src/driver.ts
+  s_5c73d4f3a924a7::t_62f969b1ac8c77 30-33
+packages/minutes/src/session.ts
+  s_5c73d4f3a924a7::t_812611eeee6e78 232-233,236
+packages/minutes/test/capture.test.mjs
+  s_5c73d4f3a924a7::t_23ed173e367242 6-8,13,18-23,25-26,85-333
+packages/minutes/test/session.test.mjs
+  s_5c73d4f3a924a7::t_ad7acd7abc110a 67,187-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5522e93a7250186566d7acd0dbea523aefbf6f98",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
