@@ -65,6 +65,25 @@ jobs:
             exit 1
           fi
 
+      # Releases are cut only from merged work: the tagged commit must be on dev or main (the tag rulesets limit who
+      # can push release tags; this stops a tag on an unmerged branch commit). GitHub's compare reports `behind` or
+      # `identical` when the tagged commit is already part of the branch.
+      - name: Require the tagged commit to be on dev or main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse HEAD)"
+          for branch in dev main; do
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${branch}...${tag_commit}" --jq .status)"
+            if [ "$status" = behind ] || [ "$status" = identical ]; then
+              echo "${RELEASE_TAG} (${tag_commit}) is on ${branch}."
+              exit 0
+            fi
+          done
+          echo "${RELEASE_TAG} points at ${tag_commit}, which is on neither dev nor main. Tag a commit that has been merged." >&2
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

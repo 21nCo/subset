@@ -88,6 +88,12 @@ if (packageJson.private !== false) {
 // x.y.z with that suffix, so a beta needs no version commit.
 const beta = /^\d+\.\d+\.\d+$/.test(packageJson.version) && /^(\d+\.\d+\.\d+)-beta\.[1-9]\d*$/.exec(version)?.[1] === packageJson.version;
 
+// The live tag ruleset leaves tags with `-beta.` in their version to the beta rules, so such a tag must be a real beta
+// and never publish to `latest` or `next` (for example through `-beta.` in build metadata).
+if (!beta && version.includes('-beta.')) {
+  fail(`Tag version ${version} looks like a beta but is not ${packageJson.version}-beta.<n>`);
+}
+
 if (packageJson.version !== version && !beta) {
   fail(`Tag version ${version} does not match ${target.name}@${packageJson.version} in ${target.path}/package.json`);
 }
