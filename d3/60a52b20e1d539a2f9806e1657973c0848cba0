@@ -1,0 +1,21 @@
+native/dictate/whisper/WhisperCppWrapper.h
+  s_5c73d4f3a924a7::t_ed4cab889917e7 38-40
+native/dictate/whisper/WhisperCppWrapper.mm
+  s_5c73d4f3a924a7::t_f5a7394f44b706 49-112,435,440-441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d360a52b20e1d539a2f9806e1657973c0848cba0",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
