@@ -1,19 +1,19 @@
 name: Beta builds
 run-name: Beta builds${{ inputs.issue && format(' for {0}', inputs.issue) || '' }}${{ inputs.request && format(' [{0}]', inputs.request) || '' }}
 
-# Builds betas for acceptance testing, on request rather than on every merge: when a parent issue's implementation
+# Plans betas for acceptance testing, on request rather than on every merge: when a parent issue's implementation
 # is merged into dev, the Linear loop (thyaravind/automations, beta-handoff.mjs) starts this workflow for that
-# issue's apps and packages, then sends the owner the download and what to verify. It can also be run by hand.
-#   macOS apps    tag macos/<app-id>/v<x.y.z>-beta.<n> and run release-macos.yml: a signed, notarized GitHub
+# issue's apps and packages, then builds what it planned and sends the owner the download and what to verify.
+#   macOS apps    tag macos/<app-id>/v<x.y.z>-beta.<n>, then release-macos.yml: a signed, notarized GitHub
 #                 pre-release that the app's dev landing page offers for download
-#   npm packages  tag <slug>-v<x.y.z>-beta.<n> and run publish-tag.yml: published under the npm `beta` dist-tag
+#   npm packages  tag <slug>-v<x.y.z>-beta.<n>, then publish-tag.yml: published under the npm `beta` dist-tag
+# This workflow only plans: it uploads the plan as the `beta-plan` artifact (plan.json, with the commit the tags go
+# on). Only organization admins may create beta tags (a tag ruleset), so the handoff, which runs as an organization
+# admin, creates each planned tag on that commit and starts its release workflow. A run started by hand plans the same
+# way and builds nothing; an organization admin can build its plan by pushing the planned tags on the run's commit.
 # scripts/beta-builds.mjs decides what to build. Targets named in `only` are built even if unchanged, unless
 # `skip_unchanged` is set; without `only`, every target whose inputs changed since its last build is built. A target whose version is already
 # released live is skipped (bump it to get betas again).
-#
-# Tags pushed with the workflow token start no workflows, so this job starts each build itself; a run started
-# from a tag passes the macos-release environment's tag policy. If starting a build fails after its tag was made,
-# re-run the failed job: it reuses the tag and starts the build again.
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +38,8 @@ on:
 permissions:
   contents: read
 
-# One plan at a time, so two runs never pick the same build number. GitHub keeps one pending run per group and a
+# One plan at a time. Two plans made before the first one's tags exist can still pick the same build number; the
+# handoff then finds the tag already made and keeps it only if it is on its own run's commit. GitHub keeps one pending run per group and a
 # newer one replaces it; the replaced run's caller sees it cancelled and starts it again with a new request ID
 # (beta-handoff.mjs does this).
 concurrency:
@@ -97,43 +98,26 @@ jobs:
             node scripts/beta-builds.mjs --only "$ONLY"
           fi
 
-  start:
-    needs: plan
-    if: fromJSON(needs.plan.outputs.plan).builds[0] != null
-    runs-on: ubuntu-latest
-    # Runs no repository code: it only creates the planned tags and starts the release workflows from them.
-    permissions:
-      contents: write
-      actions: write
-    steps:
-      - name: Tag and start each build
+      - name: Save the plan for the handoff
         env:
-          GH_TOKEN: ${{ github.token }}
-          PLAN: ${{ needs.plan.outputs.plan }}
+          PLAN: ${{ steps.plan.outputs.plan }}
         run: |
-          echo "$PLAN" | jq -r '.builds[] | "\(.kind) \(.tag)"' | while read -r kind tag; do
-            case "$kind" in
-              macos) workflow=release-macos.yml; pattern='^macos/[a-z0-9][a-z0-9-]*/v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$' ;;
-              npm) workflow=publish-tag.yml; pattern='^[a-z0-9][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$' ;;
-              *) echo "Unknown build kind $kind" >&2; exit 1 ;;
-            esac
-            if ! [[ "$tag" =~ $pattern ]]; then echo "Refusing unexpected tag $tag" >&2; exit 1; fi
-            # A rerun after a failure finds its own tags already made: if creating the tag fails, it must already be on
-            # this commit (a tag on any other commit, or a failed lookup, stops the job).
-            # The create error is kept in the log; commits/<tag> resolves lightweight and annotated tags to their commit.
-            if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > /dev/null; then
-              existing="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
-              if [ "$existing" != "$GITHUB_SHA" ]; then
-                echo "Could not create tag $tag; it is on ${existing:-an unknown commit}, not $GITHUB_SHA." >&2
-                exit 1
-              fi
-              # On a re-run, a build an earlier attempt already started is left alone.
-              started="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --branch "$tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
-              if [ -n "$started" ]; then
-                echo "$workflow for $tag was already started (run $started)" | tee -a "$GITHUB_STEP_SUMMARY"
-                continue
-              fi
-            fi
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$tag" -f release_tag="$tag"
-            echo "Started $workflow for $tag at $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
-          done
+          mkdir -p "$RUNNER_TEMP/beta-plan"
+          jq --arg commit "$GITHUB_SHA" '{commit: $commit} + .' <<<"$PLAN" > "$RUNNER_TEMP/beta-plan/plan.json"
+          {
+            echo '### Beta plan'
+            echo
+            echo "Tags go on \`$GITHUB_SHA\`:"
+            jq -r '.builds[] | "- \(.tag) (\(.name))"' "$RUNNER_TEMP/beta-plan/plan.json"
+            jq -r '.skipped[] | "- skipped \(.name): \(.reason)"' "$RUNNER_TEMP/beta-plan/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beta-plan
+          path: ${{ runner.temp }}/beta-plan/plan.json
+          if-no-files-found: error
+          # A re-run replaces the first attempt's plan.
+          overwrite: true
+          retention-days: 7
