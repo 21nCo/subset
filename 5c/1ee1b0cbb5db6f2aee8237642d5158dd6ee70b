@@ -1,0 +1,26 @@
+native/screenshot/MacApp/AppDelegate.swift
+  s_5c73d4f3a924a7::t_ed50a0be2aacd7 280-285,289-298,301-316
+  s_5c73d4f3a924a7::t_9cfa7ccbd8a9ee 317
+native/screenshot/README.md
+  s_5c73d4f3a924a7::t_ed50a0be2aacd7 86
+native/screenshot/Sources/Models/CaptureModels.swift
+  s_5c73d4f3a924a7::t_ed50a0be2aacd7 73-123
+native/screenshot/Tests/ScreenshotTests.swift
+  s_5c73d4f3a924a7::t_c13fd94337b434 636-662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5c1ee1b0cbb5db6f2aee8237642d5158dd6ee70b",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
