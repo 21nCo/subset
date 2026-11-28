@@ -851,8 +851,8 @@
   /* Reserve the scrollbar's space so switching between short and long pages does not shift the layout. */
   :global(html) { scrollbar-gutter: stable; }
   .btn.icon-only { width: 36px; padding: 0; }
-  .site-footer { max-width: 1140px; width: calc(100% - 40px); margin: 0 auto; padding: 18px 0 32px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; font-size: .82rem; color: var(--text-3); box-sizing: border-box; }
-  .site-footer a { color: var(--text-2); text-decoration: none; }
+  .site-footer { max-width: 1140px; width: calc(100% - 40px); margin: 0 auto; padding: 18px 0 32px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; font-size: .82rem; color: var(--text-2); box-sizing: border-box; }
+  .site-footer a { color: var(--text); text-decoration: underline; }
   .site-footer a:hover { color: var(--text); text-decoration: underline; }
   .site-footer a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
   .site-footer .star { display: inline-flex; align-items: center; gap: 6px; }
