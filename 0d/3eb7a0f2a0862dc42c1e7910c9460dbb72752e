@@ -1,0 +1,22 @@
+packages/usage-cli/test/server.test.mjs
+  s_5c73d4f3a924a7::t_71a3d5a7737945 243-324
+packages/usage-cli/src/server.mjs
+  s_5c73d4f3a924a7::t_c5a2ff56be9450 93,96-97,106,110-116,557-558,560-562
+  s_5c73d4f3a924a7::t_abc49b5fc32ec9 117,204-209,252-253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d3eb7a0f2a0862dc42c1e7910c9460dbb72752e",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
