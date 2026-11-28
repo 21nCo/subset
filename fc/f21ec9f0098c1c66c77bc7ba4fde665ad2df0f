@@ -1,0 +1,43 @@
+.github/workflows/pullfrog.yml
+  s_5a86c214ff9c75::t_6bd38be134540d 25,29
+.github/workflows/verify.yml
+  s_5a86c214ff9c75::t_1f9673e4369900 11-12
+README.md
+  s_5c73d4f3a924a7::t_545743aab414a9 21,87
+apps/directory/src/App.svelte
+  s_5c73d4f3a924a7::t_3da4b8c707d546 3,14-16,21-23,60,62
+docs/macos-release.md
+  s_5a86c214ff9c75::t_43e947ed15f559 73
+package.json
+  s_5a86c214ff9c75::t_4e25bca187c09b 11
+packages/catalog/src/index.ts
+  s_5c73d4f3a924a7::t_d3af4c5fbdc985 13,15-18,20,42,44-53
+packages/usage-cli/README.md
+  s_5c73d4f3a924a7::t_d0e0fcdfcd9b61 5,16,41,47
+packages/usage/README.md
+  s_5c73d4f3a924a7::t_c801c9a94e7ecf 66,129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fcf21ec9f0098c1c66c77bc7ba4fde665ad2df0f",
+  "prompts": {},
+  "sessions": {
+    "s_5a86c214ff9c75": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "09e8e09e-cce6-4cce-a9a1-c340ea0ab8c5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
