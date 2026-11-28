@@ -1,0 +1,27 @@
+.github/workflows/publish-tag.yml
+  s_b45d5e586226f5::t_2cf9b216f25e6a 68-86
+.github/workflows/pullfrog.yml
+  s_b45d5e586226f5::t_f97a1e1266ae9e 25,29
+.github/workflows/release-macos.yml
+  s_b45d5e586226f5::t_2cf9b216f25e6a 72-90
+docs/macos-release.md
+  s_b45d5e586226f5::t_701ddc4de58e8f 73-75,85
+.github/workflows/verify.yml
+  s_b45d5e586226f5::t_f97a1e1266ae9e 7-10,14-15,17-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ba0f0a051e6e151f1b74307b91da9a7c582a720e",
+  "prompts": {},
+  "sessions": {
+    "s_b45d5e586226f5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c56db35-ef40-4a1d-a14d-6115a28c1317",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
