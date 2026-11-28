@@ -64,6 +64,16 @@ export function parseUntil(text, now) {
       const date = new Date(now);
       date.setDate(date.getDate() + dayOffset);
       date.setHours(Number(hours), Number(minutes), Number(seconds), 0);
+      const nextDay = new Date(date);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const offsetChange = nextDay.getTimezoneOffset() - date.getTimezoneOffset();
+      if (offsetChange > 0 && date.getTime() <= now) {
+        const later = new Date(date.getTime() + offsetChange * UNIT_MS.m);
+        if (later.getDate() === date.getDate()
+          && later.getHours() === Number(hours)
+          && later.getMinutes() === Number(minutes)
+          && later.getSeconds() === Number(seconds)) return later;
+      }
       return date;
     };
     const today = at(0);
