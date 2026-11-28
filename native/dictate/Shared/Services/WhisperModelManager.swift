@@ -95,6 +95,9 @@ struct WhisperModelManager {
                 } catch is CancellationError {
                     removePartialCoreMLEncoder(for: descriptor)
                     throw CancellationError()
+                } catch WhisperModelDownloadServiceError.destinationIsDirectory(let url) {
+                    // Nothing was downloaded or extracted: leave the folder, and everything else, as it is.
+                    statusHandler?("Core ML encoder download failed: \(WhisperModelDownloadServiceError.destinationIsDirectory(url).localizedDescription)")
                 } catch {
                     // A failed extraction can leave a partial encoder directory, which would
                     // otherwise look cached and be handed to whisper on the next start.
@@ -118,10 +121,18 @@ struct WhisperModelManager {
     }
 
     private func removePartialCoreMLEncoder(for descriptor: WhisperModelDescriptor) {
-        for (name, isDirectory) in [(descriptor.coreMLDirectoryName, true), (descriptor.coreMLArchiveFilename, false)] {
-            if let url = try? store.localFileURL(named: name, isDirectory: isDirectory) {
-                try? store.fileManager.removeItem(at: url)
-            }
+        guard let encoder = try? store.localFileURL(named: descriptor.coreMLDirectoryName, isDirectory: true),
+              let archive = try? store.localFileURL(named: descriptor.coreMLArchiveFilename) else { return }
+        Self.removePartialEncoder(encoder: encoder, archive: archive)
+    }
+
+    /// Removes a partly extracted encoder folder and the downloaded archive. The archive path is removed only when
+    /// it is a file (or a link): a folder there is not something a download created, so it and its contents stay.
+    static func removePartialEncoder(encoder: URL, archive: URL) {
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: encoder)
+        if (try? WhisperModelDownloadService.checkReplaceable(archive)) != nil {
+            try? fileManager.removeItem(at: archive)
         }
     }
 

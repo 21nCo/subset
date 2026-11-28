@@ -239,4 +239,27 @@ final class DictateTests: XCTestCase {
         XCTAssertThrowsError(try WhisperModelDownloadService.install(try download("test-model-bytes"), at: folder))
         XCTAssertEqual(try String(contentsOf: keep, encoding: .utf8), "test-keep")
     }
+
+    func testCleanupAfterAFailedEncoderDownloadNeverRemovesAFolderAtTheArchivePath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("dictate-test-cleanup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let encoder = root.appendingPathComponent("ggml-test-encoder.mlmodelc", isDirectory: true)
+
+        // A partial extraction and a downloaded archive file are both removed.
+        try FileManager.default.createDirectory(at: encoder, withIntermediateDirectories: true)
+        let archiveFile = root.appendingPathComponent("ggml-test-encoder.mlmodelc.zip")
+        try Data("test-archive".utf8).write(to: archiveFile)
+        WhisperModelManager.removePartialEncoder(encoder: encoder, archive: archiveFile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: encoder.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archiveFile.path))
+
+        // A folder at the archive path, with its contents, survives the cleanup.
+        let archiveFolder = root.appendingPathComponent("ggml-folder-encoder.mlmodelc.zip", isDirectory: true)
+        try FileManager.default.createDirectory(at: archiveFolder, withIntermediateDirectories: true)
+        let keep = archiveFolder.appendingPathComponent("keep.txt")
+        try Data("test-keep".utf8).write(to: keep)
+        WhisperModelManager.removePartialEncoder(encoder: encoder, archive: archiveFolder)
+        XCTAssertEqual(try String(contentsOf: keep, encoding: .utf8), "test-keep")
+    }
 }
