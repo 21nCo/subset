@@ -1,0 +1,27 @@
+native/dictate/README.md
+  s_5c73d4f3a924a7::t_a18bbc254b9c77 13,58
+native/dictate/Shared/Models/WhisperModelCatalog.swift
+  s_5c73d4f3a924a7::t_f5378bd5051158 3-11,14-15,18-20,27-63,66-67,69-80
+native/dictate/Shared/Services/WhisperModelDownloadService.swift
+  s_5c73d4f3a924a7::t_832d607954ee93 1,8-9,19-22,30-32,45-51,63-82
+native/dictate/Shared/Services/WhisperModelManager.swift
+  s_5c73d4f3a924a7::t_5b592554afc070 72,90,128-138,142
+native/dictate/Tests/DictateTests.swift
+  s_5c73d4f3a924a7::t_78bacd2c144381 2,134-212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "da0604b853a960106d2db4951456626d84ab1316",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
