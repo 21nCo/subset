@@ -1,0 +1,49 @@
+native/point-in-time/Core/StatusCommand.swift
+  s_5c73d4f3a924a7::t_bdf0900c75ff77 334
+  s_5c73d4f3a924a7::t_7c791e80e03e5f 331-333,337
+native/dictate/whisper/WhisperCppWrapper.mm
+  s_5c73d4f3a924a7::t_e7841771b1c889 49-73,82-107
+packages/usage/README.md
+  s_5c73d4f3a924a7::t_cf9dfd8cf4f92f 129
+native/screenshot/MacApp/AppDelegate.swift
+  s_5c73d4f3a924a7::t_7c791e80e03e5f 284-305,307-309
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_32870148c98998 3,121-122,154-189
+  s_5c73d4f3a924a7::t_eb3d33bc417af7 190-191
+packages/usage-cli/test/server.test.mjs
+  s_5c73d4f3a924a7::t_3811d7e53c6f12 318-323,328-329
+packages/usage-cli/src/server.mjs
+  s_5c73d4f3a924a7::t_3811d7e53c6f12 113-114
+  s_5c73d4f3a924a7::t_fe00dddb91b3bc 3,111-112,115-129,220,265,574,591-593
+packages/usage-cli/README.md
+  s_5c73d4f3a924a7::t_cf9dfd8cf4f92f 41,47
+packages/minutes/src/chrome.ts
+  s_5c73d4f3a924a7::t_32870148c98998 120,142-143,176-177
+  s_5c73d4f3a924a7::t_8d473e968663d1 9
+apps/directory/src/App.svelte
+  s_5c73d4f3a924a7::t_06e02813c25b5a 3,18-20,57,59
+packages/minutes/test/capture.test.mjs
+  s_5c73d4f3a924a7::t_8d473e968663d1 7-8,122-177
+packages/catalog/src/index.ts
+  s_5c73d4f3a924a7::t_05955e80ef6a4c 13,15-18,20
+native/dictate/Tests/DictateTests.swift
+  s_5c73d4f3a924a7::t_e7841771b1c889 143-158
+native/point-in-time/Tests/CoreTests/StatusTests.swift
+  s_5c73d4f3a924a7::t_bdf0900c75ff77 299-306
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "831257166197b5df0c4edf9151503efd1a9c2c28",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
