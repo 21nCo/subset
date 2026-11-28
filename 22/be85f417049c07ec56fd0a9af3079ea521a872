@@ -1,0 +1,30 @@
+native/dictate/Tests/DictateTests.swift
+  s_5c73d4f3a924a7::t_6b99e2e2cd2856 139-141,157-158
+native/dictate/whisper/WhisperCppWrapper.mm
+  s_5c73d4f3a924a7::t_6b99e2e2cd2856 78-80,83-84,88-90,93-99,101-108,110
+packages/minutes/test/capture.test.mjs
+  s_5c73d4f3a924a7::t_df02738cf50ac5 13,18-23,204-229,231
+  s_5c73d4f3a924a7::t_c7449c403d9c29 230
+native/screenshot/Sources/Services/AppState.swift
+  s_5c73d4f3a924a7::t_afc875b310208d 109-111,115,126-128,131
+native/screenshot/MacApp/AppDelegate.swift
+  s_5c73d4f3a924a7::t_afc875b310208d 281-284,287-295,298-308,310-317,322,324,332,336,342-353
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_df02738cf50ac5 155-157,240-241,243-246,248-252,264-273,289-292,297-303,307
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "22be85f417049c07ec56fd0a9af3079ea521a872",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
