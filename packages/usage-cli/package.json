@@ -34,7 +34,7 @@
     "prepack": "node scripts/build.mjs && node scripts/build.mjs --check"
   },
   "devDependencies": {
-    "@mcpfn/core": "0.0.5",
+    "@mcpfn/core": "0.0.7",
     "@mcpfn/testing": "0.0.5",
     "@subset.dev/usage-core": "*",
     "rolldown": "1.2.11",

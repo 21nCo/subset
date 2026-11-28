@@ -31,7 +31,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.`;
 
 test('the notices carry the complete MIT text of the bundled packages that ship no licence file', async () => {
-  const cases = [['@mcpfn/core', '0.0.5', '2025 21n'], ['@cfworker/json-schema', '4.1.1', '2020 Jeremy Danyow']];
+  const cases = [['@mcpfn/core', '0.0.7', '2025 21n'], ['@cfworker/json-schema', '4.1.1', '2020 Jeremy Danyow']];
   const text = await notices(await Promise.all(cases.map(async ([name]) => chunkOf(await dependencyDir(hostDirectory, name)))));
   for (const [name, version, holder] of cases) {
     const section = text.split('\n## ').find((part) => part.startsWith(`${name} `));
