@@ -140,6 +140,7 @@ final class DictateTests: XCTestCase {
         let withBOM = "\u{FEFF}text"
         XCTAssertEqual(withBOM.withCString { WhisperCppWrapper.string(fromSegmentText: $0) }, withBOM)
         XCTAssertEqual(WhisperCppWrapper.string(fromSegmentText: nil), "")
+        XCTAssertEqual("".withCString { WhisperCppWrapper.string(fromSegmentText: $0) }, "")
     }
 
     func testSegmentTextWithASplitCharacterKeepsTheRest() {
@@ -209,5 +210,33 @@ final class DictateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: link) }
         XCTAssertEqual(WhisperModelManager.completeModel(link, pinned: pinned), link)
         XCTAssertNil(WhisperModelManager.completeModel(link, pinned: longer))
+    }
+
+    func testInstallingAModelReplacesAStaleFileButNeverAFolder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("dictate-test-install-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func download(_ text: String) throws -> URL {
+            let url = root.appendingPathComponent("download-\(UUID().uuidString)")
+            try Data(text.utf8).write(to: url)
+            return url
+        }
+
+        // A stale (truncated) model file is replaced.
+        let model = root.appendingPathComponent("ggml-test.bin")
+        try Data("stale".utf8).write(to: model)
+        try WhisperModelDownloadService.install(try download("test-model-bytes"), at: model)
+        XCTAssertEqual(try String(contentsOf: model, encoding: .utf8), "test-model-bytes")
+
+        // A folder where the model belongs is refused, and it and its contents survive.
+        let folder = root.appendingPathComponent("ggml-folder.bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let keep = folder.appendingPathComponent("keep.txt")
+        try Data("test-keep".utf8).write(to: keep)
+        XCTAssertThrowsError(try WhisperModelDownloadService.checkReplaceable(folder)) { error in
+            guard case WhisperModelDownloadServiceError.destinationIsDirectory = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try WhisperModelDownloadService.install(try download("test-model-bytes"), at: folder))
+        XCTAssertEqual(try String(contentsOf: keep, encoding: .utf8), "test-keep")
     }
 }

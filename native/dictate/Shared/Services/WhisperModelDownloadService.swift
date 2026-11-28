@@ -7,6 +7,7 @@ enum WhisperModelDownloadServiceError: LocalizedError {
     case extractionFailed(Int32)
     case sizeMismatch(expected: Int64, actual: Int64, filename: String)
     case checksumMismatch(filename: String)
+    case destinationIsDirectory(URL)
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +21,8 @@ enum WhisperModelDownloadServiceError: LocalizedError {
             return "The download of \(filename) is \(actual) bytes, expected \(expected). It was discarded."
         case .checksumMismatch(let filename):
             return "The download of \(filename) does not match its pinned SHA-256. It was discarded."
+        case .destinationIsDirectory(let url):
+            return "\(url.path) is a folder, not a model file. Move or rename it, then download the model again."
         }
     }
 }
@@ -29,6 +32,9 @@ struct WhisperModelDownloadService {
 
     /// Downloads `file` and moves it to `destinationURL` only once its size and SHA-256 match the pin.
     func download(_ file: WhisperModelFile, to destinationURL: URL) async throws -> URL {
+        // Refuse before downloading: a folder where the model belongs is never replaced (removing it would delete
+        // everything in it).
+        try Self.checkReplaceable(destinationURL)
         let remoteURL = file.downloadURL
         var request = URLRequest(url: remoteURL)
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -49,15 +55,33 @@ struct WhisperModelDownloadService {
             throw error
         }
 
-        let directory = destinationURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
+        do {
+            try Self.install(temporaryURL, at: destinationURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
         }
-
-        try fileManager.moveItem(at: temporaryURL, to: destinationURL)
         return destinationURL
+    }
+
+    /// Throws `destinationIsDirectory` when `url` is a folder (or a link to one); a stale model file is replaceable.
+    static func checkReplaceable(_ url: URL) throws {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            throw WhisperModelDownloadServiceError.destinationIsDirectory(url)
+        }
+    }
+
+    /// Moves a verified download to `destination`, replacing a stale model file there but never a folder.
+    static func install(_ downloadedURL: URL, at destination: URL) throws {
+        let fileManager = FileManager.default
+        try checkReplaceable(destination)
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // A file, or a link to one: removing the link leaves its target alone.
+        if (try? destination.checkResourceIsReachable()) == true || (try? fileManager.destinationOfSymbolicLink(atPath: destination.path)) != nil {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.moveItem(at: downloadedURL, to: destination)
     }
 
     /// Checks the size first (cheap, catches truncation), then hashes the file in 1 MiB chunks.

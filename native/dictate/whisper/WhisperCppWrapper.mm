@@ -80,6 +80,10 @@ static long DictateUTF8SequenceLength(const unsigned char *bytes, size_t remaini
     // U+FFFD and every valid character around it is kept, as Swift's String(decoding:as: UTF8.self) does.
     const unsigned char *bytes = (const unsigned char *)text;
     const size_t count = strlen(text);
+    // stringWithCharacters:length: raises on a NULL buffer even for length 0, and an empty vector may have no data.
+    if (count == 0) {
+        return @"";
+    }
     std::vector<unichar> units;
     units.reserve(count);
     size_t index = 0;
