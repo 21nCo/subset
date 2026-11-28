@@ -1,0 +1,22 @@
+packages/minutes/src/audio/capture.ts
+  s_5c73d4f3a924a7::t_91ea2101d1e426 156-158,247-254,280-286,310-316,318-319,321-323
+packages/minutes/test/capture.test.mjs
+  s_5c73d4f3a924a7::t_e00680abaff9c5 247-248
+  s_5c73d4f3a924a7::t_91ea2101d1e426 254-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b30d8dc778b0cb2c5058d6c54321771e576a8fd2",
+  "prompts": {},
+  "sessions": {
+    "s_5c73d4f3a924a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4807787f-e1d7-46cf-aeba-a4e594c2440e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
