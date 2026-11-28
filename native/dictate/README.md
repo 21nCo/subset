@@ -10,7 +10,7 @@ This is a port of a proof of concept. It builds locally; no signed or notarized 
 | --- | --- |
 | User outcome | Text appears where the cursor is, without typing, and without sending audio to a server. |
 | Source of truth | The microphone stream for the current session, and local whisper.cpp output. Settings and the current session state are stored in the `group.dev.subset.dictate` `UserDefaults` suite on the Mac; a transcript inserted into another app is cleared from that store, and the copyable last transcript lives only in memory. No transcript history is kept. |
-| Model files | Downloaded on demand from the upstream `ggerganov/whisper.cpp` Hugging Face repository into `~/Documents/WhisperModels` (default `base.en`, plus its Core ML encoder). They are not bundled or committed. |
+| Model files | Downloaded on demand from the upstream `ggerganov/whisper.cpp` Hugging Face repository into `~/Documents/WhisperModels` (default `base.en`, plus its Core ML encoder). Downloads come from a fixed commit (`WhisperModelCatalog.revision`) and are moved into place only when their size and SHA-256 match the values pinned in `WhisperModelCatalog.swift`; a local model of the wrong size counts as missing and is downloaded again. To move to a newer upstream commit, change the revision and every pinned hash and size together. They are not bundled or committed. |
 | Network | Model downloads only. The `CloudDictationBackend` and `MockDictationBackend` types are inherited scaffolds: the cloud backend sends nothing and only emits placeholder events, and the manager pins the backend to local whisper.cpp. Neither is reachable from the UI. |
 
 ### Operations
@@ -55,7 +55,7 @@ xcodebuild -project Dictate.xcodeproj -scheme Dictate -destination 'generic/plat
 xcodebuild -project Dictate.xcodeproj -scheme Dictate -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
 ```
 
-`DictateTests` covers the `fn` press/release state machine, abandoning a start that is still waiting for permission, settings decoding, and clipboard preservation around paste insertion. Microphone capture, transcription, and insertion into other apps still need manual checks.
+`DictateTests` covers the `fn` press/release state machine, abandoning a start that is still waiting for permission, settings decoding, clipboard preservation around paste insertion, UTF-8 decoding of whisper segment text, and the pinned model URLs and download checks. Microphone capture, transcription, and insertion into other apps still need manual checks.
 
 ### Release
 
