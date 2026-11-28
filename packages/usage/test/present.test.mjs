@@ -126,6 +126,21 @@ test('builds a day-part activity grid with top accounts from usage increases', a
   assert.equal(activityGrid(history, [], t, 7).max, 0);
 });
 
+test('keeps activity contributors with the same display name separate by account id', async () => {
+  const { activityGrid } = await import('../dist/present.js');
+  const base = new Date(now); base.setHours(13, 5, 0, 0);
+  const t = base.getTime();
+  const accounts = [account({ id: 'a', label: 'Work' }), account({ id: 'b', label: 'Work' })];
+  const history = { schemaVersion: 1, series: {
+    a: { primary: [[t, 10], [t + 600_000, 15]], weekly: [[t, 20], [t + 600_000, 23]] },
+    b: { primary: [[t, 30], [t + 600_000, 40]] },
+  } };
+  const { cells, max } = activityGrid(history, accounts, t + 1_200_000, 1);
+  assert.deepEqual(cells[2][0], { value: 18, top: [{ account: 'Work', points: 10 }, { account: 'Work', points: 8 }] });
+  assert.equal(max, 18);
+  assert.deepEqual(activityGrid(undefined, accounts, t, 1).cells[2][0], { value: 0, top: [] });
+});
+
 test('groups Antigravity buckets and Factory limits into tabs and lists exhausted and low windows', async () => {
   const { windowGroups, limitAlerts, windowTitle } = await import('../dist/present.js');
   const { antigravitySpan } = await import('../dist/snapshots.js');
