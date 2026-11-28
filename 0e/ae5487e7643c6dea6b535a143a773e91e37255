@@ -1,0 +1,19 @@
+docs/macos-release.md
+  s_b45d5e586226f5::t_ad928c06f47fa5 75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0eae5487e7643c6dea6b535a143a773e91e37255",
+  "prompts": {},
+  "sessions": {
+    "s_b45d5e586226f5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3c56db35-ef40-4a1d-a14d-6115a28c1317",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
