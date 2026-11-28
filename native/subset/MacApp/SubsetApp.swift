@@ -4,7 +4,8 @@ import SwiftUI
 
 /// The Subset manager: a menu bar item whose menu opens the main window. There is no Dock icon (LSUIElement in
 /// Info.plist), so the menu is how the window is opened and reopened after it is closed. The window lists the catalog's
-/// apps (SET-246), and installs, updates and moves them to the Trash (SET-247).
+/// apps (SET-246), installs, updates and moves them to the Trash (SET-247), and shows
+/// the `subset` command's status and the installed apps' commands (SET-248).
 @main
 struct SubsetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -18,7 +19,7 @@ struct SubsetApp: App {
         .menuBarExtraStyle(.menu)
 
         Window(SubsetIdentity.appName, id: SubsetIdentity.mainWindowID) {
-            MainWindowView(model: appDelegate.model, actions: appDelegate.actions)
+            MainWindowView(model: appDelegate.model, actions: appDelegate.actions, commandLine: appDelegate.commandLine, helpers: appDelegate.helpers)
         }
         .defaultSize(width: 720, height: 480)
     }
@@ -30,6 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppListModel(loader: CatalogLoader.standard(), finder: InstalledAppFinder.standard())
     /// The rows' Install, Update and Move to Trash buttons.
     lazy var actions = AppActions(installer: AppInstaller(setup: .standard()), model: model)
+    /// Whether the `subset` command is on the PATH, for the window's Command Line section.
+    let commandLine = CommandLineModel(detector: .standard())
+    /// The examples of the installed apps' commands, looked up again after each look for the installed apps.
+    lazy var helpers: HelperExamplesModel = {
+        let helpers = HelperExamplesModel()
+        helpers.follow(model)
+        return helpers
+    }()
 
     func applicationWillFinishLaunching(_: Notification) {
         // Info.plist sets LSUIElement for the bundled app; the SwiftPM executable has no Info.plist, so set the policy
@@ -38,11 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Quitting while an install, update or move to the Trash runs cancels it and quits once it has cleaned up (no staged
-    // copy, private folder or attached image is left behind).
+    // copy, private folder or attached image is left behind). A shell still looking for `subset` (or still being stopped
+    // after its check showed "not installed") is stopped with everything it started first, for 12 seconds at most.
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
-        guard actions.isWorking else { return .terminateNow }
+        guard actions.isWorking || commandLine.hasRunningShell else { return .terminateNow }
         Task {
-            await actions.cancelAll()
+            async let operations: Void = actions.cancelAll()
+            async let shells: Void = commandLine.stop()
+            _ = await (operations, shells)
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

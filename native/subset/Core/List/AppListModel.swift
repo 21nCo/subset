@@ -46,6 +46,9 @@ public final class AppListModel: ObservableObject {
     @Published public private(set) var catalog: Catalog?
     @Published public private(set) var fetchedAt: Date?
     @Published public private(set) var installed: [String: [InstalledCopy]] = [:]
+    /// Counts the looks for installed apps shown, including those that found what was already shown (an app repaired in
+    /// place), for what reads more of each copy than `installed` holds (the Command Line section's helpers).
+    @Published public private(set) var installedLooks = 0
     @Published public private(set) var status: CatalogStatus = .loading
     @Published public private(set) var isRefreshing = false
     /// Whether betas are listed and offered; off unless the user turns it on, and remembered.
@@ -306,6 +309,7 @@ public final class AppListModel: ObservableObject {
         let apps = catalog?.apps ?? []
         let shown = Dictionary(apps.compactMap { app in observed[Self.key(app)].map { (app.id, $0.copies) } }, uniquingKeysWith: { first, _ in first })
         if shown != installed { installed = shown }
+        installedLooks += 1
     }
 
     /// What detection reads of an app (InstalledAppFinder.copies(of:)).

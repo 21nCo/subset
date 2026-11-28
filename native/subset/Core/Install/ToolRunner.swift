@@ -22,14 +22,27 @@ struct ToolResult: Sendable {
 /// SIGKILL, so nothing waits forever. A tool that exits by itself settles when its output ends; when a process it
 /// started still holds the output `drainAfterExit` seconds later, the group is stopped the same way. A cancelled call
 /// throws CancellationError once the tool has settled; cleanups pass `cancellable: false` so they always finish.
+/// `argv0` is the tool's argument zero when it is not its path, such as `-zsh` to start a login shell; `environment`
+/// and `directory`, when given, replace this process's environment and working directory. With `ownSession`, the tool
+/// leads a session of its own, which every process it starts stays in even in a process group of its own (a job a
+/// shell with job control on started) and after the tool exits; stopping it signals every process in that session,
+/// and it settles only once they are gone too, or at the same bound. A tool that exits by itself with processes left
+/// in its session, even ones holding none of its output, has them stopped `drainAfterExit` seconds later. Only a
+/// process that starts a session itself leaves it.
 enum ToolRunner {
     static let maxOutputBytes = 1024 * 1024
     static let killAfter: TimeInterval = 5
     static let drainAfterExit: TimeInterval = 2
 
-    static func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 300, cancellable: Bool = true) async throws -> ToolResult {
+    static func run(
+        _ path: String, _ arguments: [String], argv0: String? = nil, environment: [String: String]? = nil, directory: String? = nil,
+        timeout: TimeInterval = 300, cancellable: Bool = true, ownSession: Bool = false
+    ) async throws -> ToolResult {
         if cancellable { try Task.checkCancellation() }
-        let run = try ToolRun(path: path, arguments: arguments, timeout: timeout)
+        let run = try ToolRun(
+            path: path, arguments: arguments, argv0: argv0, environment: environment, directory: directory, timeout: timeout,
+            ownSession: ownSession
+        )
         let result = await withTaskCancellationHandler {
             await run.result()
         } onCancel: {
@@ -64,8 +77,13 @@ private final class ToolRun: @unchecked Sendable {
     private var givenUp = false
     private var finished: ToolResult?
     private var continuation: CheckedContinuation<ToolResult, Never>?
+    private let ownSession: Bool
 
-    init(path: String, arguments: [String], timeout: TimeInterval) throws {
+    init(
+        path: String, arguments: [String], argv0: String?, environment: [String: String]?, directory: String?, timeout: TimeInterval,
+        ownSession: Bool
+    ) throws {
+        self.ownSession = ownSession
         var out: [Int32] = [-1, -1]
         var err: [Int32] = [-1, -1]
         guard pipe(&out) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -82,11 +100,14 @@ private final class ToolRun: @unchecked Sendable {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, out[1], 1)
         posix_spawn_file_actions_adddup2(&actions, err[1], 2)
+        if let directory { posix_spawn_file_actions_addchdir_np(&actions, directory) }
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        // Its own group (pgid = its pid), only stdin, stdout and stderr open, default signal handling and no blocked signals.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // Its own group (pgid = its pid), or its own session, which also makes it its own group; only stdin, stdout and
+        // stderr open, default signal handling and no blocked signals.
+        let group = ownSession ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP
+        posix_spawnattr_setflags(&attributes, Int16(group | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
         var all = sigset_t()
         sigfillset(&all)
@@ -95,8 +116,8 @@ private final class ToolRun: @unchecked Sendable {
         sigemptyset(&none)
         posix_spawnattr_setsigmask(&attributes, &none)
 
-        let argv: [UnsafeMutablePointer<CChar>?] = ([path] + arguments).map { strdup($0) } + [nil]
-        let envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        let argv: [UnsafeMutablePointer<CChar>?] = ([argv0 ?? path] + arguments).map { strdup($0) } + [nil]
+        let envp: [UnsafeMutablePointer<CChar>?] = (environment ?? ProcessInfo.processInfo.environment).map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { (argv + envp).forEach { free($0) } }
         var child: pid_t = 0
         let code = posix_spawn(&child, path, &actions, &attributes, argv, envp)
@@ -175,9 +196,11 @@ private final class ToolRun: @unchecked Sendable {
         guard finished == nil else { return reap() }
         finishIfDone()
         guard finished == nil, stopping == nil else { return }
-        // A process the tool started still holds its output: it gets a moment to finish, then the group is stopped.
+        // A process the tool started still holds its output or is in its session: it gets a moment to finish, then the
+        // group (and session) is stopped.
         queue.asyncAfter(deadline: .now() + ToolRunner.drainAfterExit) { [self] in
-            stopOnQueue("a process it started still held its output \(Int(ToolRunner.drainAfterExit)) seconds after it exited")
+            let held = open > 0 ? "held its output" : "ran in its session"
+            stopOnQueue("a process it started still \(held) \(Int(ToolRunner.drainAfterExit)) seconds after it exited")
         }
     }
 
@@ -201,11 +224,23 @@ private final class ToolRun: @unchecked Sendable {
     /// its own until it is reaped, which happens only once nothing more is signalled.
     private func signal(_ signal: Int32) {
         if killpg(pid, signal) != 0, waitStatus == nil { kill(pid, signal) }
+        // Each process's session is read just before it is signalled; the session's ID is the tool's pid, its own until
+        // it is reaped.
+        for member in sessionMembers where getsid(member) == pid { kill(member, signal) }
     }
 
-    /// Whether no process is left in the tool's group besides the exited, unreaped tool (EPERM from killpg means one is,
-    /// though it cannot be signalled, or only the unreaped tool is).
+    /// The processes other than the tool in its session, when it leads one.
+    private var sessionMembers: [pid_t] {
+        guard ownSession else { return [] }
+        var all = [pid_t](repeating: 0, count: 8192)
+        let count = proc_listallpids(&all, Int32(all.count * MemoryLayout<pid_t>.size))
+        return all.prefix(Int(max(0, count))).filter { $0 > 0 && $0 != pid && getsid($0) == pid }
+    }
+
+    /// Whether no process is left in the tool's group or session besides the exited, unreaped tool (EPERM from killpg
+    /// means one is, though it cannot be signalled, or only the unreaped tool is).
     private var groupGone: Bool {
+        guard sessionMembers.isEmpty else { return false }
         if killpg(pid, 0) != 0, errno == ESRCH { return true }
         guard waitStatus != nil else { return false }
         var members = [pid_t](repeating: 0, count: 64)
@@ -229,7 +264,7 @@ private final class ToolRun: @unchecked Sendable {
     private func finishIfDone() {
         guard finished == nil else { return }
         let settled: Bool
-        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 }
+        if givenUp { settled = true } else if stopping != nil { settled = waitStatus != nil && open == 0 && groupGone } else { settled = waitStatus != nil && open == 0 && sessionMembers.isEmpty }
         guard settled else { return }
         var text = String(decoding: stderr, as: UTF8.self)
         var status: Int32?
