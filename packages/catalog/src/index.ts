@@ -10,11 +10,14 @@ export interface AvailableSurface {
   surface: Surface;
   /** Released version, for example `0.1.0`. */
   version: string;
-  /** Direct link to the verified artifact (download, store listing, or hosted app). */
+  /** Direct link to the verified artifact (download, store listing, package page, or hosted app). */
   url: HttpsUrl;
-  /** Release page with notes and checksums. */
+  /**
+   * Release page with notes and checksums for a file download; for a package without `sha256` (an npm CLI), the
+   * tagged source of the release. The directory labels the link accordingly.
+   */
   releaseUrl: HttpsUrl;
-  /** SHA-256 of the artifact at `url`, when it is a file. */
+  /** SHA-256 of the artifact at `url`, when it is a file. The directory offers a "Download" only for these. */
   sha256?: string;
   /** Short system requirements, for example `macOS 14 or later`. */
   requirements?: string;
@@ -36,9 +39,18 @@ export const capabilities = [
     id: 'usage',
     name: 'Usage dashboard',
     summary: 'See supported usage sources, limits, reset times, and freshness in one focused view.',
-    state: 'building',
+    state: 'available',
     proposedSurfaces: ['web', 'embed', 'agent-cli', 'agent-view'],
-    availableSurfaces: []
+    // The local CLI and dashboard (`subset usage`), published to npm with provenance from the usage-v0.2.1 tag.
+    availableSurfaces: [
+      {
+        surface: 'agent-cli',
+        version: '0.2.1',
+        url: 'https://www.npmjs.com/package/@subset.dev/usage/v/0.2.1',
+        releaseUrl: 'https://github.com/21nCo/subset/tree/usage-v0.2.1/packages/usage-cli',
+        requirements: 'Node.js 22 or later'
+      }
+    ]
   },
   {
     id: 'launcher',

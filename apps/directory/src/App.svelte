@@ -1,6 +1,6 @@
 <script lang="ts">
   import { capabilities } from '@subset.dev/catalog';
-  import type { CapabilityListing, Surface } from '@subset.dev/catalog';
+  import type { AvailableSurface, CapabilityListing, Surface } from '@subset.dev/catalog';
 
   const surfaceLabels: Record<Surface, string> = {
     web: 'web',
@@ -11,9 +11,15 @@
     'agent-view': 'agent view'
   };
 
+  // A released surface is named by what the release contains: a published CLI ships no agent skill of its own.
+  const releaseLabels: Record<Surface, string> = { ...surfaceLabels, 'agent-cli': 'agent CLI' };
+
   // Surfaces still in progress: proposed surfaces that have no verified release yet.
   const pendingSurfaces = (capability: CapabilityListing) =>
     capability.proposedSurfaces.filter((surface) => !capability.availableSurfaces.some((release) => release.surface === surface));
+
+  // A file download carries its SHA-256; a package (an npm CLI) links its package page and tagged source instead.
+  const isDownload = (release: AvailableSurface) => release.sha256 !== undefined;
 
   const anyAvailable = capabilities.some((capability: CapabilityListing) => capability.availableSurfaces.length > 0);
 </script>
@@ -51,9 +57,9 @@
                 <ul class="mt-6 space-y-2" aria-label="Available for {capability.name}">
                   {#each capability.availableSurfaces as release (release.surface)}
                     <li class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                      <a class="rounded-full bg-[#1d2420] px-4 py-2 font-semibold text-white hover:bg-[#33413a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#52775b]" href={release.url}>Download {capability.name} for {surfaceLabels[release.surface]}</a>
+                      <a class="rounded-full bg-[#1d2420] px-4 py-2 font-semibold text-white hover:bg-[#33413a] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#52775b]" href={release.url}>{isDownload(release) ? 'Download' : 'Get'} {capability.name} for {releaseLabels[release.surface]}</a>
                       <span class="text-[#5b665e]">v{release.version}{release.requirements ? ` · ${release.requirements}` : ''}</span>
-                      <a class="text-[#45684c] underline underline-offset-2 hover:text-[#1d2420]" href={release.releaseUrl}>Release notes and checksums<span class="sr-only"> for {capability.name} {release.version} on {surfaceLabels[release.surface]}</span></a>
+                      <a class="text-[#45684c] underline underline-offset-2 hover:text-[#1d2420]" href={release.releaseUrl}>{isDownload(release) ? 'Release notes and checksums' : 'Release source'}<span class="sr-only"> for {capability.name} {release.version} on {releaseLabels[release.surface]}</span></a>
                     </li>
                   {/each}
                 </ul>
