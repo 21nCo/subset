@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import PointInTimeCore
 
@@ -269,6 +270,40 @@ private func validated(_ output: StatusCommand.Output) throws -> [String: Any] {
         #expect(!output.standardOutput.contains("Vault"))
         let text = StatusCommand.run(["status", "--include-titles", "--date", "2026-10-21"], environment: environment(directory, now: local(21, 12)))
         #expect(text.standardOutput.contains("Secret Plan Q4"))
+    }
+
+    /// A title stored before titles were cleaned can still hold control characters; status removes them on output, so a
+    /// page title cannot send escape sequences to a terminal or forge a line such as "Tracking: off".
+    @Test func titlesStoredWithControlCharactersAreCleanedOnOutput() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ActivityStore(directory: directory)
+        try seedWorkday(store)
+        var db: OpaquePointer?
+        #expect(sqlite3_open(store.databaseURL.path, &db) == SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let forged = "Secret\u{1B}[2J Plan\nTracking: off\u{202E}"
+        let sql = "UPDATE blocks SET dominant_title = '\(forged)' WHERE dominant_title = 'Secret Plan Q4'"
+        #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK)
+        #expect(sqlite3_changes(db) > 0)
+
+        let text = StatusCommand.run(["status", "--include-titles", "--date", "2026-10-21"], environment: environment(directory, now: local(21, 12)))
+        #expect(text.exitCode == .ok)
+        #expect(text.standardOutput.contains("Secret [2J Plan Tracking: off"))
+        #expect(!text.standardOutput.unicodeScalars.contains { $0 == "\u{1B}" || $0 == "\u{202E}" })
+        #expect(text.standardOutput.split(separator: "\n").filter { $0.hasPrefix("Tracking:") }.count == 1)
+        let json = try validated(StatusCommand.run(["status", "--json", "--include-titles", "--date", "2026-10-21"],
+                                                   environment: environment(directory, now: local(21, 12))))
+        let titles = try #require(json["titles"] as? [[String: Any]])
+        #expect(titles.first?["title"] as? String == "Secret [2J Plan Tracking: off")
+
+        // An old copy whose only difference is a trailing control character groups with the clean copy: one row.
+        #expect(sqlite3_exec(db, "UPDATE blocks SET dominant_title = 'Cat video' || char(27) WHERE dominant_title = 'Cat video'", nil, nil, nil) == SQLITE_OK)
+        try store.save(segment("com.example.browser", "Browser", local(21, 10), minutes: 15, title: "Cat video", url: "https://video.example.net/watch/123"))
+        let grouped = try validated(StatusCommand.run(["status", "--json", "--include-titles", "--date", "2026-10-21"],
+                                                      environment: environment(directory, now: local(21, 12))))
+        let catRows = try #require(grouped["titles"] as? [[String: Any]]).filter { ($0["title"] as? String)?.hasPrefix("Cat video") == true }
+        #expect(catRows.map { $0["title"] as? String } == ["Cat video"])
     }
 
     @Test func anEmptyStoreReportsZeroTimeAndNoFocusShare() throws {

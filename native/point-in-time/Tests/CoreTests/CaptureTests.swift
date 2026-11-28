@@ -101,6 +101,21 @@ private func content(_ bundleID: String, title: String? = nil, url: String? = ni
         if keptCharacters == title.count { #expect(stored == title, "\(name)") }
     }
 
+    /// A web page chooses its title, so escape sequences, newlines and bidi overrides are removed before it is stored.
+    @Test func titlesLoseControlAndFormatCharacters() throws {
+        func stored(_ raw: String) -> String? { Activity(bundleID: "a", appName: "A", windowTitle: raw).windowTitle }
+        #expect(stored("Fake\u{1B}[2J title\nTracking: off\u{202E}gpj.exe") == "Fake [2J title Tracking: offgpj.exe")
+        #expect(stored("Tab\tand\r\nline\u{2028}separators\u{0085}") == "Tab and  line separators")
+        #expect(stored("zero\u{200B}width\u{FEFF} and \u{2066}isolate\u{2069}") == "zerowidth and isolate")
+        // Only control characters: nothing is left to store.
+        #expect(stored("\u{1B}\u{07}\u{9B}") == nil)
+        // Emoji ZWJ sequences, the zero-width non-joiner and ordinary text are unchanged.
+        #expect(stored(Self.family + " \u{0645}\u{200C}\u{06CC} caf\u{00E9}") == Self.family + " \u{0645}\u{200C}\u{06CC} caf\u{00E9}")
+        // A cleaned title is stable when bounded again, so it reads back unchanged.
+        let cleaned = try #require(stored("Report\u{1B}[0m\n draft"))
+        #expect(Segment.boundedTitle(cleaned) == cleaned)
+    }
+
     /// A segment bounds its own text however it is built, so a caller that skips `Activity` stores no more.
     @Test func segmentsBoundTheirOwnTitle() throws {
         let marks = String(repeating: "\u{0301}", count: 100_000)
