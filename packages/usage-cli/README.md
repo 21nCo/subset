@@ -2,7 +2,7 @@
 
 A local dashboard and CLI for AI subscription usage: ChatGPT (Codex), Claude, Cursor, Factory Droid, Amp, Devin, Antigravity, and logins stored by Pi, OpenCode, omp, and Hermes. It runs on your computer, binds only to `127.0.0.1`, and sends nothing to Subset.
 
-> Status: prepared for npm, not yet published. Run it from a build of the repository until a release is announced (see [Use](#use)).
+> Status: published on npm (`latest`). Live versions are released with a `usage-v<version>` tag; [Use](#use) also shows how to run a build of the repository.
 
 ## Use
 
@@ -13,7 +13,7 @@ subset usage                                # open the dashboard
 subset usage status                         # current usage as JSON, read-only
 ```
 
-`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev usage ...` works without installing it. `subset usage` runs the published `@subset.dev/usage` (see [`subset.dev`](../subset-dev/README.md)), so these commands work only after its release; until then `subset usage` stops with `usage is not on npm yet.` Run a build from the repository instead, with the same arguments:
+`subset` is the Subset command (`npm install -g subset.dev`); `npx subset.dev usage ...` works without installing it. `subset usage` runs the published `@subset.dev/usage` (see [`subset.dev`](../subset-dev/README.md)). To run unreleased changes, use a build from the repository with the same arguments:
 
 ```sh
 npm ci && npm run build                     # at the repository root
@@ -38,13 +38,13 @@ Collectors and status-line chaining use a POSIX shell script, so they are suppor
 { "mcpServers": { "subset-usage": { "command": "npx", "args": ["-y", "subset.dev", "usage", "mcp"] } } }
 ```
 
-That runs the published package, so it works only after a release. Until then, point the host at a build of the repository (`npm ci && npm run build` at its root): the `command` is `node` (its absolute path, from `which node`, if the host's `PATH` lacks it) and the `args` are the absolute path of `packages/usage-cli/dist/cli.mjs` and `mcp`:
+That runs the published package. To run unreleased changes instead, point the host at a build of the repository (`npm ci && npm run build` at its root): the `command` is `node` (its absolute path, from `which node`, if the host's `PATH` lacks it) and the `args` are the absolute path of `packages/usage-cli/dist/cli.mjs` and `mcp`:
 
 ```json
 { "mcpServers": { "subset-usage": { "command": "node", "args": ["/absolute/path/to/subset/packages/usage-cli/dist/cli.mjs", "mcp"] } } }
 ```
 
-The server is `@mcpfn/core` 0.0.5 (`defineMcpFnServer`, `serveStdio()`), named `subset-usage` with the package version. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. It exits 0 when the host closes stdin, after answering the calls it already received. Calls get up to 10 seconds. Then the server stops: it ends the provider subprocesses still running (such as `claude auth status` or `amp usage`), and their calls are answered with that provider's error. On SIGTERM or SIGINT it stops the same way at once, and a second signal skips the grace period. Stopping sends SIGTERM first, so a launcher such as a shell script or Node entrypoint can end the provider it started, then SIGKILL to any subprocess still running a second later. A subprocess a read starts while the server stops is ended as it starts. At 5 seconds, any subprocess still running, including one started just before, gets SIGKILL, and the server waits up to half a second more for it and its call; stopping takes at most 5.5 seconds and exits 0. No subprocess a read started outlives the server, except after SIGKILL of the server, and except a process started by a launcher that does not pass SIGTERM on to it: one that ignores SIGTERM, or that dies of it without forwarding it (a shell script that does not `exec` the provider or trap the signal). Then only the launcher ends.
+The server is `@mcpfn/core` (`defineMcpFnServer`, `serveStdio()`; 0.0.7 in this repository, which bundles MCP SDK 1.32.2; the published 0.2.1 bundles 0.0.5 with SDK 1.29.0 until the next release), named `subset-usage` with the package version. Stdout carries only protocol frames; its one log line and any diagnostics go to stderr. It exits 0 when the host closes stdin, after answering the calls it already received. Calls get up to 10 seconds. Then the server stops: it ends the provider subprocesses still running (such as `claude auth status` or `amp usage`), and their calls are answered with that provider's error. On SIGTERM or SIGINT it stops the same way at once, and a second signal skips the grace period. Stopping sends SIGTERM first, so a launcher such as a shell script or Node entrypoint can end the provider it started, then SIGKILL to any subprocess still running a second later. A subprocess a read starts while the server stops is ended as it starts. At 5 seconds, any subprocess still running, including one started just before, gets SIGKILL, and the server waits up to half a second more for it and its call; stopping takes at most 5.5 seconds and exits 0. No subprocess a read started outlives the server, except after SIGKILL of the server, and except a process started by a launcher that does not pass SIGTERM on to it: one that ignores SIGTERM, or that dies of it without forwarding it (a shell script that does not `exec` the provider or trap the signal). Then only the launcher ends.
 
 | Tool | Input | Result |
 | --- | --- | --- |

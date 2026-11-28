@@ -60,8 +60,11 @@ private func content(_ bundleID: String, _ title: String) -> Segment? {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try ActivityStore(directory: directory)
-        try store.save(segment("a", 0, 60, title: "before\u{0}after"))
-        #expect(try store.segments(from: t0, to: t0 + 60).first?.windowTitle == "before\u{0}after")
+        // Titles drop control characters before they are stored, so the round trip is checked on the app name.
+        try store.save(segment("before\u{0}after", 0, 60, title: "before\u{0}after"))
+        let stored = try #require(try store.segments(from: t0, to: t0 + 60).first)
+        #expect(stored.appName == "before\u{0}after")
+        #expect(stored.windowTitle == "before after")
     }
 
     @Test func capturedTextIsBoundedInStorageBytes() throws {

@@ -328,11 +328,14 @@ struct StatusReport {
     func titles() -> [TitleTotal] {
         var totals: [String: TitleTotal] = [:]
         for block in report?.blocks ?? [] {
-            guard let bundleID = block.dominantBundleID, block.dominantTitle != nil || block.dominantURL != nil,
+            // Titles stored by earlier versions may still hold control characters. Clean them as a title is cleaned
+            // before it is stored, and group by the cleaned title, so an old and a new copy of one title are one row.
+            let title = Segment.boundedTitle(block.dominantTitle)
+            guard let bundleID = block.dominantBundleID, title != nil || block.dominantURL != nil,
                   let main = block.apps.first(where: { $0.bundleID == bundleID }) else { continue }
             let url = block.dominantURL?.string
-            let key = [bundleID, block.dominantTitle ?? "", url ?? ""].joined(separator: "\u{0}")
-            totals[key, default: TitleTotal(bundleID: bundleID, app: main.appName, title: block.dominantTitle, url: url, seconds: 0)].seconds += main.seconds
+            let key = [bundleID, title ?? "", url ?? ""].joined(separator: "\u{0}")
+            totals[key, default: TitleTotal(bundleID: bundleID, app: main.appName.withoutControlCharacters, title: title, url: url, seconds: 0)].seconds += main.seconds
         }
         return Array(totals.values.sorted {
             $0.seconds != $1.seconds ? $0.seconds > $1.seconds : ($0.bundleID, $0.title ?? "", $0.url ?? "") < ($1.bundleID, $1.title ?? "", $1.url ?? "")

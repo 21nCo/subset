@@ -69,7 +69,7 @@ struct WhisperModelManager {
         if currentSnapshot.modelURL == nil {
             statusHandler?("Downloading \(descriptor.title) whisper model...")
             let destinationURL = try store.localFileURL(named: descriptor.ggmlFilename)
-            _ = try await downloader.download(from: descriptor.ggmlDownloadURL, to: destinationURL)
+            _ = try await downloader.download(descriptor.ggml, to: destinationURL)
             currentSnapshot = try snapshot(for: descriptor)
         }
 
@@ -87,7 +87,7 @@ struct WhisperModelManager {
                 do {
                     statusHandler?("Downloading Core ML encoder for \(descriptor.title)...")
                     let archiveURL = try store.localFileURL(named: descriptor.coreMLArchiveFilename)
-                    _ = try await downloader.download(from: descriptor.coreMLArchiveDownloadURL, to: archiveURL)
+                    _ = try await downloader.download(descriptor.coreMLArchive, to: archiveURL)
                     statusHandler?("Extracting Core ML encoder...")
                     try downloader.extractArchive(at: archiveURL, into: try store.modelsDirectory())
                     try? store.fileManager.removeItem(at: archiveURL)
@@ -95,6 +95,9 @@ struct WhisperModelManager {
                 } catch is CancellationError {
                     removePartialCoreMLEncoder(for: descriptor)
                     throw CancellationError()
+                } catch WhisperModelDownloadServiceError.destinationIsDirectory(let url) {
+                    // Nothing was downloaded or extracted: leave the folder, and everything else, as it is.
+                    statusHandler?("Core ML encoder download failed: \(WhisperModelDownloadServiceError.destinationIsDirectory(url).localizedDescription)")
                 } catch {
                     // A failed extraction can leave a partial encoder directory, which would
                     // otherwise look cached and be handed to whisper on the next start.
@@ -118,17 +121,36 @@ struct WhisperModelManager {
     }
 
     private func removePartialCoreMLEncoder(for descriptor: WhisperModelDescriptor) {
-        for (name, isDirectory) in [(descriptor.coreMLDirectoryName, true), (descriptor.coreMLArchiveFilename, false)] {
-            if let url = try? store.localFileURL(named: name, isDirectory: isDirectory) {
-                try? store.fileManager.removeItem(at: url)
-            }
+        guard let encoder = try? store.localFileURL(named: descriptor.coreMLDirectoryName, isDirectory: true),
+              let archive = try? store.localFileURL(named: descriptor.coreMLArchiveFilename) else { return }
+        Self.removePartialEncoder(encoder: encoder, archive: archive)
+    }
+
+    /// Removes a partly extracted encoder folder and the downloaded archive. The archive path is removed only when
+    /// it is a file (or a link): a folder there is not something a download created, so it and its contents stay.
+    static func removePartialEncoder(encoder: URL, archive: URL) {
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: encoder)
+        if (try? WhisperModelDownloadService.checkReplaceable(archive)) != nil {
+            try? fileManager.removeItem(at: archive)
         }
+    }
+
+    /// A model file whose size differs from the pin (a download truncated by an earlier build, which
+    /// moved files into place unchecked) counts as missing, so the next preparation downloads it again.
+    /// A symbolic link (a model kept on another volume) is judged by the file it points to.
+    static func completeModel(_ url: URL?, pinned file: WhisperModelFile) -> URL? {
+        guard let url,
+              let size = (try? FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path))?[.size] as? NSNumber,
+              size.int64Value == file.size
+        else { return nil }
+        return url
     }
 
     private func snapshot(for descriptor: WhisperModelDescriptor) throws -> WhisperModelSnapshot {
         WhisperModelSnapshot(
             descriptor: descriptor,
-            modelURL: try store.resolveLocalOrBundledURL(named: descriptor.ggmlFilename),
+            modelURL: Self.completeModel(try store.resolveLocalOrBundledURL(named: descriptor.ggmlFilename), pinned: descriptor.ggml),
             coreMLModelURL: try store.resolveLocalOrBundledURL(named: descriptor.coreMLDirectoryName, isDirectory: true)
         )
     }

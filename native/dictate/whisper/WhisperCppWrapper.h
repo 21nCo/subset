@@ -35,6 +35,9 @@ NS_ASSUME_NONNULL_BEGIN
                                              error:(NSError **)error;
 
 + (NSString *)version;
+/// Decodes whisper.cpp segment text, which is UTF-8. Invalid byte sequences become U+FFFD instead
+/// of dropping the segment.
++ (NSString *)stringFromSegmentText:(nullable const char *)text;
 - (BOOL)isUsingCoreML;
 
 @end

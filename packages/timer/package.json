@@ -23,7 +23,7 @@
     "fixtures": "npm run build && node scripts/contract-fixtures.mjs"
   },
   "dependencies": {
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "ajv": "^8.20.0",

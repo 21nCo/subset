@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@subset.dev/mgraph-contracts": "*",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",

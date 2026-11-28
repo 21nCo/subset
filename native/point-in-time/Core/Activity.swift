@@ -26,6 +26,34 @@ public struct Activity: Equatable, Sendable {
 }
 
 extension String {
+    /// The text with control characters (C0, DEL, C1, which include ESC, CR and LF), Unicode line and paragraph
+    /// separators, and invisible format characters (bidi overrides and isolates, zero-width spaces, the BOM) removed.
+    /// A window title is page content: a web page chooses it, so escape sequences or newlines in it must not reach a
+    /// terminal or an agent as forged output. Control characters and separators become a space so words stay apart;
+    /// the zero-width joiner and non-joiner, which emoji sequences and several scripts need, are kept.
+    var withoutControlCharacters: String {
+        guard unicodeScalars.contains(where: Self.isUnsafeScalar) else { return self }
+        var scalars = String.UnicodeScalarView()
+        for scalar in unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .lineSeparator, .paragraphSeparator: scalars.append(" ")
+            case .format where !Self.keptFormatScalars.contains(scalar.value): continue
+            default: scalars.append(scalar)
+            }
+        }
+        return String(scalars)
+    }
+
+    private static let keptFormatScalars: Set<UInt32> = [0x200C, 0x200D]
+
+    private static func isUnsafeScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .lineSeparator, .paragraphSeparator: return true
+        case .format: return !keptFormatScalars.contains(scalar.value)
+        default: return false
+        }
+    }
+
     /// The longest prefix of whole characters within both limits. It never splits a character, so it never ends in a
     /// partial scalar or a combining run cut from its base; a first character over the byte limit yields "".
     func boundedPrefix(characters maxCharacters: Int = .max, utf8Bytes maxBytes: Int) -> String {
@@ -143,11 +171,12 @@ public struct Segment: Equatable, Sendable {
         self.url = excluded ? nil : url
     }
 
-    /// A title trimmed and cut to whole characters within `Activity.maxTitleLength` and `Activity.maxTitleBytes`, or nil
-    /// when nothing remains. Trimming again after the cut makes this idempotent, so a stored title reads back unchanged.
+    /// A title without control or format characters (`withoutControlCharacters`), trimmed and cut to whole characters
+    /// within `Activity.maxTitleLength` and `Activity.maxTitleBytes`, or nil when nothing remains. Trimming again after
+    /// the cut makes this idempotent, so a stored title reads back unchanged.
     static func boundedTitle(_ title: String?) -> String? {
         guard let title else { return nil }
-        let bounded = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bounded = title.withoutControlCharacters.trimmingCharacters(in: .whitespacesAndNewlines)
             .boundedPrefix(characters: Activity.maxTitleLength, utf8Bytes: Activity.maxTitleBytes)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return bounded.isEmpty ? nil : bounded

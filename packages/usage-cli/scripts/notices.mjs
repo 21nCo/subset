@@ -45,8 +45,9 @@ SOFTWARE.`;
  * fails for any other package or version without a licence file.
  */
 const UPSTREAM_LICENCES = {
-  // https://github.com/21nCo/super-functions/blob/dev/LICENSE
+  // https://github.com/21nCo/superfunctions/blob/dev/LICENSE
   '@mcpfn/core@0.0.5': `MIT License\n\nCopyright (c) 2025 21n\n\n${MIT}`,
+  '@mcpfn/core@0.0.7': `MIT License\n\nCopyright (c) 2025 21n\n\n${MIT}`,
   // https://github.com/cfworker/cfworker/blob/main/LICENSE.md
   '@cfworker/json-schema@4.1.1': `MIT License\n\nCopyright (c) 2020 Jeremy Danyow\n\n${MIT}`,
 };

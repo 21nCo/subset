@@ -10,7 +10,7 @@
   "dependencies": {
     "@subset.dev/timer-core": "*",
     "svelte": "^5.57.1",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
